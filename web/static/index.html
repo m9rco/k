@@ -1,0 +1,111 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Game Asset Studio · 宣发素材工作台</title>
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+  <!-- 顶部品牌栏 -->
+  <header class="topbar">
+    <div class="brand">
+      <span class="brand-mark" aria-hidden="true"></span>
+      <span class="brand-name">Game Asset<strong>Studio</strong></span>
+    </div>
+    <div class="topbar-meta">
+      <div class="ctx-panel" id="ctxPanel" title="当前会话上下文">
+        <span class="ctx-dot" id="ctxDot"></span>
+        <span class="ctx-text" id="ctxText">连接中…</span>
+        <span class="ctx-budget" id="ctxBudget"></span>
+      </div>
+    </div>
+  </header>
+
+  <main class="layout">
+    <!-- 左：对话区 -->
+    <section class="chat" aria-label="对话区">
+      <div class="chat-log" id="chatLog">
+        <div class="msg msg-system welcome">
+          <p class="welcome-title">嗨，我是你的宣发素材助手。</p>
+          <p class="welcome-sub">上传一张图，告诉我你想做什么：</p>
+          <ul class="cap-list" id="capList"></ul>
+        </div>
+      </div>
+
+      <form class="composer" id="composer" autocomplete="off">
+        <button type="button" class="icon-btn" id="uploadBtn" title="上传图片">＋</button>
+        <input type="file" id="fileInput" accept="image/*" hidden />
+        <input type="text" id="msgInput" class="composer-input"
+               placeholder="例如：把背景换成夜晚的赛博朋克城市" />
+        <button type="submit" class="send-btn" id="sendBtn">发送</button>
+      </form>
+    </section>
+
+    <!-- 右：工作区 -->
+    <section class="workspace" aria-label="工作区">
+      <div class="ws-head">
+        <h2>工作区</h2>
+        <div class="ws-actions">
+          <button class="ghost-btn" id="selectAllBtn" hidden>全选</button>
+          <button class="primary-btn" id="zipBtn" hidden>打包下载</button>
+        </div>
+      </div>
+      <div class="ws-grid" id="wsGrid">
+        <div class="ws-empty" id="wsEmpty">
+          <div class="ws-empty-art" aria-hidden="true"></div>
+          <p>还没有素材。上传一张图或直接描述你的需求，产物会出现在这里。</p>
+        </div>
+      </div>
+
+      <!-- 偏好角落：无数据时隐藏 -->
+      <aside class="prefs-corner" id="prefsCorner" hidden>
+        <h3>偏好</h3>
+        <ul id="prefsList"></ul>
+      </aside>
+    </section>
+  </main>
+
+  <!-- 尺寸选择弹层（渠道 → 素材类型 → 尺寸 分层选择器） -->
+  <div class="capsule-sheet" id="capsuleSheet" hidden>
+    <div class="capsule-card">
+      <div class="capsule-head">
+        <span id="capsuleTitle">选择目标尺寸</span>
+        <button class="icon-btn" id="capsuleClose" title="关闭">×</button>
+      </div>
+      <div class="capsule-toolbar">
+        <input type="search" id="channelSearch" class="channel-search" placeholder="搜索渠道…" autocomplete="off" />
+        <div class="channel-groups" id="channelGroupTabs"></div>
+      </div>
+      <div class="capsule-body">
+        <div class="channel-list" id="channelList"></div>
+        <div class="size-panel" id="sizePanel"></div>
+      </div>
+      <div class="capsule-foot">
+        <span class="chosen-count" id="chosenCount">已选 0 项</span>
+        <button class="primary-btn" id="capsuleConfirm" disabled>裁剪所选</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- toast 容器 -->
+  <div class="toasts" id="toasts" aria-live="polite"></div>
+
+  <!-- 图片放大/二次调整预览 -->
+  <div class="lightbox" id="lightbox" hidden>
+    <div class="lightbox-inner">
+      <img id="lightboxImg" alt="预览" />
+      <div class="lightbox-actions">
+        <button class="ghost-btn" id="lbCropBtn">切尺寸</button>
+        <button class="ghost-btn" id="lbDownloadBtn">下载</button>
+        <button class="icon-btn" id="lbClose" title="关闭">×</button>
+      </div>
+      <input type="text" id="lbAdjustInput" class="composer-input"
+             placeholder="二次调整：描述你想怎么改这张图" />
+      <button class="primary-btn" id="lbAdjustBtn">应用调整</button>
+    </div>
+  </div>
+
+  <script src="/app.js" type="module"></script>
+</body>
+</html>

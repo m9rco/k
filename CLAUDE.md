@@ -16,7 +16,3 @@ Use `@/openspec/AGENTS.md` to learn:
 Keep this managed block so 'openspec update' can refresh the instructions.
 
 <!-- OPENSPEC:END -->
-
-# User Preferences
-- **Language**: Always respond and interact in Chinese (简体中文).
-- Code snippets, variable names, and technical terms should remain in English, but explanations, step-by-step guides, and casual chat must be in Chinese.

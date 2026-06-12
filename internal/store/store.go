@@ -1,0 +1,293 @@
+// Package store provides SQLite-backed persistence for sessions, generated
+// assets, and long-running task metadata. It uses the pure-Go modernc.org/sqlite
+// driver so the server stays a single static binary with no CGO.
+package store
+
+import (
+	"database/sql"
+	"fmt"
+	"os"
+	"path/filepath"
+	"time"
+
+	_ "modernc.org/sqlite"
+)
+
+// Store wraps a SQLite database handle.
+type Store struct {
+	db *sql.DB
+}
+
+// schema is applied on Open. It is idempotent (IF NOT EXISTS) so repeated
+// startups are safe. A preferences table is created now to reserve the slot for
+// the future memory system, even though the MVP does not write to it.
+const schema = `
+CREATE TABLE IF NOT EXISTS sessions (
+	id           TEXT PRIMARY KEY,
+	fingerprint  TEXT NOT NULL,
+	created_at   DATETIME NOT NULL,
+	last_seen_at DATETIME NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS assets (
+	id          TEXT PRIMARY KEY,
+	session_id  TEXT NOT NULL,
+	kind        TEXT NOT NULL,            -- upload | generated | cropped
+	path        TEXT NOT NULL,            -- local file path
+	mime        TEXT NOT NULL,
+	width       INTEGER NOT NULL DEFAULT 0,
+	height      INTEGER NOT NULL DEFAULT 0,
+	provider    TEXT NOT NULL DEFAULT '', -- which image provider produced it
+	parent_id   TEXT NOT NULL DEFAULT '', -- source asset for derived products
+	meta        TEXT NOT NULL DEFAULT '', -- JSON blob for extra metadata
+	created_at  DATETIME NOT NULL,
+	FOREIGN KEY (session_id) REFERENCES sessions(id)
+);
+CREATE INDEX IF NOT EXISTS idx_assets_session ON assets(session_id);
+
+CREATE TABLE IF NOT EXISTS tasks (
+	id          TEXT PRIMARY KEY,
+	session_id  TEXT NOT NULL,
+	kind        TEXT NOT NULL,            -- generate | crop
+	status      TEXT NOT NULL,            -- queued | running | done | failed
+	progress    INTEGER NOT NULL DEFAULT 0,
+	intent      TEXT NOT NULL DEFAULT '',
+	error       TEXT NOT NULL DEFAULT '',
+	asset_id    TEXT NOT NULL DEFAULT '', -- produced asset once done
+	created_at  DATETIME NOT NULL,
+	updated_at  DATETIME NOT NULL,
+	FOREIGN KEY (session_id) REFERENCES sessions(id)
+);
+CREATE INDEX IF NOT EXISTS idx_tasks_session ON tasks(session_id);
+
+-- Reserved for the future memory/preference system (not used in MVP).
+CREATE TABLE IF NOT EXISTS preferences (
+	id          TEXT PRIMARY KEY,
+	session_id  TEXT NOT NULL,
+	key         TEXT NOT NULL,
+	value       TEXT NOT NULL DEFAULT '',
+	created_at  DATETIME NOT NULL
+);
+`
+
+// Open opens (creating if needed) the SQLite database at dbPath and applies the
+// schema. Parent directories are created automatically.
+func Open(dbPath string) (*Store, error) {
+	if dir := filepath.Dir(dbPath); dir != "" && dir != "." {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return nil, fmt.Errorf("create db dir: %w", err)
+		}
+	}
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		return nil, fmt.Errorf("open sqlite: %w", err)
+	}
+	// SQLite handles concurrency best with a single writer; keep the pool small
+	// and enable WAL for better read/write interleaving.
+	db.SetMaxOpenConns(1)
+	if _, err := db.Exec("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;"); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("set pragmas: %w", err)
+	}
+	if _, err := db.Exec(schema); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("apply schema: %w", err)
+	}
+	return &Store{db: db}, nil
+}
+
+// Close releases the database handle.
+func (s *Store) Close() error { return s.db.Close() }
+
+// DB exposes the underlying handle for packages that need direct queries.
+func (s *Store) DB() *sql.DB { return s.db }
+
+// --- Sessions ---
+
+// SessionRecord is a persisted session row.
+type SessionRecord struct {
+	ID          string
+	Fingerprint string
+	CreatedAt   time.Time
+	LastSeenAt  time.Time
+}
+
+// UpsertSession inserts a new session or refreshes last_seen_at for an existing one.
+func (s *Store) UpsertSession(rec SessionRecord) error {
+	_, err := s.db.Exec(`
+		INSERT INTO sessions (id, fingerprint, created_at, last_seen_at)
+		VALUES (?, ?, ?, ?)
+		ON CONFLICT(id) DO UPDATE SET last_seen_at = excluded.last_seen_at`,
+		rec.ID, rec.Fingerprint, rec.CreatedAt, rec.LastSeenAt)
+	if err != nil {
+		return fmt.Errorf("upsert session: %w", err)
+	}
+	return nil
+}
+
+// GetSession returns the session row by id, or (nil, nil) if absent.
+func (s *Store) GetSession(id string) (*SessionRecord, error) {
+	row := s.db.QueryRow(`SELECT id, fingerprint, created_at, last_seen_at FROM sessions WHERE id = ?`, id)
+	var rec SessionRecord
+	err := row.Scan(&rec.ID, &rec.Fingerprint, &rec.CreatedAt, &rec.LastSeenAt)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("get session: %w", err)
+	}
+	return &rec, nil
+}
+
+// --- Assets ---
+
+// AssetRecord is a persisted asset row.
+type AssetRecord struct {
+	ID        string
+	SessionID string
+	Kind      string
+	Path      string
+	Mime      string
+	Width     int
+	Height    int
+	Provider  string
+	ParentID  string
+	Meta      string
+	CreatedAt time.Time
+}
+
+// InsertAsset persists a new asset.
+func (s *Store) InsertAsset(a AssetRecord) error {
+	_, err := s.db.Exec(`
+		INSERT INTO assets (id, session_id, kind, path, mime, width, height, provider, parent_id, meta, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		a.ID, a.SessionID, a.Kind, a.Path, a.Mime, a.Width, a.Height, a.Provider, a.ParentID, a.Meta, a.CreatedAt)
+	if err != nil {
+		return fmt.Errorf("insert asset: %w", err)
+	}
+	return nil
+}
+
+// GetAsset returns an asset by id scoped to a session, or (nil, nil) if not found.
+// Scoping by session enforces cross-session isolation at the data layer.
+func (s *Store) GetAsset(sessionID, id string) (*AssetRecord, error) {
+	row := s.db.QueryRow(`
+		SELECT id, session_id, kind, path, mime, width, height, provider, parent_id, meta, created_at
+		FROM assets WHERE id = ? AND session_id = ?`, id, sessionID)
+	var a AssetRecord
+	err := row.Scan(&a.ID, &a.SessionID, &a.Kind, &a.Path, &a.Mime, &a.Width, &a.Height, &a.Provider, &a.ParentID, &a.Meta, &a.CreatedAt)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("get asset: %w", err)
+	}
+	return &a, nil
+}
+
+// ListAssets returns all assets for a session, newest first.
+func (s *Store) ListAssets(sessionID string) ([]AssetRecord, error) {
+	rows, err := s.db.Query(`
+		SELECT id, session_id, kind, path, mime, width, height, provider, parent_id, meta, created_at
+		FROM assets WHERE session_id = ? ORDER BY created_at DESC`, sessionID)
+	if err != nil {
+		return nil, fmt.Errorf("list assets: %w", err)
+	}
+	defer rows.Close()
+	var out []AssetRecord
+	for rows.Next() {
+		var a AssetRecord
+		if err := rows.Scan(&a.ID, &a.SessionID, &a.Kind, &a.Path, &a.Mime, &a.Width, &a.Height, &a.Provider, &a.ParentID, &a.Meta, &a.CreatedAt); err != nil {
+			return nil, fmt.Errorf("scan asset: %w", err)
+		}
+		out = append(out, a)
+	}
+	return out, rows.Err()
+}
+
+// --- Tasks ---
+
+// TaskRecord is a persisted long-running task row.
+type TaskRecord struct {
+	ID        string
+	SessionID string
+	Kind      string
+	Status    string
+	Progress  int
+	Intent    string
+	Error     string
+	AssetID   string
+	CreatedAt time.Time
+	UpdatedAt time.Time
+}
+
+// InsertTask persists a new task.
+func (s *Store) InsertTask(t TaskRecord) error {
+	_, err := s.db.Exec(`
+		INSERT INTO tasks (id, session_id, kind, status, progress, intent, error, asset_id, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		t.ID, t.SessionID, t.Kind, t.Status, t.Progress, t.Intent, t.Error, t.AssetID, t.CreatedAt, t.UpdatedAt)
+	if err != nil {
+		return fmt.Errorf("insert task: %w", err)
+	}
+	return nil
+}
+
+// UpdateTask updates the mutable fields of a task.
+func (s *Store) UpdateTask(t TaskRecord) error {
+	_, err := s.db.Exec(`
+		UPDATE tasks SET status = ?, progress = ?, error = ?, asset_id = ?, updated_at = ?
+		WHERE id = ?`,
+		t.Status, t.Progress, t.Error, t.AssetID, t.UpdatedAt, t.ID)
+	if err != nil {
+		return fmt.Errorf("update task: %w", err)
+	}
+	return nil
+}
+
+// GetTask returns a task by id scoped to its session, or (nil, nil) if absent.
+func (s *Store) GetTask(sessionID, id string) (*TaskRecord, error) {
+	row := s.db.QueryRow(`
+		SELECT id, session_id, kind, status, progress, intent, error, asset_id, created_at, updated_at
+		FROM tasks WHERE id = ? AND session_id = ?`, id, sessionID)
+	var t TaskRecord
+	err := row.Scan(&t.ID, &t.SessionID, &t.Kind, &t.Status, &t.Progress, &t.Intent, &t.Error, &t.AssetID, &t.CreatedAt, &t.UpdatedAt)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("get task: %w", err)
+	}
+	return &t, nil
+}
+
+// ListTasks returns all tasks for a session, newest first.
+func (s *Store) ListTasks(sessionID string) ([]TaskRecord, error) {
+	rows, err := s.db.Query(`
+		SELECT id, session_id, kind, status, progress, intent, error, asset_id, created_at, updated_at
+		FROM tasks WHERE session_id = ? ORDER BY created_at DESC`, sessionID)
+	if err != nil {
+		return nil, fmt.Errorf("list tasks: %w", err)
+	}
+	defer rows.Close()
+	var out []TaskRecord
+	for rows.Next() {
+		var t TaskRecord
+		if err := rows.Scan(&t.ID, &t.SessionID, &t.Kind, &t.Status, &t.Progress, &t.Intent, &t.Error, &t.AssetID, &t.CreatedAt, &t.UpdatedAt); err != nil {
+			return nil, fmt.Errorf("scan task: %w", err)
+		}
+		out = append(out, t)
+	}
+	return out, rows.Err()
+}
+
+// CountActiveTasks returns how many tasks for a session are queued or running.
+func (s *Store) CountActiveTasks(sessionID string) (int, error) {
+	row := s.db.QueryRow(`
+		SELECT COUNT(*) FROM tasks WHERE session_id = ? AND status IN ('queued','running')`, sessionID)
+	var n int
+	if err := row.Scan(&n); err != nil {
+		return 0, fmt.Errorf("count active tasks: %w", err)
+	}
+	return n, nil
+}

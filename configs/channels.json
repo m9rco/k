@@ -1,0 +1,861 @@
+{
+  "channels": [
+    {
+      "id": "taptap",
+      "name": "TapTap",
+      "group": "外渠",
+      "assetTypes": [
+        {
+          "type": "screenshot",
+          "name": "截图（5图）",
+          "sizes": [
+            { "id": "taptap.screenshot.landscape", "name": "横版 16:9", "width": 1280, "height": 720, "orientation": "landscape", "format": "png", "note": "≥1280×720", "producible": true },
+            { "id": "taptap.screenshot.portrait", "name": "竖版 9:16", "width": 720, "height": 1280, "orientation": "portrait", "format": "png", "note": "≥720×1280", "producible": true }
+          ]
+        },
+        {
+          "type": "cover",
+          "name": "视频封面 / 封面图",
+          "sizes": [
+            { "id": "taptap.cover.900x600", "name": "视频封面", "width": 900, "height": 600, "orientation": "landscape", "format": "jpg", "note": "无文案", "producible": true },
+            { "id": "taptap.cover.caption", "name": "带文案封面图", "width": 900, "height": 600, "orientation": "landscape", "format": "jpg", "producible": true }
+          ]
+        },
+        {
+          "type": "icon",
+          "name": "ICON",
+          "sizes": [
+            { "id": "taptap.icon.512", "name": "ICON 512", "width": 512, "height": 512, "orientation": "square", "format": "png", "producible": true },
+            { "id": "taptap.icon.share-200", "name": "分享 ICON", "width": 200, "height": 200, "orientation": "square", "format": "png", "producible": true }
+          ]
+        },
+        {
+          "type": "banner",
+          "name": "推广图 / 资源位",
+          "sizes": [
+            { "id": "taptap.banner.community-1920x1080", "name": "推广图 / 社区头图", "width": 1920, "height": 1080, "orientation": "landscape", "note": "仅 logo，无文案", "producible": true },
+            { "id": "taptap.banner.placement", "name": "投放素材", "width": 1920, "height": 1080, "orientation": "landscape", "maxKB": 1024, "producible": true },
+            { "id": "taptap.banner.1120x280", "name": "Banner", "width": 1120, "height": 280, "orientation": "landscape", "producible": true },
+            { "id": "taptap.banner.today-1280x720", "name": "今日游戏", "width": 1280, "height": 720, "orientation": "landscape", "producible": true },
+            { "id": "taptap.banner.welfare-1920x1080", "name": "福利中心", "width": 1920, "height": 1080, "orientation": "landscape", "producible": true },
+            { "id": "taptap.banner.search-2080x828", "name": "搜索专题", "width": 2080, "height": 828, "orientation": "landscape", "producible": true },
+            { "id": "taptap.banner.push-900x480", "name": "站内信推送", "width": 900, "height": 480, "orientation": "landscape", "producible": true },
+            { "id": "taptap.banner.topic-home", "name": "专题首页", "width": 1920, "height": 1080, "orientation": "landscape", "producible": true },
+            { "id": "taptap.banner.video-cover-900x500", "name": "资源位视频封面", "width": 900, "height": 500, "orientation": "landscape", "producible": true }
+          ]
+        },
+        {
+          "type": "video",
+          "name": "视频（不可裁剪产出）",
+          "sizes": [
+            { "id": "taptap.video.landscape", "name": "横版视频 16:9", "width": 1920, "height": 1080, "orientation": "landscape", "format": "mp4", "note": "≥1280×720，≤500MB", "producible": false },
+            { "id": "taptap.video.portrait", "name": "竖版视频 9:16", "width": 1080, "height": 1920, "orientation": "portrait", "format": "mp4", "note": "≥720×1280，≤500MB", "producible": false }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "game4399",
+      "name": "4399",
+      "group": "外渠",
+      "assetTypes": [
+        {
+          "type": "screenshot",
+          "name": "截图（5图）",
+          "sizes": [
+            { "id": "game4399.screenshot.portrait", "name": "竖版", "width": 960, "height": 1600, "orientation": "portrait", "producible": true },
+            { "id": "game4399.screenshot.landscape", "name": "横版", "width": 1600, "height": 960, "orientation": "landscape", "producible": true }
+          ]
+        },
+        {
+          "type": "cover",
+          "name": "视频封面",
+          "sizes": [
+            { "id": "game4399.cover.720x405", "name": "视频封面（旧）", "width": 720, "height": 405, "orientation": "landscape", "producible": true },
+            { "id": "game4399.cover.1280x720", "name": "视频封面（新版）", "width": 1280, "height": 720, "orientation": "landscape", "producible": true }
+          ]
+        },
+        {
+          "type": "icon",
+          "name": "ICON",
+          "sizes": [
+            { "id": "game4399.icon.512", "name": "ICON 512", "width": 512, "height": 512, "orientation": "square", "format": "png", "producible": true }
+          ]
+        },
+        {
+          "type": "banner",
+          "name": "推广图 / H5",
+          "sizes": [
+            { "id": "game4399.banner.1950x500", "name": "推广图", "width": 1950, "height": 500, "orientation": "landscape", "note": "层次分明，带背景、角色，×1张", "producible": true },
+            { "id": "game4399.banner.h5-120", "name": "H5 活动图标", "width": 120, "height": 120, "orientation": "square", "maxKB": 100, "producible": true },
+            { "id": "game4399.banner.h5-400x200", "name": "H5 横图", "width": 400, "height": 200, "orientation": "landscape", "maxKB": 100, "producible": true },
+            { "id": "game4399.banner.h5-1920x1080", "name": "H5 大图", "width": 1920, "height": 1080, "orientation": "landscape", "maxKB": 500, "note": "含清晰游戏 logo", "producible": true }
+          ]
+        },
+        {
+          "type": "video",
+          "name": "视频（必须，不可裁剪产出）",
+          "sizes": [
+            { "id": "game4399.video.1280x720", "name": "介绍视频", "width": 1280, "height": 720, "orientation": "landscape", "format": "mp4", "note": "≥720×405，≤1G，≥30秒，真实游戏画面", "producible": false }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "haoyoukuaibao",
+      "name": "好游快爆",
+      "group": "外渠",
+      "assetTypes": [
+        {
+          "type": "screenshot",
+          "name": "截图（5图）",
+          "sizes": [
+            { "id": "haoyoukuaibao.screenshot.1280x720", "name": "截图", "width": 1280, "height": 720, "orientation": "landscape", "maxKB": 1024, "producible": true }
+          ]
+        },
+        {
+          "type": "cover",
+          "name": "视频封面",
+          "sizes": [
+            { "id": "haoyoukuaibao.cover.1280x720", "name": "视频封面", "width": 1280, "height": 720, "orientation": "landscape", "maxKB": 1024, "format": "jpg", "note": "无水印", "producible": true }
+          ]
+        },
+        {
+          "type": "icon",
+          "name": "ICON",
+          "sizes": [
+            { "id": "haoyoukuaibao.icon.256", "name": "ICON 256", "width": 256, "height": 256, "orientation": "square", "maxKB": 80, "format": "png", "note": "圆角", "producible": true }
+          ]
+        },
+        {
+          "type": "banner",
+          "name": "推广图 / 资源位 / H5",
+          "sizes": [
+            { "id": "haoyoukuaibao.banner.1280x720", "name": "推广图", "width": 1280, "height": 720, "orientation": "landscape", "maxKB": 1024, "note": "LOGO 居中或偏右，无广告语", "producible": true },
+            { "id": "haoyoukuaibao.banner.306x180", "name": "常规推荐图 306×180", "width": 306, "height": 180, "orientation": "landscape", "producible": true },
+            { "id": "haoyoukuaibao.banner.1000x500", "name": "常规推荐图 1000×500", "width": 1000, "height": 500, "orientation": "landscape", "producible": true },
+            { "id": "haoyoukuaibao.banner.1008x202", "name": "常规推荐图 1008×202", "width": 1008, "height": 202, "orientation": "landscape", "producible": true },
+            { "id": "haoyoukuaibao.banner.1000x562", "name": "常规推荐图 1000×562", "width": 1000, "height": 562, "orientation": "landscape", "producible": true },
+            { "id": "haoyoukuaibao.banner.1360x760", "name": "常规推荐图 1360×760", "width": 1360, "height": 760, "orientation": "landscape", "producible": true },
+            { "id": "haoyoukuaibao.banner.1360x640", "name": "常规推荐图 1360×640", "width": 1360, "height": 640, "orientation": "landscape", "producible": true },
+            { "id": "haoyoukuaibao.banner.1008x252", "name": "常规推荐图 1008×252", "width": 1008, "height": 252, "orientation": "landscape", "producible": true },
+            { "id": "haoyoukuaibao.banner.650x200", "name": "常规推荐图 650×200", "width": 650, "height": 200, "orientation": "landscape", "producible": true },
+            { "id": "haoyoukuaibao.banner.guide-1280x320", "name": "详情页引导 banner 1280×320", "width": 1280, "height": 320, "orientation": "landscape", "note": "不带游戏 logo", "producible": true },
+            { "id": "haoyoukuaibao.banner.guide-1008x168", "name": "详情页引导 banner 1008×168", "width": 1008, "height": 168, "orientation": "landscape", "note": "不带游戏 logo", "producible": true }
+          ]
+        },
+        {
+          "type": "video",
+          "name": "视频（必须，不可裁剪产出）",
+          "sizes": [
+            { "id": "haoyoukuaibao.video.1280x720", "name": "介绍视频", "width": 1280, "height": 720, "orientation": "landscape", "format": "mp4", "note": "≥720×405，≤1G，≥30秒", "producible": false }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "bilibili",
+      "name": "B站（bilibili）",
+      "group": "外渠",
+      "assetTypes": [
+        {
+          "type": "screenshot",
+          "name": "截图（最多10张）",
+          "sizes": [
+            { "id": "bilibili.screenshot.portrait", "name": "竖版", "width": 720, "height": 1280, "orientation": "portrait", "format": "jpg", "maxKB": 200, "producible": true },
+            { "id": "bilibili.screenshot.landscape", "name": "横版", "width": 1280, "height": 720, "orientation": "landscape", "format": "jpg", "maxKB": 200, "producible": true }
+          ]
+        },
+        {
+          "type": "cover",
+          "name": "视频封面",
+          "sizes": [
+            { "id": "bilibili.cover.720x404", "name": "视频封面", "width": 720, "height": 404, "orientation": "landscape", "format": "jpg", "maxKB": 200, "producible": true }
+          ]
+        },
+        {
+          "type": "icon",
+          "name": "ICON",
+          "sizes": [
+            { "id": "bilibili.icon.512", "name": "ICON 512", "width": 512, "height": 512, "orientation": "square", "maxKB": 300, "note": "直角", "producible": true }
+          ]
+        },
+        {
+          "type": "banner",
+          "name": "PC 背景 / logo / 推广 / H5",
+          "sizes": [
+            { "id": "bilibili.banner.pc-bg-1920x620", "name": "PC 端背景图", "width": 1920, "height": 620, "orientation": "landscape", "maxKB": 500, "note": "无 logo，无渐变蒙版，中心下方预留 logo 位", "producible": true },
+            { "id": "bilibili.banner.pc-logo-340x160", "name": "PC 端游戏 logo", "width": 340, "height": 160, "orientation": "landscape", "maxKB": 30, "format": "png", "note": "透明背景", "producible": true },
+            { "id": "bilibili.banner.promo-720x280", "name": "推广素材", "width": 720, "height": 280, "orientation": "landscape", "maxKB": 100, "producible": true },
+            { "id": "bilibili.banner.h5-pc-1920x1080", "name": "H5 PC 端", "width": 1920, "height": 1080, "orientation": "landscape", "producible": true }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "huya",
+      "name": "虎牙",
+      "group": "外渠",
+      "assetTypes": [
+        {
+          "type": "screenshot",
+          "name": "截图（5图）",
+          "sizes": [
+            { "id": "huya.screenshot.landscape", "name": "横版", "width": 1280, "height": 720, "orientation": "landscape", "maxKB": 1024, "note": "推荐横版，需 2 整套不同风格", "producible": true },
+            { "id": "huya.screenshot.portrait", "name": "竖版", "width": 720, "height": 1280, "orientation": "portrait", "maxKB": 1024, "producible": true }
+          ]
+        },
+        {
+          "type": "cover",
+          "name": "视频封面",
+          "sizes": [
+            { "id": "huya.cover.1280x720", "name": "视频封面", "width": 1280, "height": 720, "orientation": "landscape", "maxKB": 1024, "producible": true }
+          ]
+        },
+        {
+          "type": "icon",
+          "name": "ICON / 礼包",
+          "sizes": [
+            { "id": "huya.icon.512", "name": "游戏 ICON", "width": 512, "height": 512, "orientation": "square", "producible": true },
+            { "id": "huya.icon.gift-150", "name": "游戏礼包素材", "width": 150, "height": 150, "orientation": "square", "format": "png", "note": "直角，透明底", "producible": true }
+          ]
+        },
+        {
+          "type": "banner",
+          "name": "宣传 banner",
+          "sizes": [
+            { "id": "huya.banner.1280x720", "name": "宣传 banner", "width": 1280, "height": 720, "orientation": "landscape", "maxKB": 1024, "note": "无按钮", "producible": true }
+          ]
+        },
+        {
+          "type": "video",
+          "name": "视频（不可裁剪产出）",
+          "sizes": [
+            { "id": "huya.video.1920x1080", "name": "介绍视频", "width": 1920, "height": 1080, "orientation": "landscape", "format": "mp4", "note": "≤100MB，约 30 秒", "producible": false }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "wegame",
+      "name": "WeGame",
+      "group": "PC",
+      "assetTypes": [
+        {
+          "type": "banner",
+          "name": "轮播图 / 广告",
+          "sizes": [
+            { "id": "wegame.banner.1920x1080", "name": "详情页轮播图", "width": 1920, "height": 1080, "orientation": "landscape", "producible": true },
+            { "id": "wegame.banner.detail-ad-2000x400", "name": "详情页小图广告", "width": 2000, "height": 400, "orientation": "landscape", "format": "jpg", "producible": true }
+          ]
+        },
+        {
+          "type": "cover",
+          "name": "轮播小图封面",
+          "sizes": [
+            { "id": "wegame.cover.496x280", "name": "轮播小图封面", "width": 496, "height": 280, "orientation": "landscape", "producible": true }
+          ]
+        },
+        {
+          "type": "video",
+          "name": "视频（不可裁剪产出）",
+          "sizes": [
+            { "id": "wegame.video.1920x1080", "name": "轮播视频 1080P", "width": 1920, "height": 1080, "orientation": "landscape", "format": "mp4", "note": "≤500MB，码率 ≥2500kbps", "producible": false },
+            { "id": "wegame.video.bg-1920x650", "name": "背景沉浸模式视频", "width": 1920, "height": 650, "orientation": "landscape", "format": "mp4", "note": "≤50MB，自动居中裁切", "producible": false }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "huawei",
+      "name": "华为",
+      "group": "手机厂商",
+      "assetTypes": [
+        {
+          "type": "screenshot",
+          "name": "截图（5图）",
+          "sizes": [
+            { "id": "huawei.screenshot.450x800", "name": "截图", "width": 450, "height": 800, "orientation": "portrait", "format": "png", "maxKB": 2048, "producible": true }
+          ]
+        },
+        {
+          "type": "cover",
+          "name": "视频海报帧",
+          "sizes": [
+            { "id": "huawei.cover.intro-portrait", "name": "介绍视频海报帧 竖版", "width": 450, "height": 800, "orientation": "portrait", "maxKB": 2048, "producible": true },
+            { "id": "huawei.cover.intro-landscape", "name": "介绍视频海报帧 横版", "width": 800, "height": 450, "orientation": "landscape", "maxKB": 2048, "producible": true },
+            { "id": "huawei.cover.recommend-960x720", "name": "推荐视频海报帧 4:3", "width": 960, "height": 720, "orientation": "landscape", "maxKB": 2048, "producible": true }
+          ]
+        },
+        {
+          "type": "icon",
+          "name": "ICON",
+          "sizes": [
+            { "id": "huawei.icon.216", "name": "ICON 216", "width": 216, "height": 216, "orientation": "square", "format": "png", "producible": true }
+          ]
+        },
+        {
+          "type": "banner",
+          "name": "预约大图",
+          "sizes": [
+            { "id": "huawei.banner.1280x720", "name": "预约大图", "width": 1280, "height": 720, "orientation": "landscape", "maxKB": 2048, "producible": true }
+          ]
+        },
+        {
+          "type": "video",
+          "name": "视频（不可裁剪产出）",
+          "sizes": [
+            { "id": "huawei.video.intro-1280x720", "name": "介绍视频 16:9", "width": 1280, "height": 720, "orientation": "landscape", "format": "mp4", "note": "≤500MB，15秒~2分钟", "producible": false },
+            { "id": "huawei.video.recommend-1600x1200", "name": "推荐视频 4:3", "width": 1600, "height": 1200, "orientation": "landscape", "format": "mp4", "note": "≤500MB", "producible": false }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "oppo",
+      "name": "OPPO",
+      "group": "手机厂商",
+      "assetTypes": [
+        {
+          "type": "screenshot",
+          "name": "截图（5图）",
+          "sizes": [
+            { "id": "oppo.screenshot.portrait", "name": "竖版（必须）", "width": 720, "height": 1280, "orientation": "portrait", "format": "jpg", "maxKB": 150, "producible": true },
+            { "id": "oppo.screenshot.landscape", "name": "横版（非必须）", "width": 1915, "height": 1080, "orientation": "landscape", "format": "jpg", "maxKB": 1024, "producible": true }
+          ]
+        },
+        {
+          "type": "icon",
+          "name": "ICON",
+          "sizes": [
+            { "id": "oppo.icon.256", "name": "ICON 256", "width": 256, "height": 256, "orientation": "square", "format": "png", "maxKB": 50, "producible": true }
+          ]
+        },
+        {
+          "type": "banner",
+          "name": "宣传图 / 背景",
+          "sizes": [
+            { "id": "oppo.banner.top-720x432", "name": "顶部宣传图 720×432", "width": 720, "height": 432, "orientation": "landscape", "maxKB": 150, "producible": true },
+            { "id": "oppo.banner.top-1080x1476", "name": "顶部宣传图 1080×1476", "width": 1080, "height": 1476, "orientation": "portrait", "maxKB": 200, "producible": true },
+            { "id": "oppo.banner.bg-1080x990", "name": "定制背景图", "width": 1080, "height": 990, "orientation": "landscape", "maxKB": 1024, "note": "需提供蒙版色+高亮色号", "producible": true }
+          ]
+        },
+        {
+          "type": "video",
+          "name": "视频（不可裁剪产出）",
+          "sizes": [
+            { "id": "oppo.video", "name": "视频", "width": 1920, "height": 1080, "orientation": "landscape", "format": "mp4", "note": "≤500MB", "producible": false }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "vivo",
+      "name": "vivo",
+      "group": "手机厂商",
+      "assetTypes": [
+        {
+          "type": "screenshot",
+          "name": "截图（5图）",
+          "sizes": [
+            { "id": "vivo.screenshot.1080x720", "name": "截图", "width": 1080, "height": 720, "orientation": "landscape", "format": "jpg", "maxKB": 200, "producible": true }
+          ]
+        },
+        {
+          "type": "cover",
+          "name": "视频封面",
+          "sizes": [
+            { "id": "vivo.cover.984x554", "name": "视频封面", "width": 984, "height": 554, "orientation": "landscape", "format": "jpg", "maxKB": 100, "producible": true }
+          ]
+        },
+        {
+          "type": "icon",
+          "name": "ICON",
+          "sizes": [
+            { "id": "vivo.icon.256", "name": "ICON 256", "width": 256, "height": 256, "orientation": "square", "format": "jpg", "maxKB": 50, "producible": true }
+          ]
+        },
+        {
+          "type": "banner",
+          "name": "预约宣传图 / 头图",
+          "sizes": [
+            { "id": "vivo.banner.1080x380", "name": "预约宣传图", "width": 1080, "height": 380, "orientation": "landscape", "format": "jpg", "maxKB": 200, "producible": true },
+            { "id": "vivo.banner.1080x1400", "name": "预约头图", "width": 1080, "height": 1400, "orientation": "portrait", "format": "jpg", "maxKB": 200, "producible": true }
+          ]
+        },
+        {
+          "type": "video",
+          "name": "视频（不可裁剪产出）",
+          "sizes": [
+            { "id": "vivo.video.1920x1080", "name": "视频", "width": 1920, "height": 1080, "orientation": "landscape", "format": "mp4", "note": "≤50MB", "producible": false }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "xiaomi",
+      "name": "小米",
+      "group": "手机厂商",
+      "assetTypes": [
+        {
+          "type": "screenshot",
+          "name": "截图（5图）",
+          "sizes": [
+            { "id": "xiaomi.screenshot.1920x1080", "name": "截图", "width": 1920, "height": 1080, "orientation": "landscape", "maxKB": 5120, "note": "需添加适龄标识", "producible": true }
+          ]
+        },
+        {
+          "type": "icon",
+          "name": "ICON",
+          "sizes": [
+            { "id": "xiaomi.icon.512", "name": "ICON 512", "width": 512, "height": 512, "orientation": "square", "format": "png", "producible": true }
+          ]
+        },
+        {
+          "type": "banner",
+          "name": "预约 banner",
+          "sizes": [
+            { "id": "xiaomi.banner.1080x608", "name": "预约 banner", "width": 1080, "height": 608, "orientation": "landscape", "producible": true }
+          ]
+        },
+        {
+          "type": "video",
+          "name": "视频（不可裁剪产出）",
+          "sizes": [
+            { "id": "xiaomi.video.1920x1080", "name": "视频", "width": 1920, "height": 1080, "orientation": "landscape", "note": "建议 1280×720 或 1920×1080，≤5分钟", "producible": false }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "honor",
+      "name": "荣耀",
+      "group": "手机厂商",
+      "assetTypes": [
+        {
+          "type": "screenshot",
+          "name": "截图",
+          "sizes": [
+            { "id": "honor.screenshot.landscape", "name": "横向", "width": 1920, "height": 1080, "orientation": "landscape", "maxKB": 5120, "producible": true },
+            { "id": "honor.screenshot.portrait", "name": "纵向", "width": 1080, "height": 1920, "orientation": "portrait", "maxKB": 5120, "producible": true }
+          ]
+        },
+        {
+          "type": "icon",
+          "name": "ICON / 礼包",
+          "sizes": [
+            { "id": "honor.icon.512", "name": "ICON 512", "width": 512, "height": 512, "orientation": "square", "maxKB": 200, "producible": true },
+            { "id": "honor.icon.gift-160", "name": "礼包图标", "width": 160, "height": 160, "orientation": "square", "producible": true }
+          ]
+        },
+        {
+          "type": "banner",
+          "name": "预约大图",
+          "sizes": [
+            { "id": "honor.banner.1280x720", "name": "预约大图", "width": 1280, "height": 720, "orientation": "landscape", "maxKB": 5120, "producible": true }
+          ]
+        },
+        {
+          "type": "video",
+          "name": "视频（不可裁剪产出）",
+          "sizes": [
+            { "id": "honor.video.intro-landscape", "name": "介绍视频 横向 16:9", "width": 1280, "height": 720, "orientation": "landscape", "format": "mp4", "note": "≤500MB", "producible": false },
+            { "id": "honor.video.intro-portrait", "name": "介绍视频 纵向 9:16", "width": 720, "height": 1280, "orientation": "portrait", "format": "mp4", "note": "≤500MB", "producible": false },
+            { "id": "honor.video.recommend-1440x810", "name": "推荐视频", "width": 1440, "height": 810, "orientation": "landscape", "format": "mp4", "note": "≤500MB", "producible": false }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "txvideo",
+      "name": "腾讯视频",
+      "group": "腾讯内渠",
+      "assetTypes": [
+        {
+          "type": "sellingpoint",
+          "name": "卖点图（5张）",
+          "sizes": [
+            { "id": "txvideo.sellingpoint.480x800", "name": "卖点图 480×800", "width": 480, "height": 800, "orientation": "portrait", "format": "jpg", "maxKB": 1024, "producible": true },
+            { "id": "txvideo.sellingpoint.720x1280", "name": "卖点图 720×1280", "width": 720, "height": 1280, "orientation": "portrait", "format": "jpg", "maxKB": 1024, "producible": true },
+            { "id": "txvideo.sellingpoint.1080x1920", "name": "卖点图 1080×1920", "width": 1080, "height": 1920, "orientation": "portrait", "format": "jpg", "maxKB": 1024, "producible": true }
+          ]
+        },
+        {
+          "type": "cover",
+          "name": "视频封面配图",
+          "sizes": [
+            { "id": "txvideo.cover.720x406", "name": "视频封面配图", "width": 720, "height": 406, "orientation": "landscape", "format": "jpg", "maxKB": 150, "note": "无按钮", "producible": true }
+          ]
+        },
+        {
+          "type": "icon",
+          "name": "ICON",
+          "sizes": [
+            { "id": "txvideo.icon.150", "name": "ICON 150", "width": 150, "height": 150, "orientation": "square", "format": "png", "maxKB": 200, "producible": true }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "qqmusic",
+      "name": "QQ 音乐",
+      "group": "腾讯内渠",
+      "assetTypes": [
+        {
+          "type": "sellingpoint",
+          "name": "卖点图（1~6张）",
+          "sizes": [
+            { "id": "qqmusic.sellingpoint.1080x1920", "name": "卖点图 竖版", "width": 1080, "height": 1920, "orientation": "portrait", "producible": true }
+          ]
+        },
+        {
+          "type": "icon",
+          "name": "ICON",
+          "sizes": [
+            { "id": "qqmusic.icon.150", "name": "ICON 150", "width": 150, "height": 150, "orientation": "square", "producible": true }
+          ]
+        },
+        {
+          "type": "banner",
+          "name": "头图 / 资源位",
+          "sizes": [
+            { "id": "qqmusic.banner.header-1080x432", "name": "游戏头图", "width": 1080, "height": 432, "orientation": "landscape", "producible": true },
+            { "id": "qqmusic.banner.zone-home-700x560", "name": "游戏专区首页 banner", "width": 700, "height": 560, "orientation": "landscape", "note": "须带文案，突出游戏名", "producible": true },
+            { "id": "qqmusic.banner.zone-grid-540x960", "name": "游戏专区宫格", "width": 540, "height": 960, "orientation": "portrait", "note": "须带文案，突出游戏名", "producible": true }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "ios",
+      "name": "iOS App Store",
+      "group": "腾讯内渠",
+      "assetTypes": [
+        {
+          "type": "screenshot",
+          "name": "截图（5图）",
+          "sizes": [
+            { "id": "ios.screenshot.2208x1242", "name": "截图 2208×1242", "width": 2208, "height": 1242, "orientation": "landscape", "producible": true },
+            { "id": "ios.screenshot.2732x2048", "name": "截图 2732×2048", "width": 2732, "height": 2048, "orientation": "landscape", "producible": true },
+            { "id": "ios.screenshot.2688x1242", "name": "截图 2688×1242", "width": 2688, "height": 1242, "orientation": "landscape", "producible": true }
+          ]
+        },
+        {
+          "type": "other",
+          "name": "其他图",
+          "sizes": [
+            { "id": "ios.other.2732x2048", "name": "其他图", "width": 2732, "height": 2048, "orientation": "landscape", "producible": true }
+          ]
+        },
+        {
+          "type": "video",
+          "name": "视频（不可裁剪产出）",
+          "sizes": [
+            { "id": "ios.video.2688x1242", "name": "视频", "width": 2688, "height": 1242, "orientation": "landscape", "producible": false }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "douyin",
+      "name": "抖音",
+      "group": "腾讯内渠",
+      "assetTypes": [
+        {
+          "type": "screenshot",
+          "name": "截图（5图）",
+          "sizes": [
+            { "id": "douyin.screenshot.portrait", "name": "竖版 9:16", "width": 720, "height": 1280, "orientation": "portrait", "note": "≥720×1280", "producible": true }
+          ]
+        },
+        {
+          "type": "icon",
+          "name": "ICON",
+          "sizes": [
+            { "id": "douyin.icon.512", "name": "ICON 512", "width": 512, "height": 512, "orientation": "square", "maxKB": 1024, "producible": true }
+          ]
+        },
+        {
+          "type": "banner",
+          "name": "宣传图 / 视频封面",
+          "sizes": [
+            { "id": "douyin.banner.960x540", "name": "宣传图 / 视频封面 16:9", "width": 960, "height": 540, "orientation": "landscape", "maxKB": 5120, "note": "≥960×540", "producible": true }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "kuaishou",
+      "name": "快手",
+      "group": "腾讯内渠",
+      "assetTypes": [
+        {
+          "type": "screenshot",
+          "name": "截图（3~5张）",
+          "sizes": [
+            { "id": "kuaishou.screenshot.portrait", "name": "竖版", "width": 720, "height": 1280, "orientation": "portrait", "format": "jpg", "maxKB": 300, "producible": true },
+            { "id": "kuaishou.screenshot.landscape", "name": "横版", "width": 1280, "height": 720, "orientation": "landscape", "format": "jpg", "maxKB": 300, "producible": true }
+          ]
+        },
+        {
+          "type": "cover",
+          "name": "banner / 封面图",
+          "sizes": [
+            { "id": "kuaishou.cover.banner-960x540", "name": "banner 图", "width": 960, "height": 540, "orientation": "landscape", "producible": true },
+            { "id": "kuaishou.cover.960x540", "name": "封面图", "width": 960, "height": 540, "orientation": "landscape", "producible": true }
+          ]
+        },
+        {
+          "type": "icon",
+          "name": "ICON",
+          "sizes": [
+            { "id": "kuaishou.icon.static-256", "name": "ICON 静态", "width": 256, "height": 256, "orientation": "square", "format": "jpg", "maxKB": 80, "note": "直角", "producible": true },
+            { "id": "kuaishou.icon.dynamic-256", "name": "ICON 动态 GIF", "width": 256, "height": 256, "orientation": "square", "format": "gif", "maxKB": 200, "note": "动图，≤15帧/秒，不可由裁剪产出", "producible": false }
+          ]
+        },
+        {
+          "type": "video",
+          "name": "视频（不可裁剪产出）",
+          "sizes": [
+            { "id": "kuaishou.video.1280x720", "name": "视频", "width": 1280, "height": 720, "orientation": "landscape", "format": "mp4", "note": "≤60秒，≤10MB", "producible": false }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "feiying",
+      "name": "飞鹰",
+      "group": "腾讯内渠",
+      "assetTypes": [
+        {
+          "type": "screenshot",
+          "name": "截图",
+          "sizes": [
+            { "id": "feiying.screenshot.1080x1920", "name": "截图", "width": 1080, "height": 1920, "orientation": "portrait", "maxKB": 5120, "producible": true }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "qq",
+      "name": "QQ",
+      "group": "腾讯内渠",
+      "assetTypes": [
+        {
+          "type": "icon",
+          "name": "ICON",
+          "sizes": [
+            { "id": "qq.icon.120", "name": "ICON 120", "width": 120, "height": 120, "orientation": "square", "format": "png", "maxKB": 20, "producible": true }
+          ]
+        },
+        {
+          "type": "h5",
+          "name": "H5 素材",
+          "sizes": [
+            { "id": "qq.h5.promo-640x360", "name": "宣传五图", "width": 640, "height": 360, "orientation": "landscape", "maxKB": 150, "producible": true },
+            { "id": "qq.h5.milestone-640x360", "name": "里程碑图", "width": 640, "height": 360, "orientation": "landscape", "maxKB": 150, "producible": true },
+            { "id": "qq.h5.material-100", "name": "素材图", "width": 100, "height": 100, "orientation": "square", "maxKB": 100, "producible": true }
+          ]
+        },
+        {
+          "type": "banner",
+          "name": "公众号 banner",
+          "sizes": [
+            { "id": "qq.banner.official-900x500", "name": "公众号", "width": 900, "height": 500, "orientation": "landscape", "format": "jpg", "maxKB": 500, "note": "边距 40px 不可放重要信息", "producible": true }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "weixin",
+      "name": "微信",
+      "group": "腾讯内渠",
+      "assetTypes": [
+        {
+          "type": "h5",
+          "name": "H5 长图",
+          "sizes": [
+            { "id": "weixin.h5.828w", "name": "H5 长图", "width": 828, "height": 1500, "orientation": "portrait", "format": "png", "maxKB": 500, "note": "宽 828，高 ≤1500", "producible": true }
+          ]
+        },
+        {
+          "type": "banner",
+          "name": "卡片资源位",
+          "sizes": [
+            { "id": "weixin.banner.unified-900x383", "name": "统一卡 / 统一卡片", "width": 900, "height": 383, "orientation": "landscape", "producible": true },
+            { "id": "weixin.banner.findgame-750x422", "name": "找游戏卡 / 富态卡", "width": 750, "height": 422, "orientation": "landscape", "producible": true }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "yyb",
+      "name": "应用宝",
+      "group": "腾讯内渠",
+      "assetTypes": [
+        {
+          "type": "icon",
+          "name": "ICON",
+          "sizes": [
+            { "id": "yyb.icon.300", "name": "ICON 300", "width": 300, "height": 300, "orientation": "square", "producible": true }
+          ]
+        },
+        {
+          "type": "banner",
+          "name": "banner / 品专",
+          "sizes": [
+            { "id": "yyb.banner.header-1080x600", "name": "头部 banner", "width": 1080, "height": 600, "orientation": "landscape", "format": "jpg", "maxKB": 200, "producible": true },
+            { "id": "yyb.banner.search-1008x480", "name": "搜索结果页品专 1008×480", "width": 1008, "height": 480, "orientation": "landscape", "maxKB": 200, "producible": true },
+            { "id": "yyb.banner.search-984x552", "name": "搜索结果页品专 984×552", "width": 984, "height": 552, "orientation": "landscape", "maxKB": 200, "producible": true }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "qqbrowser",
+      "name": "QQ 浏览器",
+      "group": "腾讯内渠",
+      "assetTypes": [
+        {
+          "type": "icon",
+          "name": "ICON",
+          "sizes": [
+            { "id": "qqbrowser.icon.100", "name": "ICON 100", "width": 100, "height": 100, "orientation": "square", "producible": true }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "txgamephone",
+      "name": "腾讯游戏手机（手机管家）",
+      "group": "腾讯内渠",
+      "assetTypes": [
+        {
+          "type": "icon",
+          "name": "ICON",
+          "sizes": [
+            { "id": "txgamephone.icon.512", "name": "ICON 512（详情页）", "width": 512, "height": 512, "orientation": "square", "producible": true },
+            { "id": "txgamephone.icon.dynamic-256", "name": "动态 ICON", "width": 256, "height": 256, "orientation": "square", "maxKB": 500, "note": "动图，不可由裁剪产出", "producible": false }
+          ]
+        },
+        {
+          "type": "banner",
+          "name": "应用商店 / 搜索 / 游戏中心 banner",
+          "sizes": [
+            { "id": "txgamephone.banner.store-1233x510", "name": "应用商店首页 banner 核心区", "width": 1233, "height": 510, "orientation": "landscape", "note": "带文案和游戏 logo", "producible": true },
+            { "id": "txgamephone.banner.splash-822x1782", "name": "开屏广告位", "width": 822, "height": 1782, "orientation": "portrait", "format": "jpg", "note": "核心 682×1430，无按钮", "producible": true },
+            { "id": "txgamephone.banner.desktop-search-1161x420", "name": "桌面搜索 banner", "width": 1161, "height": 420, "orientation": "landscape", "note": "核心 1101×210，需含广告字样", "producible": true },
+            { "id": "txgamephone.banner.gamecenter-1146x636", "name": "游戏中心 banner", "width": 1146, "height": 636, "orientation": "landscape", "note": "带文案和游戏 logo", "producible": true },
+            { "id": "txgamephone.banner.popup-1110x1035", "name": "弹屏", "width": 1110, "height": 1035, "orientation": "landscape", "format": "png", "note": "核心 891×966", "producible": true },
+            { "id": "txgamephone.banner.tab5-320x210", "name": "第五 Tab", "width": 320, "height": 210, "orientation": "landscape", "note": "动图/静图均需提供", "producible": true }
+          ]
+        },
+        {
+          "type": "cover",
+          "name": "视频卡片封面",
+          "sizes": [
+            { "id": "txgamephone.cover.1146x636", "name": "视频卡片封面", "width": 1146, "height": 636, "orientation": "landscape", "note": "不带文案，带游戏 logo", "producible": true }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "guanjia",
+      "name": "手机 / 电脑管家",
+      "group": "腾讯内渠",
+      "assetTypes": [
+        {
+          "type": "icon",
+          "name": "ICON",
+          "sizes": [
+            { "id": "guanjia.icon.256", "name": "ICON 256", "width": 256, "height": 256, "orientation": "square", "format": "png", "note": "圆角和方角各一个", "producible": true }
+          ]
+        },
+        {
+          "type": "banner",
+          "name": "资源位",
+          "sizes": [
+            { "id": "guanjia.banner.carousel-984x555", "name": "轮播 banner", "width": 984, "height": 555, "orientation": "landscape", "producible": true },
+            { "id": "guanjia.banner.card-984x555", "name": "内容卡片", "width": 984, "height": 555, "orientation": "landscape", "producible": true },
+            { "id": "guanjia.banner.calendar-600x300", "name": "日历卡片", "width": 600, "height": 300, "orientation": "landscape", "producible": true },
+            { "id": "guanjia.banner.pc-strip-910x258", "name": "电脑管家活动中心通栏", "width": 910, "height": 258, "orientation": "landscape", "producible": true },
+            { "id": "guanjia.banner.pc-topic-372x203", "name": "电脑管家专题卡片", "width": 372, "height": 203, "orientation": "landscape", "producible": true }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "txnews",
+      "name": "腾讯新闻",
+      "group": "腾讯内渠",
+      "assetTypes": [
+        {
+          "type": "icon",
+          "name": "ICON",
+          "sizes": [
+            { "id": "txnews.icon.114", "name": "ICON 114", "width": 114, "height": 114, "orientation": "square", "producible": true }
+          ]
+        },
+        {
+          "type": "h5",
+          "name": "H5 长图",
+          "sizes": [
+            { "id": "txnews.h5.750w", "name": "H5 长图", "width": 750, "height": 1280, "orientation": "portrait", "note": "宽 750，高 ≥1280，顶部预留 80px 出血", "producible": true }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "txaccel",
+      "name": "腾讯手游加速器",
+      "group": "腾讯内渠",
+      "assetTypes": [
+        {
+          "type": "icon",
+          "name": "ICON",
+          "sizes": [
+            { "id": "txaccel.icon.300", "name": "ICON 300（小拍脸/热门）", "width": 300, "height": 300, "orientation": "square", "producible": true }
+          ]
+        },
+        {
+          "type": "banner",
+          "name": "资源位",
+          "sizes": [
+            { "id": "txaccel.banner.splash-1125x2436", "name": "闪屏", "width": 1125, "height": 2436, "orientation": "portrait", "producible": true },
+            { "id": "txaccel.banner.1000x560", "name": "banner", "width": 1000, "height": 560, "orientation": "landscape", "producible": true },
+            { "id": "txaccel.banner.bigface-1320x1432", "name": "大拍脸", "width": 1320, "height": 1432, "orientation": "portrait", "producible": true },
+            { "id": "txaccel.banner.hot-strip-480x108", "name": "热门页横屏 banner", "width": 480, "height": 108, "orientation": "landscape", "producible": true }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "txcomic",
+      "name": "腾讯动漫",
+      "group": "腾讯内渠",
+      "assetTypes": [
+        {
+          "type": "icon",
+          "name": "ICON",
+          "sizes": [
+            { "id": "txcomic.icon.100", "name": "ICON 100", "width": 100, "height": 100, "orientation": "square", "producible": true }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "xinyue",
+      "name": "心悦",
+      "group": "腾讯内渠",
+      "assetTypes": [
+        {
+          "type": "icon",
+          "name": "ICON",
+          "sizes": [
+            { "id": "xinyue.icon.100", "name": "ICON 100", "width": 100, "height": 100, "orientation": "square", "note": "≥100×100", "producible": true }
+          ]
+        }
+      ]
+    }
+  ]
+}
