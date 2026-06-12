@@ -1,0 +1,36 @@
+{
+  "platforms": [
+    {
+      "name": "Universal",
+      "sizes": [
+        { "name": "Square", "width": 1080, "height": 1080, "orientation": "square" },
+        { "name": "Landscape 16:9", "width": 1920, "height": 1080, "orientation": "landscape" },
+        { "name": "Portrait 9:16", "width": 1080, "height": 1920, "orientation": "portrait" }
+      ]
+    },
+    {
+      "name": "Social Feed",
+      "sizes": [
+        { "name": "Feed Portrait 4:5", "width": 1080, "height": 1350, "orientation": "portrait" },
+        { "name": "Feed Landscape 1.91:1", "width": 1200, "height": 628, "orientation": "landscape" },
+        { "name": "Story 9:16", "width": 1080, "height": 1920, "orientation": "portrait" }
+      ]
+    },
+    {
+      "name": "App Store",
+      "sizes": [
+        { "name": "Screenshot Portrait", "width": 1242, "height": 2688, "orientation": "portrait" },
+        { "name": "Screenshot Landscape", "width": 2688, "height": 1242, "orientation": "landscape" },
+        { "name": "Feature Graphic", "width": 1024, "height": 500, "orientation": "landscape" }
+      ]
+    },
+    {
+      "name": "Web Banner",
+      "sizes": [
+        { "name": "Leaderboard", "width": 728, "height": 90, "orientation": "landscape" },
+        { "name": "Medium Rectangle", "width": 300, "height": 250, "orientation": "landscape" },
+        { "name": "Wide Skyscraper", "width": 160, "height": 600, "orientation": "portrait" }
+      ]
+    }
+  ]
+}
