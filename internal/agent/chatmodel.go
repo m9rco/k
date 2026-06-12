@@ -1,7 +1,6 @@
 package agent
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -59,10 +58,79 @@ func (m *chatModel) Generate(ctx context.Context, input []*schema.Message, _ ...
 	return m.generateOpenAI(ctx, input)
 }
 
-// Stream performs a streaming completion, emitting message deltas. For brevity
-// and reliability across both providers we fetch once and chunk the result so
-// downstream WS consumers still receive incremental frames.
+// Stream performs a streaming completion, consuming the provider's SSE stream
+// so reply text and thinking surface incrementally in real time. If streaming
+// setup fails before any frame is produced, it degrades to a one-shot Generate
+// whose result is re-chunked, so the UI never blanks out (design D1).
 func (m *chatModel) Stream(ctx context.Context, input []*schema.Message, opts ...model.Option) (*schema.StreamReader[*schema.Message], error) {
+	if m.cfg.APIKey == "" {
+		return nil, fmt.Errorf("chat model %q has no API key configured", m.cfg.Provider)
+	}
+	resp, err := m.openStream(ctx, input)
+	if err != nil {
+		// Setup failed before any byte streamed: safe to degrade to one-shot.
+		return m.fallbackStream(ctx, input, opts...)
+	}
+	sr, sw := schema.Pipe[*schema.Message](16)
+	go func() {
+		defer sw.Close()
+		defer resp.Body.Close()
+		var perr error
+		if m.isAnthropic() {
+			perr = streamAnthropic(resp.Body, sw)
+		} else {
+			perr = streamOpenAI(resp.Body, sw)
+		}
+		if perr != nil {
+			sw.Send(nil, perr)
+		}
+	}()
+	return sr, nil
+}
+
+// openStream issues the streaming HTTP request and returns the live response on
+// a 2xx status. Non-2xx or transport errors are returned so the caller can
+// decide to degrade (no frame has been emitted yet).
+func (m *chatModel) openStream(ctx context.Context, input []*schema.Message) (*http.Response, error) {
+	var (
+		url     string
+		headers map[string]string
+		body    map[string]any
+	)
+	if m.isAnthropic() {
+		url, headers, body = m.anthropicURL(), m.anthropicHeaders(), m.anthropicBody(input)
+	} else {
+		url, headers, body = m.openAIURL(), map[string]string{"Authorization": "Bearer " + m.cfg.APIKey}, m.openAIBody(input)
+	}
+	body["stream"] = true
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, fmt.Errorf("marshal stream request: %w", err)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(buf))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "text/event-stream")
+	for k, v := range headers {
+		req.Header.Set(k, v)
+	}
+	resp, err := m.client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("stream request: %w", err)
+	}
+	if resp.StatusCode/100 != 2 {
+		data, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		return nil, fmt.Errorf("chat provider %s stream returned %d: %s", m.cfg.Provider, resp.StatusCode, truncate(string(data), 300))
+	}
+	return resp, nil
+}
+
+// fallbackStream re-chunks a one-shot Generate into stream frames so a provider
+// that rejects streaming still yields incremental UI updates.
+func (m *chatModel) fallbackStream(ctx context.Context, input []*schema.Message, opts ...model.Option) (*schema.StreamReader[*schema.Message], error) {
 	full, err := m.Generate(ctx, input, opts...)
 	if err != nil {
 		return nil, err
@@ -70,8 +138,13 @@ func (m *chatModel) Stream(ctx context.Context, input []*schema.Message, opts ..
 	sr, sw := schema.Pipe[*schema.Message](8)
 	go func() {
 		defer sw.Close()
-		// If the model returned tool calls, emit them as one frame.
+		if full.ReasoningContent != "" {
+			rm := schema.AssistantMessage("", nil)
+			rm.ReasoningContent = full.ReasoningContent
+			sw.Send(rm, nil)
+		}
 		if len(full.ToolCalls) > 0 {
+			full.ReasoningContent = "" // already surfaced above; avoid double-emit
 			sw.Send(full, nil)
 			return
 		}
@@ -97,7 +170,9 @@ func (m *chatModel) baseURL(def string) string {
 
 // ---- OpenAI-compatible (DeepSeek) ----
 
-func (m *chatModel) generateOpenAI(ctx context.Context, input []*schema.Message) (*schema.Message, error) {
+// openAIBody assembles the chat-completions request body shared by the
+// streaming and non-streaming paths.
+func (m *chatModel) openAIBody(input []*schema.Message) map[string]any {
 	type oaTool struct {
 		Type     string         `json:"type"`
 		Function map[string]any `json:"function"`
@@ -133,15 +208,26 @@ func (m *chatModel) generateOpenAI(ctx context.Context, input []*schema.Message)
 		}
 		body["tools"] = tools
 	}
-	raw, err := m.postJSON(ctx, m.baseURL("https://api.deepseek.com/v1")+"/chat/completions", body)
+	return body
+}
+
+// openAIURL returns the chat-completions endpoint.
+func (m *chatModel) openAIURL() string {
+	return m.baseURL("https://api.deepseek.com/v1") + "/chat/completions"
+}
+
+func (m *chatModel) generateOpenAI(ctx context.Context, input []*schema.Message) (*schema.Message, error) {
+	body := m.openAIBody(input)
+	raw, err := m.postJSON(ctx, m.openAIURL(), body)
 	if err != nil {
 		return nil, err
 	}
 	var resp struct {
 		Choices []struct {
 			Message struct {
-				Content   string `json:"content"`
-				ToolCalls []struct {
+				Content          string `json:"content"`
+				ReasoningContent string `json:"reasoning_content"`
+				ToolCalls        []struct {
 					ID       string `json:"id"`
 					Function struct {
 						Name      string `json:"name"`
@@ -159,6 +245,7 @@ func (m *chatModel) generateOpenAI(ctx context.Context, input []*schema.Message)
 	}
 	c := resp.Choices[0].Message
 	out := schema.AssistantMessage(c.Content, nil)
+	out.ReasoningContent = c.ReasoningContent
 	for _, tc := range c.ToolCalls {
 		out.ToolCalls = append(out.ToolCalls, schema.ToolCall{
 			ID: tc.ID,
@@ -173,7 +260,9 @@ func (m *chatModel) generateOpenAI(ctx context.Context, input []*schema.Message)
 
 // ---- Anthropic Messages API ----
 
-func (m *chatModel) generateAnthropic(ctx context.Context, input []*schema.Message) (*schema.Message, error) {
+// anthropicBody assembles the Messages API request body shared by the
+// streaming and non-streaming paths.
+func (m *chatModel) anthropicBody(input []*schema.Message) map[string]any {
 	var system string
 	type block map[string]any
 	type aMsg struct {
@@ -234,21 +323,36 @@ func (m *chatModel) generateAnthropic(ctx context.Context, input []*schema.Messa
 		}
 		body["tools"] = tools
 	}
-	url := m.baseURL("https://api.anthropic.com") + "/v1/messages"
-	raw, err := m.postJSONWithHeaders(ctx, url, body, map[string]string{
+	return body
+}
+
+// anthropicURL returns the Messages endpoint.
+func (m *chatModel) anthropicURL() string {
+	return m.baseURL("https://api.anthropic.com") + "/v1/messages"
+}
+
+// anthropicHeaders returns the auth/version headers for the Messages API.
+func (m *chatModel) anthropicHeaders() map[string]string {
+	return map[string]string{
 		"x-api-key":         m.cfg.APIKey,
 		"anthropic-version": "2023-06-01",
-	})
+	}
+}
+
+func (m *chatModel) generateAnthropic(ctx context.Context, input []*schema.Message) (*schema.Message, error) {
+	body := m.anthropicBody(input)
+	raw, err := m.postJSONWithHeaders(ctx, m.anthropicURL(), body, m.anthropicHeaders())
 	if err != nil {
 		return nil, err
 	}
 	var resp struct {
 		Content []struct {
-			Type  string          `json:"type"`
-			Text  string          `json:"text"`
-			ID    string          `json:"id"`
-			Name  string          `json:"name"`
-			Input json.RawMessage `json:"input"`
+			Type     string          `json:"type"`
+			Text     string          `json:"text"`
+			Thinking string          `json:"thinking"`
+			ID       string          `json:"id"`
+			Name     string          `json:"name"`
+			Input    json.RawMessage `json:"input"`
 		} `json:"content"`
 	}
 	if err := json.Unmarshal(raw, &resp); err != nil {
@@ -256,10 +360,13 @@ func (m *chatModel) generateAnthropic(ctx context.Context, input []*schema.Messa
 	}
 	out := schema.AssistantMessage("", nil)
 	var text strings.Builder
+	var thinking strings.Builder
 	for _, c := range resp.Content {
 		switch c.Type {
 		case "text":
 			text.WriteString(c.Text)
+		case "thinking":
+			thinking.WriteString(c.Thinking)
 		case "tool_use":
 			out.ToolCalls = append(out.ToolCalls, schema.ToolCall{
 				ID: c.ID,
@@ -271,6 +378,7 @@ func (m *chatModel) generateAnthropic(ctx context.Context, input []*schema.Messa
 		}
 	}
 	out.Content = text.String()
+	out.ReasoningContent = thinking.String()
 	return out, nil
 }
 
@@ -304,9 +412,6 @@ func (m *chatModel) postJSONWithHeaders(ctx context.Context, url string, body an
 	}
 	return data, nil
 }
-
-// drainSSE is retained for future true-streaming support; unused for now.
-var _ = bufio.NewReader
 
 func truncate(s string, n int) string {
 	if len(s) <= n {

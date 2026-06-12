@@ -11,9 +11,13 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/cloudwego/eino/callbacks"
+	"github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/compose"
+	einoagent "github.com/cloudwego/eino/flow/agent"
 	"github.com/cloudwego/eino/flow/agent/react"
 	"github.com/cloudwego/eino/schema"
+	utilcb "github.com/cloudwego/eino/utils/callbacks"
 
 	"gameasset/internal/config"
 	"gameasset/internal/crop"
@@ -104,7 +108,11 @@ func (o *Orchestrator) Handle(ctx context.Context, sessionID, userText string) (
 		return "", fmt.Errorf("build react agent: %w", err)
 	}
 
-	stream, err := ra.Stream(ctx, w.Messages())
+	// Tool-execution callback: surface each tool's completion (success/error)
+	// so the frontend can stop the spinner and show the action trajectory.
+	toolCB := o.toolCallbackHandler(sessionID)
+
+	stream, err := ra.Stream(ctx, w.Messages(), agentOption(toolCB))
 	if err != nil {
 		return "", fmt.Errorf("agent stream: %w", err)
 	}
@@ -119,6 +127,13 @@ func (o *Orchestrator) Handle(ctx context.Context, sessionID, userText string) (
 		if chunk == nil {
 			continue
 		}
+		if chunk.ReasoningContent != "" {
+			o.emit(sessionID, transport.Event{
+				Type:      transport.EventReasoning,
+				SessionID: sessionID,
+				Data:      map[string]any{"text": chunk.ReasoningContent},
+			})
+		}
 		for _, tc := range chunk.ToolCalls {
 			if tc.Function.Name == "" {
 				continue
@@ -127,6 +142,7 @@ func (o *Orchestrator) Handle(ctx context.Context, sessionID, userText string) (
 				Type:      transport.EventToolCall,
 				SessionID: sessionID,
 				Data: map[string]string{
+					"id":        tc.ID,
 					"name":      tc.Function.Name,
 					"arguments": truncate(tc.Function.Arguments, 400),
 				},
@@ -157,6 +173,54 @@ func (o *Orchestrator) emit(sessionID string, ev transport.Event) {
 	if o.hub != nil {
 		o.hub.Send(sessionID, ev)
 	}
+}
+
+// agentOption wraps a callbacks handler as a react agent option.
+func agentOption(h callbacks.Handler) einoagent.AgentOption {
+	return einoagent.WithComposeOptions(compose.WithCallbacks(h))
+}
+
+// toolCallbackHandler builds a handler that emits a tool_result event whenever
+// a tool finishes (success or error), so the UI can complete the action card.
+func (o *Orchestrator) toolCallbackHandler(sessionID string) callbacks.Handler {
+	return utilcb.NewHandlerHelper().Tool(&utilcb.ToolCallbackHandler{
+		OnEnd: func(ctx context.Context, info *callbacks.RunInfo, output *tool.CallbackOutput) context.Context {
+			name := ""
+			if info != nil {
+				name = info.Name
+			}
+			summary := ""
+			if output != nil {
+				summary = truncate(output.Response, 200)
+			}
+			o.emit(sessionID, transport.Event{
+				Type:      transport.EventToolResult,
+				SessionID: sessionID,
+				Data: map[string]any{
+					"name":    name,
+					"status":  "done",
+					"summary": summary,
+				},
+			})
+			return ctx
+		},
+		OnError: func(ctx context.Context, info *callbacks.RunInfo, err error) context.Context {
+			name := ""
+			if info != nil {
+				name = info.Name
+			}
+			o.emit(sessionID, transport.Event{
+				Type:      transport.EventToolResult,
+				SessionID: sessionID,
+				Data: map[string]any{
+					"name":   name,
+					"status": "error",
+					"error":  truncate(err.Error(), 200),
+				},
+			})
+			return ctx
+		},
+	}).Handler()
 }
 
 // ContextState is a snapshot of a session's context window for the UI panel.

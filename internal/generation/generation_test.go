@@ -266,3 +266,71 @@ func waitTask(t *testing.T, st *store.Store, session, taskID string) *store.Task
 		}
 	}
 }
+
+// capturingProvider records the last Request it received so tests can assert
+// what dimensions the service forwarded.
+type capturingProvider struct {
+	name string
+	out  Output
+	last *Request
+}
+
+func (c *capturingProvider) Name() string { return c.name }
+func (c *capturingProvider) Generate(_ context.Context, req Request) (Output, error) {
+	r := req
+	c.last = &r
+	return c.out, nil
+}
+
+// TestServiceInheritsSourceDimensions verifies二次调整 forwards the source
+// asset's original dimensions into the generation request (not the provider
+// default) and records the produced image's actual size.
+func TestServiceInheritsSourceDimensions(t *testing.T) {
+	dir := t.TempDir()
+	st, err := store.Open(filepath.Join(dir, "g.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	broker := transport.NewTaskBroker()
+	var n int
+	gen := func(prefix string) string { n++; return prefix + strconv.Itoa(n) }
+
+	cap := &capturingProvider{name: "primary", out: Output{Data: solidPNG(t, 64, 48, color.RGBA{9, 9, 9, 255}), Mime: "image/png"}}
+	svc := NewService(NewFailoverGenerator(cap, nil), st, broker, filepath.Join(dir, "assets"), gen)
+
+	now := time.Now().UTC()
+	_ = st.UpsertSession(store.SessionRecord{ID: "s", Fingerprint: "fp", CreatedAt: now, LastSeenAt: now})
+
+	srcPath := filepath.Join(dir, "src.png")
+	if err := os.WriteFile(srcPath, solidPNG(t, 300, 200, color.RGBA{1, 1, 1, 255}), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_ = st.InsertAsset(store.AssetRecord{
+		ID: "src1", SessionID: "s", Kind: "upload", Path: srcPath, Mime: "image/png",
+		Width: 300, Height: 200, CreatedAt: now,
+	})
+
+	taskID, err := svc.Start(context.Background(), GenerateParams{
+		SessionID:     "s",
+		SourceAssetID: "src1",
+		Slots:         Slots{Kind: EditBackground, BackgroundDesc: "a forest"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec := waitTask(t, st, "s", taskID)
+	if rec.Status != "done" {
+		t.Fatalf("task not done: status=%q err=%q", rec.Status, rec.Error)
+	}
+	if cap.last == nil {
+		t.Fatal("provider never called")
+	}
+	if cap.last.Width != 300 || cap.last.Height != 200 {
+		t.Errorf("request dimensions = %dx%d, want 300x200 (source size, not default)", cap.last.Width, cap.last.Height)
+	}
+	asset, _ := st.GetAsset("s", rec.AssetID)
+	if asset == nil || asset.Width != 64 || asset.Height != 48 {
+		t.Errorf("recorded product dimensions = %v, want 64x48 (actual output)", asset)
+	}
+}

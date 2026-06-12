@@ -19,6 +19,8 @@ const state = {
   activeAssetId: null,
   channels: [],
   streamingEl: null,
+  reasoningEl: null,
+  pendingTools: [],
 };
 
 const $ = (sel) => document.querySelector(sel);
@@ -120,11 +122,20 @@ function handleEvent(msg) {
     case "message": {
       const { text, done } = msg.data || {};
       appendAssistantDelta(text || "", done);
-      if (done) refreshContext();
+      if (done) {
+        finishPendingTools();
+        refreshContext();
+      }
       break;
     }
+    case "reasoning":
+      appendReasoning((msg.data && msg.data.text) || "");
+      break;
     case "tool_call":
       renderToolCall(msg.data || {});
+      break;
+    case "tool_result":
+      applyToolResult(msg.data || {});
       break;
     case "error":
       toast((msg.data && msg.data.message) || "发生未知错误");
@@ -145,6 +156,7 @@ function addBubble(role, text) {
 }
 
 function appendAssistantDelta(text, done) {
+  state.reasoningEl = null; // answer text ends the current thinking block
   if (!state.streamingEl) {
     state.streamingEl = addBubble("assistant", "");
   }
@@ -158,16 +170,79 @@ function appendAssistantDelta(text, done) {
   $("#chatLog").scrollTop = $("#chatLog").scrollHeight;
 }
 
+// appendReasoning renders the model's thinking as a dimmed bubble, distinct
+// from the final answer. Chunks accumulate into one bubble per thinking turn.
+function appendReasoning(text) {
+  if (!text) return;
+  state.streamingEl = null; // a new thinking block starts a fresh answer later
+  const log = $("#chatLog");
+  if (!state.reasoningEl) {
+    const wrap = el("div", "msg reasoning");
+    wrap.appendChild(el("span", "reasoning-tag", "思考"));
+    const body = el("span", "reasoning-body", "");
+    wrap.appendChild(body);
+    log.appendChild(wrap);
+    state.reasoningEl = body;
+  }
+  state.reasoningEl.textContent += text;
+  log.scrollTop = log.scrollHeight;
+}
+
 function renderToolCall(data) {
+  state.reasoningEl = null;
   const log = $("#chatLog");
   const card = el("div", "tool-card");
+  if (data.id) card.dataset.callId = data.id;
+  card.dataset.tool = data.name || "tool";
   const head = el("div", "tc-head");
-  head.appendChild(el("span", "tc-spinner"));
-  head.appendChild(el("span", null, data.name || "tool"));
+  const spinner = el("span", "tc-spinner");
+  head.appendChild(spinner);
+  head.appendChild(el("span", "tc-name", data.name || "tool"));
   card.appendChild(head);
   if (data.arguments) card.appendChild(el("div", "tc-args", data.arguments));
   log.appendChild(card);
   log.scrollTop = log.scrollHeight;
+  state.pendingTools.push(card);
+}
+
+// applyToolResult completes the matching tool card: stop spinner, mark
+// success/error, append a short summary. Falls back to the oldest pending
+// card when the backend cannot supply a precise call id.
+function applyToolResult(data) {
+  const card = matchPendingTool(data.name);
+  if (!card) return;
+  state.pendingTools = state.pendingTools.filter((c) => c !== card);
+  const head = card.querySelector(".tc-head");
+  const spinner = head && head.querySelector(".tc-spinner");
+  const ok = data.status !== "error";
+  if (spinner) {
+    const mark = el("span", `tc-mark ${ok ? "ok" : "fail"}`, ok ? "✓" : "✗");
+    spinner.replaceWith(mark);
+  }
+  card.classList.add(ok ? "tc-done" : "tc-failed");
+  const detail = ok ? data.summary : data.error;
+  if (detail) card.appendChild(el("div", "tc-result", detail));
+  $("#chatLog").scrollTop = $("#chatLog").scrollHeight;
+}
+
+// matchPendingTool finds the spinning card for a tool name, else the oldest.
+function matchPendingTool(name) {
+  if (name) {
+    const hit = state.pendingTools.find((c) => c.dataset.tool === name);
+    if (hit) return hit;
+  }
+  return state.pendingTools[0] || null;
+}
+
+// finishPendingTools clears any still-spinning cards once the turn ends, so a
+// dropped tool_result never leaves a card spinning forever.
+function finishPendingTools() {
+  for (const card of state.pendingTools) {
+    const spinner = card.querySelector(".tc-spinner");
+    if (spinner) spinner.replaceWith(el("span", "tc-mark ok", "✓"));
+    card.classList.add("tc-done");
+  }
+  state.pendingTools = [];
 }
 
 function sendMessage(text) {
@@ -264,13 +339,11 @@ function assetCard(asset) {
   const check = el("div", "card-check", "✓");
   card.appendChild(check);
 
-  // 单击切换多选；双击放大并进入二次调整。
+  // 左键切换多选；右键弹出操作菜单（放大/切尺寸/二次调整/下载）。
   card.onclick = () => toggleSelect(asset.id, card);
-  card.ondblclick = (e) => {
+  card.oncontextmenu = (e) => {
     e.preventDefault();
-    state.selected.delete(asset.id);
-    card.classList.remove("selected");
-    openLightbox(asset);
+    openAssetMenu(e.clientX, e.clientY, asset);
   };
   return card;
 }
@@ -312,6 +385,49 @@ function openLightbox(asset) {
 
 function closeLightbox() {
   $("#lightbox").hidden = true;
+}
+
+// ---------- 资产右键菜单 ----------
+
+// openAssetMenu positions the context menu at the cursor and wires its actions
+// to the active asset. The menu is clamped to the viewport so it never spills
+// off-screen near the right/bottom edges.
+function openAssetMenu(x, y, asset) {
+  const menu = $("#assetMenu");
+  menu.hidden = false;
+  const rect = menu.getBoundingClientRect();
+  const left = Math.min(x, window.innerWidth - rect.width - 8);
+  const top = Math.min(y, window.innerHeight - rect.height - 8);
+  menu.style.left = left + "px";
+  menu.style.top = top + "px";
+  menu.onclick = (e) => {
+    const act = e.target.dataset && e.target.dataset.act;
+    if (!act) return;
+    closeAssetMenu();
+    runAssetAction(act, asset);
+  };
+}
+
+function closeAssetMenu() {
+  $("#assetMenu").hidden = true;
+}
+
+function runAssetAction(act, asset) {
+  switch (act) {
+    case "preview":
+      openLightbox(asset);
+      break;
+    case "crop":
+      openCapsule(asset.id);
+      break;
+    case "adjust":
+      openLightbox(asset);
+      $("#lbAdjustInput").focus();
+      break;
+    case "download":
+      downloadSingle(asset.id);
+      break;
+  }
 }
 
 // ---------- SSE 任务进度 ----------
@@ -396,16 +512,29 @@ async function retryTask(taskId) {
 
 // ---------- 上传 ----------
 
-async function uploadFile(file) {
+async function uploadOne(file) {
   const fd = new FormData();
   fd.append("file", file);
-  try {
-    const asset = await api(`/api/session/${state.sessionId}/upload`, { method: "POST", body: fd });
-    state.assets.set(asset.id, asset);
-    renderWorkspace();
-    toast("已上传，现在可以让我换背景/角色/文案", "ok");
-  } catch (e) {
-    toast("上传失败：" + e.message);
+  const asset = await api(`/api/session/${state.sessionId}/upload`, { method: "POST", body: fd });
+  state.assets.set(asset.id, asset);
+  return asset;
+}
+
+// uploadFiles uploads one or many images concurrently, then renders once and
+// shows a single summary toast (succeeded / failed counts).
+async function uploadFiles(files) {
+  const list = [...files].filter((f) => f && f.type.startsWith("image/"));
+  if (!list.length) return;
+  const results = await Promise.allSettled(list.map(uploadOne));
+  renderWorkspace();
+  const ok = results.filter((r) => r.status === "fulfilled").length;
+  const fail = results.length - ok;
+  if (fail === 0) {
+    toast(ok === 1 ? "已上传，现在可以让我换背景/角色/文案" : `已上传 ${ok} 张图`, "ok");
+  } else if (ok === 0) {
+    toast(`上传失败 ${fail} 张`, "error");
+  } else {
+    toast(`已上传 ${ok} 张，失败 ${fail} 张`, "warn");
   }
 }
 
@@ -665,7 +794,7 @@ function bindUI() {
   const fileInput = $("#fileInput");
   $("#uploadBtn").onclick = () => fileInput.click();
   fileInput.onchange = () => {
-    if (fileInput.files[0]) uploadFile(fileInput.files[0]);
+    if (fileInput.files.length) uploadFiles(fileInput.files);
     fileInput.value = "";
   };
 
@@ -689,6 +818,21 @@ function bindUI() {
     if (e.target.id === "lightbox") closeLightbox();
   };
 
+  // 右键菜单：点击外部 / Esc / 滚动 / 右键空白处时关闭
+  document.addEventListener("click", (e) => {
+    if (!e.target.closest("#assetMenu")) closeAssetMenu();
+  });
+  document.addEventListener("contextmenu", (e) => {
+    if (!e.target.closest(".card")) closeAssetMenu();
+  });
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") {
+      closeAssetMenu();
+      closeLightbox();
+    }
+  });
+  $("#wsGrid").addEventListener("scroll", closeAssetMenu);
+
   // 拖拽上传到工作区
   const drop = document.querySelector(".workspace");
   ["dragover", "dragenter"].forEach((evt) =>
@@ -696,8 +840,7 @@ function bindUI() {
   );
   drop.addEventListener("drop", (e) => {
     e.preventDefault();
-    const f = e.dataTransfer.files[0];
-    if (f && f.type.startsWith("image/")) uploadFile(f);
+    if (e.dataTransfer.files.length) uploadFiles(e.dataTransfer.files);
   });
 }
 

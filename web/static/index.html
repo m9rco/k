@@ -35,7 +35,7 @@
 
       <form class="composer" id="composer" autocomplete="off">
         <button type="button" class="icon-btn" id="uploadBtn" title="上传图片">＋</button>
-        <input type="file" id="fileInput" accept="image/*" hidden />
+        <input type="file" id="fileInput" accept="image/*" multiple hidden />
         <input type="text" id="msgInput" class="composer-input"
                placeholder="例如：把背景换成夜晚的赛博朋克城市" />
         <button type="submit" class="send-btn" id="sendBtn">发送</button>
@@ -90,6 +90,14 @@
 
   <!-- toast 容器 -->
   <div class="toasts" id="toasts" aria-live="polite"></div>
+
+  <!-- 资产右键菜单 -->
+  <div class="ctx-menu" id="assetMenu" hidden role="menu">
+    <button class="ctx-item" data-act="preview" role="menuitem">放大预览</button>
+    <button class="ctx-item" data-act="crop" role="menuitem">切尺寸</button>
+    <button class="ctx-item" data-act="adjust" role="menuitem">二次调整</button>
+    <button class="ctx-item" data-act="download" role="menuitem">下载</button>
+  </div>
 
   <!-- 图片放大/二次调整预览 -->
   <div class="lightbox" id="lightbox" hidden>

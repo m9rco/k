@@ -1,12 +1,18 @@
 package generation
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"image"
 	"os"
 	"path/filepath"
 	"sync"
 	"time"
+
+	_ "image/gif"  // register decoders for dimension probing
+	_ "image/jpeg" // .
+	_ "image/png"  // .
 
 	"gameasset/internal/store"
 	"gameasset/internal/transport"
@@ -127,6 +133,7 @@ func (s *Service) run(ctx context.Context, taskID string, p GenerateParams) {
 	var srcBytes []byte
 	var srcMime string
 	var palette []PaletteColor
+	var srcW, srcH int
 	if p.SourceAssetID != "" {
 		asset, err := s.store.GetAsset(p.SessionID, p.SourceAssetID)
 		if err != nil || asset == nil {
@@ -139,6 +146,7 @@ func (s *Service) run(ctx context.Context, taskID string, p GenerateParams) {
 			return
 		}
 		srcMime = asset.Mime
+		srcW, srcH = asset.Width, asset.Height
 		if pal, err := ExtractPaletteFromBytes(srcBytes, 5); err == nil {
 			palette = pal
 		}
@@ -152,10 +160,13 @@ func (s *Service) run(ctx context.Context, taskID string, p GenerateParams) {
 	}
 	s.progress(taskID, p.SessionID, 45)
 
+	// 二次调整：产物尺寸继承源图原尺寸（provider 端会 snap 到支持的尺寸 enum）。
 	out, err := s.gen.Generate(ctx, Request{
 		Prompt:      prompt,
 		SourceImage: srcBytes,
 		SourceMime:  srcMime,
+		Width:       srcW,
+		Height:      srcH,
 	})
 	if err != nil {
 		s.fail(taskID, p.SessionID, err.Error())
@@ -174,6 +185,8 @@ func (s *Service) run(ctx context.Context, taskID string, p GenerateParams) {
 		s.fail(taskID, p.SessionID, fmt.Sprintf("write: %v", err))
 		return
 	}
+	// Record the produced image's actual dimensions so二次调整产物尺寸可追溯。
+	outW, outH := decodeDimensions(out.Data)
 	now := s.now()
 	if err := s.store.InsertAsset(store.AssetRecord{
 		ID:        assetID,
@@ -181,6 +194,8 @@ func (s *Service) run(ctx context.Context, taskID string, p GenerateParams) {
 		Kind:      "generated",
 		Path:      path,
 		Mime:      out.Mime,
+		Width:     outW,
+		Height:    outH,
 		Provider:  out.Provider,
 		ParentID:  p.SourceAssetID,
 		CreatedAt: now,
@@ -214,4 +229,14 @@ func (s *Service) fail(taskID, sessionID, msg string) {
 	now := s.now()
 	_ = s.store.UpdateTask(store.TaskRecord{ID: taskID, SessionID: sessionID, Status: "failed", Error: msg, UpdatedAt: now})
 	s.broker.Publish(taskID, transport.EventTaskFailed, sessionID, map[string]string{"error": msg})
+}
+
+// decodeDimensions reads an image's pixel dimensions; returns (0,0) if the
+// bytes cannot be decoded, leaving width/height unset rather than failing.
+func decodeDimensions(data []byte) (int, int) {
+	cfg, _, err := image.DecodeConfig(bytes.NewReader(data))
+	if err != nil {
+		return 0, 0
+	}
+	return cfg.Width, cfg.Height
 }

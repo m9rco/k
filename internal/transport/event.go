@@ -17,8 +17,9 @@ type EventType string
 const (
 	// Conversation / WebSocket events.
 	EventMessage    EventType = "message"     // agent reply increment
+	EventReasoning  EventType = "reasoning"   // model thinking increment (opportunistic)
 	EventToolCall   EventType = "tool_call"   // a tool invocation started/updated
-	EventToolResult EventType = "tool_result" // a tool produced a result
+	EventToolResult EventType = "tool_result" // a tool finished (success or error)
 	EventCapsule    EventType = "capsule"     // server asks user to pick (e.g. sizes)
 	EventError      EventType = "error"       // recoverable error notice (toast)
 
