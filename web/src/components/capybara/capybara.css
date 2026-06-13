@@ -1,0 +1,63 @@
+/* Capybara idle animations. Each overlay layer runs its own keyframe on a long,
+   offset cycle so the actions feel sporadic rather than synchronized. All paused
+   under reduced-motion. */
+
+/* Whole-body slow breathing. */
+.capy-breathe {
+  animation: capy-breathe 3.6s ease-in-out infinite;
+  transform-origin: 50% 100%;
+}
+@keyframes capy-breathe {
+  0%, 100% { transform: scaleY(1); }
+  50% { transform: scaleY(0.97); }
+}
+
+/* Blink: eyelids mostly hidden, snap shut briefly twice per cycle. */
+.capy-blink {
+  opacity: 0;
+  animation: capy-blink 5.3s steps(1, end) infinite;
+}
+@keyframes capy-blink {
+  0%, 90%, 96%, 100% { opacity: 0; }
+  92%, 94% { opacity: 1; }
+}
+
+/* Yawn: mouth grows wide on a rare, long cycle. */
+.capy-yawn {
+  transform: scaleY(0);
+  transform-origin: 50% 0%;
+  animation: capy-yawn 13s ease-in-out infinite;
+}
+@keyframes capy-yawn {
+  0%, 82%, 100% { transform: scaleY(0); }
+  88%, 92% { transform: scaleY(2.4); }
+}
+
+/* Scratch: paw taps up and down a few times mid-cycle. */
+.capy-paw {
+  animation: capy-paw 8.5s ease-in-out infinite;
+}
+@keyframes capy-paw {
+  0%, 40%, 70%, 100% { transform: translateY(0); }
+  48%, 60% { transform: translateY(-3px); }
+  54%, 66% { transform: translateY(0); }
+}
+
+/* Grass blade gentle wiggle. */
+.capy-grass {
+  transform-origin: 65px 50px;
+  animation: capy-grass 2.4s ease-in-out infinite;
+}
+@keyframes capy-grass {
+  0%, 100% { transform: rotate(-4deg); }
+  50% { transform: rotate(4deg); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .capy-breathe, .capy-blink, .capy-yawn, .capy-paw, .capy-grass {
+    animation: none !important;
+  }
+  /* Keep eyes open and mouth/paw at rest in the static pose. */
+  .capy-blink { opacity: 0; }
+  .capy-yawn { transform: scaleY(0); }
+}

@@ -1,20 +1,78 @@
 import * as React from "react";
+import { AnimatePresence, motion } from "framer-motion";
 import { Plus, Sparkles, Send, X, ArrowUp, Zap } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
+import { Capybara } from "@/components/capybara/capybara";
 import { useApp } from "@/store/context";
 import * as api from "@/lib/api";
 import { cn } from "@/lib/utils";
 
+// Rotating example prompts shown as a typewriter in the empty onboarding input.
+const DEMO_PROMPTS = [
+  "把背景换成黄昏的赛博朋克城市…",
+  "让图里的角色动起来，奔跑姿态…",
+  "切成抖音和小红书的投放尺寸…",
+  "根据图2和图3的风格生成一张新图…",
+];
+
+const prefersReducedMotion = () =>
+  typeof window !== "undefined" && window.matchMedia?.("(prefers-reduced-motion: reduce)").matches;
+
+// useTypewriterDemo cycles DEMO_PROMPTS as a typing/erasing placeholder while
+// active. Returns the current demo string ("" when inactive). Reduced-motion
+// shows the first prompt statically.
+function useTypewriterDemo(active: boolean): string {
+  const [demo, setDemo] = React.useState("");
+  React.useEffect(() => {
+    if (!active) { setDemo(""); return; }
+    if (prefersReducedMotion()) { setDemo(DEMO_PROMPTS[0]); return; }
+    let promptIdx = 0;
+    let charIdx = 0;
+    let erasing = false;
+    let timer = 0;
+    const tick = () => {
+      const full = DEMO_PROMPTS[promptIdx];
+      if (!erasing) {
+        charIdx++;
+        setDemo(full.slice(0, charIdx));
+        if (charIdx >= full.length) {
+          erasing = true;
+          timer = window.setTimeout(tick, 1800);
+          return;
+        }
+        timer = window.setTimeout(tick, 70);
+      } else {
+        charIdx--;
+        setDemo(full.slice(0, charIdx));
+        if (charIdx <= 0) {
+          erasing = false;
+          promptIdx = (promptIdx + 1) % DEMO_PROMPTS.length;
+          timer = window.setTimeout(tick, 400);
+          return;
+        }
+        timer = window.setTimeout(tick, 35);
+      }
+    };
+    timer = window.setTimeout(tick, 500);
+    return () => window.clearTimeout(timer);
+  }, [active]);
+  return demo;
+}
+
 // Composer is the message input row plus the multi-reference status bar.
-export function Composer() {
+export function Composer({ onboarding = false }: { onboarding?: boolean }) {
   const app = useApp();
   const { state } = app;
   const [text, setText] = React.useState("");
+  const [focused, setFocused] = React.useState(false);
   const [optimizing, setOptimizing] = React.useState(false);
   const fileRef = React.useRef<HTMLInputElement>(null);
 
   const selectedCount = state.selected.size;
+  // Demo is active only in onboarding, with an empty, unfocused input.
+  const demoActive = onboarding && !text && !focused;
+  const demoText = useTypewriterDemo(demoActive);
 
   // Next-step suggestion chips based on the newest asset (fills the input).
   const suggestions = React.useMemo<string[]>(() => {
@@ -65,7 +123,23 @@ export function Composer() {
   };
 
   return (
-    <div className="border-t border-line px-4 pb-4 pt-3">
+    <div className="relative border-t border-line px-4 pb-4 pt-3">
+      {/* Mascot perched above the input during onboarding; exits as the layout
+          expands into the workspace. */}
+      <AnimatePresence>
+        {demoActive && (
+          <motion.div
+            key="capy"
+            initial={{ opacity: 0, y: 12, scale: 0.8 }}
+            animate={{ opacity: 1, y: 0, scale: 1 }}
+            exit={{ opacity: 0, y: 12, scale: 0.8 }}
+            transition={{ duration: 0.25, ease: "easeOut" }}
+            className="pointer-events-none absolute -top-[58px] left-1/2 z-10 -translate-x-1/2"
+          >
+            <Capybara />
+          </motion.div>
+        )}
+      </AnimatePresence>
       {suggestions.length > 0 && !text && (
         <div className="mb-2 flex flex-wrap gap-1.5">
           {suggestions.map((s) => (
@@ -134,8 +208,13 @@ export function Composer() {
         <input
           value={text}
           onChange={(e) => setText(e.target.value)}
-          placeholder="例如：把背景换成夜晚的赛博朋克城市"
-          className="h-9 flex-1 rounded-md border border-line bg-bg-elev px-3 text-[13px] text-fg outline-none placeholder:text-fg-mute focus:border-accent/60"
+          onFocus={() => setFocused(true)}
+          onBlur={() => setFocused(false)}
+          placeholder={demoActive && demoText ? demoText : "例如：把背景换成夜晚的赛博朋克城市"}
+          className={cn(
+            "h-9 flex-1 rounded-md border border-line bg-bg-elev px-3 text-[13px] text-fg outline-none placeholder:text-fg-mute focus:border-accent/60",
+            demoActive && "placeholder:text-fg-dim",
+          )}
         />
         <Tooltip>
           <TooltipTrigger asChild>

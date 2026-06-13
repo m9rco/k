@@ -1,6 +1,7 @@
 import * as React from "react";
-import { AnimatePresence } from "framer-motion";
+import { AnimatePresence, motion } from "framer-motion";
 import { useApp } from "@/store/context";
+import { BrandMark } from "@/components/brand-mark";
 import { MessageBubble } from "./message-bubble";
 import { ReasoningBlock } from "./reasoning-block";
 import { ToolCard } from "./tool-card";
@@ -18,9 +19,28 @@ const CAPABILITIES = [
   "下载 / 打包 · 单张下载或批量打包 zip",
 ];
 
+// BrandHero is the ceremonial brand reveal shown only in the immersive onboarding
+// state: brand name + subtitle fade up, evoking a quiet "workshop awaiting you".
+function BrandHero() {
+  return (
+    <motion.div
+      initial={{ opacity: 0, y: 8 }}
+      animate={{ opacity: 1, y: 0 }}
+      transition={{ duration: 0.5, ease: "easeOut", delay: 0.3 }}
+      className="flex flex-col items-center gap-3 py-8 text-center"
+    >
+      <BrandMark className="size-9 text-accent" />
+      <div>
+        <h1 className="text-base font-semibold tracking-[0.2em] text-fg">GAME ASSET STUDIO</h1>
+        <p className="mt-1 text-xs tracking-[0.3em] text-fg-mute/70">游 戏 宣 发 资 产 工 坊</p>
+      </div>
+    </motion.div>
+  );
+}
+
 function Welcome() {
   return (
-    <div className="mx-auto max-w-md py-10 text-center">
+    <div className="mx-auto max-w-md py-4 text-center">
       <p className="text-sm font-medium text-fg">嗨，我是你的宣发素材助手。</p>
       <p className="mt-1 text-[13px] leading-relaxed text-fg-dim">上传一张图，告诉我你想做什么：</p>
       <ul className="mt-4 space-y-1.5 text-left">
@@ -34,7 +54,7 @@ function Welcome() {
   );
 }
 
-export function ChatPanel() {
+export function ChatPanel({ onboarding = false }: { onboarding?: boolean }) {
   const { state, collapseReasoningItem, capsuleSelect } = useApp();
   const logRef = React.useRef<HTMLDivElement>(null);
 
@@ -48,8 +68,9 @@ export function ChatPanel() {
 
   return (
     <div className="flex h-full min-h-0 flex-col">
-      <ContextBar />
-      <div ref={logRef} className="flex-1 space-y-3 overflow-y-auto px-4 py-4">
+      {!onboarding && <ContextBar />}
+      <div ref={logRef} className={onboarding ? "flex flex-1 flex-col justify-center overflow-y-auto px-4 py-4" : "flex-1 space-y-3 overflow-y-auto px-4 py-4"}>
+        {onboarding && <BrandHero />}
         {state.chat.length === 0 && <Welcome />}
         <AnimatePresence initial={false}>
           {state.chat.map((it) => {
@@ -80,7 +101,7 @@ export function ChatPanel() {
           })}
         </AnimatePresence>
       </div>
-      <Composer />
+      <Composer onboarding={onboarding} />
     </div>
   );
 }
