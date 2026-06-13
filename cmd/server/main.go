@@ -144,6 +144,25 @@ func run() error {
 		writeJSON(w, map[string]string{"status": "cleared"})
 	})
 
+	// Prompt optimization: rewrite a colloquial input into a structured
+	// image-generation prompt. One-shot, tool-free, does not touch the session
+	// window — the result is returned for the user to confirm before sending.
+	mux.HandleFunc("POST /api/session/{id}/prompt/optimize", func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Text string `json:"text"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "invalid request body", http.StatusBadRequest)
+			return
+		}
+		optimized, err := orch.OptimizePrompt(r.Context(), req.Text)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadGateway)
+			return
+		}
+		writeJSON(w, map[string]string{"optimized": optimized})
+	})
+
 	// Embedded frontend (serves index.html and static assets).
 	webFS, err := web.FS()
 	if err != nil {

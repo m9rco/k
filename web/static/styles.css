@@ -56,9 +56,29 @@ body {
 
 .brand-mark {
   width: 22px; height: 22px;
-  border-radius: 6px;
-  background: var(--grad);
-  box-shadow: 0 0 18px rgba(91, 140, 255, 0.5);
+  display: inline-flex; align-items: center; justify-content: center;
+  filter: drop-shadow(0 0 8px rgba(91, 140, 255, 0.45));
+}
+.brand-mark svg { display: block; overflow: visible; }
+/* 科技感品牌动画：外框描边流动 + 内核脉冲 + 六边形缓慢自转 */
+.bm-frame {
+  stroke-dasharray: 30 86;
+  animation: bmDash 3.2s linear infinite;
+}
+@keyframes bmDash { to { stroke-dashoffset: -116; } }
+.bm-hex {
+  transform-origin: 16px 16px;
+  animation: bmSpin 9s linear infinite;
+  opacity: 0.85;
+}
+@keyframes bmSpin { to { transform: rotate(360deg); } }
+.bm-core {
+  transform-origin: 16px 16px;
+  animation: bmPulse 2.4s ease-in-out infinite;
+}
+@keyframes bmPulse {
+  0%, 100% { transform: scale(0.8); opacity: 0.7; }
+  50% { transform: scale(1.15); opacity: 1; }
 }
 
 .brand-name { font-size: 16px; letter-spacing: 0.3px; font-weight: 500; }
@@ -276,7 +296,7 @@ body {
   color: var(--text);
   font-size: 20px;
   cursor: pointer;
-  transition: border-color 0.2s, background 0.2s;
+  transition: border-color 0.2s, background 0.2s, transform 0.12s;
 }
 .icon-btn:hover { border-color: var(--accent); }
 .send-btn, .primary-btn {
@@ -287,14 +307,17 @@ body {
   transition: transform 0.15s, opacity 0.2s;
 }
 .send-btn:hover, .primary-btn:hover { transform: translateY(-1px); }
+.send-btn:active, .primary-btn:active { transform: translateY(0) scale(0.97); }
 .send-btn:disabled, .primary-btn:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
 .ghost-btn {
   height: 36px; padding: 0 14px;
   border: 1px solid var(--line); border-radius: 999px;
   background: transparent; color: var(--text);
-  cursor: pointer; transition: border-color 0.2s;
+  cursor: pointer; transition: border-color 0.2s, transform 0.12s, background 0.2s;
 }
 .ghost-btn:hover { border-color: var(--accent); }
+.ghost-btn:active { transform: scale(0.96); }
+.icon-btn:active { transform: scale(0.92); }
 
 /* 无损压缩开关 */
 .toggle-btn {
@@ -642,3 +665,91 @@ body {
 ::-webkit-scrollbar { width: 9px; height: 9px; }
 ::-webkit-scrollbar-thumb { background: var(--line); border-radius: 9px; }
 ::-webkit-scrollbar-track { background: transparent; }
+
+/* ============================================================
+   polish-studio-ui：动效、渠道标识、单图查看、拖拽分栏、路线图降权
+   ============================================================ */
+
+/* ---------- 提示词优化按钮 ---------- */
+.optimize-btn {
+  font-size: 0; /* 容器仅放 SVG */
+  color: var(--accent-2);
+  position: relative;
+  display: inline-flex; align-items: center; justify-content: center;
+}
+.optimize-btn:hover { border-color: var(--accent-2); color: var(--accent-2); }
+.optimize-btn svg { transition: transform 0.25s ease; }
+.optimize-btn:hover svg { transform: scale(1.12) rotate(-6deg); }
+.optimize-btn.loading { pointer-events: none; }
+.optimize-btn.loading svg { animation: optSpin 0.8s linear infinite; opacity: 0.7; }
+@keyframes optSpin { to { transform: rotate(360deg); } }
+
+/* ---------- 渠道视觉标识（本地色块 + 首字母） ---------- */
+.channel-logo {
+  flex: 0 0 auto;
+  width: 22px; height: 22px;
+  border-radius: 6px;
+  display: inline-flex; align-items: center; justify-content: center;
+  font-size: 11px; font-weight: 700; color: #fff;
+  letter-spacing: 0;
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.12);
+  text-transform: uppercase;
+}
+
+/* ---------- 单图直接查看按钮 ---------- */
+.card-view {
+  position: absolute; bottom: 6px; right: 6px;
+  width: 24px; height: 24px; border-radius: 50%;
+  border: none;
+  background: rgba(10, 14, 23, 0.72);
+  color: var(--text);
+  display: flex; align-items: center; justify-content: center;
+  cursor: pointer;
+  opacity: 0;
+  transform: scale(0.85);
+  transition: opacity 0.18s ease, transform 0.18s ease, background 0.18s ease;
+  z-index: 2;
+}
+.card:hover .card-view, .card:focus-within .card-view { opacity: 1; transform: scale(1); }
+.card-view:hover { background: var(--accent); color: #04121f; }
+.card-view svg { display: block; }
+
+/* ---------- 工作区拖拽排序 ---------- */
+.card[draggable="true"] { cursor: grab; }
+.card.dragging { opacity: 0.45; cursor: grabbing; transform: scale(0.97); }
+.card.drop-before { box-shadow: -3px 0 0 var(--accent-2); }
+.card.drop-after { box-shadow: 3px 0 0 var(--accent-2); }
+
+/* ---------- 路线图降权（可折叠、低视觉权重） ---------- */
+.roadmap {
+  margin-top: 14px;
+  padding: 0;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: rgba(26, 34, 52, 0.32);
+}
+.roadmap-summary {
+  display: flex; align-items: center; gap: 8px;
+  padding: 9px 14px;
+  cursor: pointer;
+  list-style: none;
+  user-select: none;
+  font-size: 12px; color: var(--text-dim);
+}
+.roadmap-summary::-webkit-details-marker { display: none; }
+.roadmap-summary-label { font-weight: 600; letter-spacing: 0.3px; }
+.roadmap-summary-hint { color: var(--text-dim); opacity: 0.7; font-size: 11px; }
+.roadmap-chevron { margin-left: auto; font-size: 11px; transition: transform 0.2s ease; }
+.roadmap[open] .roadmap-chevron { transform: rotate(180deg); }
+.roadmap .roadmap-list { padding: 0 14px 12px; }
+.roadmap[open] .roadmap-list { animation: rise 0.24s ease both; }
+
+/* ---------- 减少动态效果降级（可访问性） ---------- */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+    scroll-behavior: auto !important;
+  }
+}

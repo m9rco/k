@@ -10,7 +10,19 @@
   <!-- 顶部品牌栏 -->
   <header class="topbar">
     <div class="brand">
-      <span class="brand-mark" aria-hidden="true"></span>
+      <span class="brand-mark" aria-hidden="true">
+        <svg viewBox="0 0 32 32" width="22" height="22" fill="none" xmlns="http://www.w3.org/2000/svg">
+          <rect x="1.5" y="1.5" width="29" height="29" rx="7" stroke="url(#bmStroke)" stroke-width="1.6" class="bm-frame" />
+          <path d="M16 6 L25 11 V21 L16 26 L7 21 V11 Z" stroke="url(#bmStroke)" stroke-width="1.4" class="bm-hex" />
+          <circle cx="16" cy="16" r="3.2" fill="url(#bmStroke)" class="bm-core" />
+          <defs>
+            <linearGradient id="bmStroke" x1="0" y1="0" x2="32" y2="32" gradientUnits="userSpaceOnUse">
+              <stop stop-color="#5b8cff" />
+              <stop offset="1" stop-color="#19e3c2" />
+            </linearGradient>
+          </defs>
+        </svg>
+      </span>
       <span class="brand-text">
         <span class="brand-name">Game Asset<strong>Studio</strong></span>
         <span class="brand-tagline">对话式宣发素材工作台</span>
@@ -45,6 +57,13 @@
         <input type="file" id="fileInput" accept="image/*" multiple hidden />
         <input type="text" id="msgInput" class="composer-input"
                placeholder="例如：把背景换成夜晚的赛博朋克城市" />
+        <button type="button" class="icon-btn optimize-btn" id="optimizeBtn"
+                title="优化提示词：把口语化描述改写成更适合生图的提示词" aria-label="优化提示词">
+          <svg viewBox="0 0 20 20" width="18" height="18" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+            <path d="M10 2.5 11.4 6.6 15.5 8 11.4 9.4 10 13.5 8.6 9.4 4.5 8 8.6 6.6Z" fill="currentColor"/>
+            <path d="M15 12.5 15.7 14.3 17.5 15 15.7 15.7 15 17.5 14.3 15.7 12.5 15 14.3 14.3Z" fill="currentColor" opacity="0.8"/>
+          </svg>
+        </button>
         <button type="button" class="toggle-btn on" id="losslessBtn"
                 title="无损压缩：开启时对 PNG 产物做无损优化" aria-pressed="true">无损</button>
         <button type="submit" class="send-btn" id="sendBtn">发送</button>
@@ -75,11 +94,15 @@
         <ul id="prefsList"></ul>
       </aside>
 
-      <!-- 未来能力路线图：仅展示规划 -->
-      <aside class="roadmap" id="roadmap">
-        <h3>规划中的能力</h3>
+      <!-- 未来能力路线图：收敛为可折叠入口，默认收起，让位工作区主视觉 -->
+      <details class="roadmap" id="roadmap">
+        <summary class="roadmap-summary">
+          <span class="roadmap-summary-label">规划中的能力</span>
+          <span class="roadmap-summary-hint">查看 Agent 建设方向</span>
+          <span class="roadmap-chevron" aria-hidden="true">▾</span>
+        </summary>
         <ul class="roadmap-list" id="roadmapList"></ul>
-      </aside>
+      </details>
     </section>
   </main>
 

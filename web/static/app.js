@@ -17,6 +17,9 @@ const state = {
   taskStreams: new Map(),
   selected: new Set(),
   channels: [],
+  // 工作区已完成资产的前端展示顺序（asset id 数组）。仅前端展示态，不持久化到
+  // 后端；刷新后回退到后端返回的默认顺序（newest-first）。
+  order: [],
   streamingEl: null,
   reasoningOpen: null,
   pendingTools: [],
@@ -367,6 +370,42 @@ function sendMessage(text, ref) {
   if (text == null) input.value = "";
 }
 
+// optimizePrompt sends the current composer text to the backend rewriter and
+// replaces the input with the structured prompt for the user to confirm before
+// sending. It never auto-sends. Empty input is a no-op; failures keep the
+// user's original text intact (requirement: 提示词优化入口).
+async function optimizePrompt() {
+  const input = $("#msgInput");
+  const original = input.value.trim();
+  if (!original) {
+    toast("先输入一句想做什么，我来帮你润色成提示词", "warn");
+    return;
+  }
+  const btn = $("#optimizeBtn");
+  if (btn.classList.contains("loading")) return; // guard double-click
+  btn.classList.add("loading");
+  try {
+    const resp = await api(`/api/session/${state.sessionId}/prompt/optimize`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text: original }),
+    });
+    const optimized = (resp && resp.optimized) || "";
+    if (optimized && optimized !== original) {
+      input.value = optimized;
+      toast("已优化提示词，确认后发送", "ok");
+    } else {
+      toast("提示词已经挺到位了，无需优化", "ok");
+    }
+    input.focus();
+  } catch (e) {
+    // Original input is untouched (we never cleared it), so nothing is lost.
+    toast("优化失败：" + e.message);
+  } finally {
+    btn.classList.remove("loading");
+  }
+}
+
 // ---------- 工作区 ----------
 
 async function refreshWorkspace() {
@@ -397,7 +436,7 @@ function renderWorkspace() {
     if (task.status === "failed") failed.push(task);
     else active.push(task); // queued / running
   }
-  const assets = [...state.assets.values()];
+  const assets = orderedAssets();
 
   const total = active.length + failed.length + assets.length;
   if (total === 0) {
@@ -432,6 +471,42 @@ function appendMilestone(grid, title, count, cards) {
   for (const c of cards) inner.appendChild(c);
   section.appendChild(inner);
   grid.appendChild(section);
+}
+
+// orderedAssets returns completed assets honoring the user's drag-sorted order
+// (state.order) for ids still present, with any new/unsorted assets appended in
+// the backend's default order. The order is a pure frontend display concern and
+// is reconciled here so removed ids drop out and fresh ones slot in.
+function orderedAssets() {
+  const byId = state.assets;
+  const seen = new Set();
+  const out = [];
+  for (const id of state.order) {
+    const a = byId.get(id);
+    if (a) { out.push(a); seen.add(id); }
+  }
+  for (const a of byId.values()) {
+    if (!seen.has(a.id)) out.push(a);
+  }
+  // Keep state.order in sync with the reconciled view (drops stale ids).
+  state.order = out.map((a) => a.id);
+  return out;
+}
+
+// applyDragReorder moves the dragged asset id to before/after the target id in
+// state.order, then re-renders. Frontend-only; never persisted to the backend.
+function applyDragReorder(draggedId, targetId, after) {
+  if (draggedId === targetId) return;
+  const ids = orderedAssets().map((a) => a.id); // normalized current order
+  const from = ids.indexOf(draggedId);
+  if (from === -1) return;
+  ids.splice(from, 1);
+  let to = ids.indexOf(targetId);
+  if (to === -1) return;
+  if (after) to += 1;
+  ids.splice(to, 0, draggedId);
+  state.order = ids;
+  renderWorkspace();
 }
 
 // ---------- 下一步自动补全提示（前端启发式） ----------
@@ -569,13 +644,68 @@ function assetCard(asset) {
   const check = el("div", "card-check", "✓");
   card.appendChild(check);
 
+  // 单图直接查看：独立于左键多选的小按钮，点击直接放大预览，不改变多选状态。
+  const viewBtn = el("button", "card-view");
+  viewBtn.type = "button";
+  viewBtn.title = "放大查看";
+  viewBtn.setAttribute("aria-label", "放大查看");
+  viewBtn.innerHTML =
+    '<svg viewBox="0 0 18 18" width="14" height="14" fill="none" xmlns="http://www.w3.org/2000/svg">' +
+    '<circle cx="7.5" cy="7.5" r="5" stroke="currentColor" stroke-width="1.6"/>' +
+    '<path d="M11.2 11.2 15.5 15.5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>';
+  viewBtn.onclick = (e) => {
+    e.stopPropagation(); // do not toggle selection
+    openLightbox(asset);
+  };
+  card.appendChild(viewBtn);
+
   // 左键切换多选；右键弹出操作菜单（放大/切尺寸/二次调整/下载）。
   card.onclick = () => toggleSelect(asset.id, card);
   card.oncontextmenu = (e) => {
     e.preventDefault();
     openAssetMenu(e.clientX, e.clientY, asset);
   };
+
+  // 拖拽排序（仅前端展示态）。
+  enableCardDrag(card, asset.id);
   return card;
+}
+
+// enableCardDrag wires native HTML5 drag-and-drop on a completed asset card so
+// the user can reorder the workspace display. The order lives in state.order
+// only — it is never sent to the backend.
+function enableCardDrag(card, assetId) {
+  card.draggable = true;
+  card.dataset.assetId = assetId;
+  card.addEventListener("dragstart", (e) => {
+    card.classList.add("dragging");
+    e.dataTransfer.effectAllowed = "move";
+    e.dataTransfer.setData("text/plain", assetId);
+  });
+  card.addEventListener("dragend", () => {
+    card.classList.remove("dragging");
+    card.classList.remove("drop-before", "drop-after");
+  });
+  card.addEventListener("dragover", (e) => {
+    e.preventDefault();
+    e.dataTransfer.dropEffect = "move";
+    const rect = card.getBoundingClientRect();
+    const after = e.clientX > rect.left + rect.width / 2;
+    card.classList.toggle("drop-after", after);
+    card.classList.toggle("drop-before", !after);
+  });
+  card.addEventListener("dragleave", () => {
+    card.classList.remove("drop-before", "drop-after");
+  });
+  card.addEventListener("drop", (e) => {
+    e.preventDefault();
+    e.stopPropagation(); // don't bubble to the workspace upload-drop handler
+    card.classList.remove("drop-before", "drop-after");
+    const draggedId = e.dataTransfer.getData("text/plain");
+    const rect = card.getBoundingClientRect();
+    const after = e.clientX > rect.left + rect.width / 2;
+    if (draggedId) applyDragReorder(draggedId, assetId, after);
+  });
 }
 
 function statusLabel(s) {
@@ -835,6 +965,50 @@ async function uploadFiles(files) {
 
 // ---------- 尺寸选择器（渠道 → 素材类型 → 尺寸） ----------
 
+// CHANNEL_COLORS maps a channel id to its brand color, used for the local
+// avatar-style identity badge (color block + initial). We deliberately do NOT
+// fetch third-party logos (copyright + unreliable sources); a colored initial
+// is zero-risk and visually consistent. Channels without an entry fall back to
+// a per-group default (see GROUP_COLORS).
+const CHANNEL_COLORS = {
+  taptap: "#1a1a1a", game4399: "#ff7a00", haoyoukuaibao: "#ff5722",
+  bilibili: "#fb7299", huya: "#ff7e00", wegame: "#1e6fff",
+  huawei: "#c7000b", oppo: "#1ba784", vivo: "#415fff", xiaomi: "#ff6700",
+  honor: "#0090ff", txvideo: "#ff5c38", qqmusic: "#31c27c",
+  ios: "#0a84ff", douyin: "#000000", kuaishou: "#ff5000", feiying: "#5b8cff",
+  qq: "#12b7f5", weixin: "#07c160", yyb: "#0c7ff7", qqbrowser: "#3a8cff",
+  txgamephone: "#00a4ff", guanjia: "#0073ff", txnews: "#d23c3c",
+  txaccel: "#7b5bff", txcomic: "#ff6a3d", xinyue: "#9b6bff",
+};
+
+// GROUP_COLORS provides a fallback brand color per coarse group so a channel
+// without an explicit color still renders a sensible, on-brand badge.
+const GROUP_COLORS = {
+  "外渠": "#5b8cff", "手机厂商": "#19e3c2", "腾讯内渠": "#3a8cff", "PC": "#7b5bff",
+};
+
+// channelInitial returns a 1-char label for a channel's badge: the leading
+// ASCII letter (uppercased) when the id is latin, else the first CJK char of
+// the display name.
+function channelInitial(ch) {
+  const m = (ch.id || "").match(/[a-zA-Z]/);
+  if (m) return m[0].toUpperCase();
+  return (ch.name || "?").trim().charAt(0) || "?";
+}
+
+// channelColor resolves a channel's badge color: explicit map → group default
+// → neutral accent.
+function channelColor(ch) {
+  return CHANNEL_COLORS[ch.id] || GROUP_COLORS[ch.group] || "#5b8cff";
+}
+
+// buildChannelBadge renders the local color-block + initial identity badge.
+function buildChannelBadge(ch) {
+  const badge = el("span", "channel-logo", channelInitial(ch));
+  badge.style.background = channelColor(ch);
+  return badge;
+}
+
 async function loadPlatforms() {
   try {
     const data = await api("/api/platforms");
@@ -932,6 +1106,7 @@ function renderChannelList() {
   }
   for (const ch of channels) {
     const item = el("button", "channel-item");
+    item.appendChild(buildChannelBadge(ch));
     item.appendChild(el("span", "channel-name", ch.name));
     const n = countChosenInChannel(ch.id);
     if (n > 0) item.appendChild(el("span", "channel-badge", String(n)));
@@ -1299,6 +1474,9 @@ function bindUI() {
     if (fileInput.files.length) uploadFiles(fileInput.files);
     fileInput.value = "";
   };
+
+  // 提示词优化按钮
+  $("#optimizeBtn").onclick = optimizePrompt;
 
   // 无损压缩开关
   $("#losslessBtn").onclick = () => {
