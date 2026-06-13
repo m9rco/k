@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"fmt"
+	"log"
 
 	"gameasset/internal/crawl"
 	"gameasset/internal/crop"
@@ -61,6 +62,7 @@ func (d ToolDeps) newEditTool() (tool.InvokableTool, error) {
 			"Performs color harmonization automatically. Use source_asset_id to adjust an already-generated image. "+
 			"Returns a task id; progress streams over SSE and the result lands in the workspace.",
 		func(ctx context.Context, a editArgs) (editResult, error) {
+			log.Printf("edit_image: invoked intent=%q source=%q refs=%v", a.Intent, a.SourceAssetID, a.ReferenceAssetIDs)
 			kind := generation.EditKind(a.Intent)
 			switch kind {
 			case generation.EditCharacter, generation.EditBackground, generation.EditText:
@@ -81,10 +83,13 @@ func (d ToolDeps) newEditTool() (tool.InvokableTool, error) {
 				},
 			})
 			if err != nil {
+				log.Printf("edit_image: Start error: %v", err)
 				return editResult{}, err
 			}
+			log.Printf("edit_image: started task=%s", taskID)
 			return editResult{TaskID: taskID, Status: "queued", Note: "Generation started; watch task progress."}, nil
 		},
+		utils.WithMarshalOutput(friendlyMarshal("好的，正在按你的要求处理这张图，产物会很快出现在右侧工作区。")),
 	)
 }
 
@@ -218,6 +223,7 @@ func (d ToolDeps) newVideoTool() (tool.InvokableTool, error) {
 			}
 			return videoResult{TaskID: taskID, Status: "queued", Note: "Video generation started; watch task progress."}, nil
 		},
+		utils.WithMarshalOutput(friendlyMarshal("好的，正在把这张图生成视频，完成后会出现在右侧工作区。")),
 	)
 }
 
@@ -254,7 +260,15 @@ func (d ToolDeps) newCrawlTool() (tool.InvokableTool, error) {
 			}
 			return crawlResult{TaskID: taskID, Status: "queued", Note: "Crawl started; watch task progress."}, nil
 		},
+		utils.WithMarshalOutput(friendlyMarshal("好的，正在抓取该游戏的素材预览，结果会出现在右侧工作区。")),
 	)
+}
+
+// friendlyMarshal returns a MarshalOutput that emits a fixed user-facing Chinese
+// sentence regardless of the raw result struct. Used for ToolReturnDirectly async
+// tools so the chat shows a clean confirmation instead of raw {task_id,...} JSON.
+func friendlyMarshal(msg string) utils.MarshalOutput {
+	return func(_ context.Context, _ any) (string, error) { return msg, nil }
 }
 
 // Tools builds the full whitelist of agent tools for this session.
@@ -290,4 +304,17 @@ func (d ToolDeps) Tools() ([]tool.BaseTool, error) {
 		tools = append(tools, cr)
 	}
 	return tools, nil
+}
+
+// AsyncTaskTools are the fire-and-forget tools: each only STARTS an async task
+// (returning a task id) and its progress is tracked out-of-band over SSE. These
+// must return directly to the user after one call — feeding their {status:queued}
+// result back into the model makes a small model think the work is unfinished
+// and re-invoke the tool forever (a生图 loop). Wired as react ToolReturnDirectly.
+func AsyncTaskTools() map[string]struct{} {
+	return map[string]struct{}{
+		"edit_image":        {},
+		"image_to_video":    {},
+		"crawl_game_assets": {},
+	}
 }

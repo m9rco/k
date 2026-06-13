@@ -75,6 +75,8 @@ func (s *Service) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/session/{id}/tasks", s.handleListTasks)
 	mux.HandleFunc("POST /api/session/{id}/upload", s.handleUpload)
 	mux.HandleFunc("POST /api/session/{id}/tasks/{taskId}/retry", s.handleRetry)
+	mux.HandleFunc("DELETE /api/session/{id}/tasks/{taskId}", s.handleDeleteTask)
+	mux.HandleFunc("POST /api/session/{id}/tasks/failed/clear", s.handleClearFailed)
 	mux.HandleFunc("POST /api/session/{id}/clear", s.handleClear)
 }
 
@@ -251,6 +253,35 @@ func (s *Service) handleRetry(w http.ResponseWriter, r *http.Request) {
 	}
 	w.WriteHeader(http.StatusAccepted)
 	writeJSON(w, map[string]string{"status": "queued", "taskId": taskID})
+}
+
+// handleDeleteTask removes a single task (e.g. a failed placeholder the user
+// wants to dismiss), scoped to its session. 404 when the task is not found.
+func (s *Service) handleDeleteTask(w http.ResponseWriter, r *http.Request) {
+	sessionID := r.PathValue("id")
+	taskID := r.PathValue("taskId")
+	n, err := s.store.DeleteTask(sessionID, taskID)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if n == 0 {
+		http.NotFound(w, r)
+		return
+	}
+	writeJSON(w, map[string]string{"status": "deleted", "taskId": taskID})
+}
+
+// handleClearFailed removes every failed task for the session in one shot
+// (one-click cleanup of the failed milestone).
+func (s *Service) handleClearFailed(w http.ResponseWriter, r *http.Request) {
+	sessionID := r.PathValue("id")
+	n, err := s.store.DeleteFailedTasks(sessionID)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, map[string]any{"status": "cleared", "removed": n})
 }
 
 func writeJSON(w http.ResponseWriter, v any) {

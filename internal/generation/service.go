@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"image"
+	"log"
 	"os"
 	"path/filepath"
 	"sync"
@@ -36,11 +37,27 @@ type Service struct {
 	now      func() time.Time
 	newID    func(prefix string) string
 
+	// announce, when set, broadcasts a task_created event over the conversation
+	// channel the instant a task is created, so the workspace shows an immediate
+	// placeholder without waiting for the agent turn to finish. Optional (nil in
+	// tests / when no hub is wired).
+	announce TaskAnnouncer
+
 	// params caches each task's request so a failed product can be retried
 	// without the caller re-supplying inputs (short-term in-memory store, D7).
 	mu     sync.Mutex
 	params map[string]GenerateParams
 }
+
+// TaskAnnouncer broadcasts a task-created notice to a session's live clients.
+// kind is one of "generate" / "video" so the frontend can pick a placeholder.
+type TaskAnnouncer interface {
+	AnnounceTask(sessionID, taskID, kind string)
+}
+
+// SetAnnouncer installs the task-created broadcaster (wired by main once the hub
+// exists, avoiding an init cycle). Safe to leave unset.
+func (s *Service) SetAnnouncer(a TaskAnnouncer) { s.announce = a }
 
 // NewService constructs a generation service.
 func NewService(gen generator, st *store.Store, broker *transport.TaskBroker, assetDir string, newID func(string) string) *Service {
@@ -115,6 +132,11 @@ func (s *Service) Start(ctx context.Context, p GenerateParams) (string, error) {
 	s.mu.Lock()
 	s.params[taskID] = p
 	s.mu.Unlock()
+	// Announce over the conversation channel first so the workspace can paint a
+	// placeholder immediately, then publish the queued event on the SSE stream.
+	if s.announce != nil {
+		s.announce.AnnounceTask(p.SessionID, taskID, "generate")
+	}
 	s.broker.Publish(taskID, transport.EventTaskQueued, p.SessionID, map[string]string{"intent": string(p.Slots.Kind)})
 
 	go s.run(context.WithoutCancel(ctx), taskID, p)
@@ -210,6 +232,8 @@ func (s *Service) run(ctx context.Context, taskID string, p GenerateParams) {
 	s.progress(taskID, p.SessionID, 45)
 
 	// 二次调整：产物尺寸继承源图原尺寸（provider 端会 snap 到支持的尺寸 enum）。
+	genStart := time.Now()
+	log.Printf("gen.run: task=%s calling provider.Generate (prompt %d chars, refs=%d)", taskID, len(prompt), len(extraImages))
 	out, err := s.gen.Generate(ctx, Request{
 		Prompt:          prompt,
 		SourceImage:     srcBytes,
@@ -219,9 +243,11 @@ func (s *Service) run(ctx context.Context, taskID string, p GenerateParams) {
 		Height:          srcH,
 	})
 	if err != nil {
+		log.Printf("gen.run: task=%s provider.Generate FAILED after %s: %v", taskID, time.Since(genStart), err)
 		s.fail(taskID, p.SessionID, err.Error())
 		return
 	}
+	log.Printf("gen.run: task=%s provider.Generate OK in %s (%d bytes)", taskID, time.Since(genStart), len(out.Data))
 	s.progress(taskID, p.SessionID, 80)
 
 	// Persist the product.
@@ -263,6 +289,7 @@ func (s *Service) run(ctx context.Context, taskID string, p GenerateParams) {
 		"assetId":  assetID,
 		"provider": out.Provider,
 	})
+	log.Printf("gen.run: task=%s DONE asset=%s published task_done", taskID, assetID)
 }
 
 func (s *Service) setStatus(taskID, sessionID, status string, ev transport.EventType, progress int, assetID, errMsg string) {

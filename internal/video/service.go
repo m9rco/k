@@ -9,6 +9,7 @@ package video
 import (
 	"context"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -32,9 +33,10 @@ type Provider interface {
 type Request struct {
 	// Prompt is the fully assembled, server-controlled motion prompt.
 	Prompt string
-	// SourceImage is the input frame the motion is applied to.
-	SourceImage []byte
-	SourceMime  string
+	// ImageURL is the publicly fetchable URL of the source frame. The happyhorse
+	// provider fetches the image by URL, so the service uploads the local asset to
+	// public object storage (COS) first and passes the resulting URL here.
+	ImageURL string
 }
 
 // Output is the produced video.
@@ -42,6 +44,12 @@ type Output struct {
 	Data     []byte
 	Mime     string
 	Provider string
+}
+
+// ImageUploader publishes a local image to a public URL (implemented by the COS
+// uploader). Image-to-video requires a publicly fetchable source image.
+type ImageUploader interface {
+	Upload(ctx context.Context, name string, data []byte, contentType string) (string, error)
 }
 
 // Params describes one image-to-video request from the agent.
@@ -61,7 +69,23 @@ type Service struct {
 	assetDir string
 	now      func() time.Time
 	newID    func(prefix string) string
+	announce TaskAnnouncer
+	uploader ImageUploader
 }
+
+// TaskAnnouncer broadcasts a task-created notice to a session's live clients so
+// the workspace can show an immediate placeholder. Optional.
+type TaskAnnouncer interface {
+	AnnounceTask(sessionID, taskID, kind string)
+}
+
+// SetAnnouncer installs the task-created broadcaster (wired by main once the hub
+// exists). Safe to leave unset.
+func (s *Service) SetAnnouncer(a TaskAnnouncer) { s.announce = a }
+
+// SetUploader installs the public-image uploader (COS). Required for video to be
+// considered configured, since the provider fetches the source image by URL.
+func (s *Service) SetUploader(u ImageUploader) { s.uploader = u }
 
 // NewService constructs the video service.
 func NewService(prov Provider, st *store.Store, broker *transport.TaskBroker, assetDir string, newID func(string) string) *Service {
@@ -75,9 +99,11 @@ func NewService(prov Provider, st *store.Store, broker *transport.TaskBroker, as
 	}
 }
 
-// Configured reports whether image-to-video is available.
+// Configured reports whether image-to-video is available: it needs both a
+// configured provider and a public-image uploader (the provider fetches the
+// source image by URL, so without an uploader the call cannot work).
 func (s *Service) Configured() bool {
-	return s.prov != nil && s.prov.Configured()
+	return s.prov != nil && s.prov.Configured() && s.uploader != nil
 }
 
 // Start validates inputs, creates a task, and kicks off async generation. It
@@ -107,6 +133,9 @@ func (s *Service) Start(ctx context.Context, p Params) (string, error) {
 	if err := s.store.InsertTask(rec); err != nil {
 		return "", err
 	}
+	if s.announce != nil {
+		s.announce.AnnounceTask(p.SessionID, taskID, "video")
+	}
 	s.broker.Publish(taskID, transport.EventTaskQueued, p.SessionID, map[string]string{"intent": "image_to_video"})
 	go s.run(context.WithoutCancel(ctx), taskID, p)
 	return taskID, nil
@@ -126,10 +155,21 @@ func (s *Service) run(ctx context.Context, taskID string, p Params) {
 		s.fail(taskID, p.SessionID, fmt.Sprintf("read source: %v", err))
 		return
 	}
-	s.progress(taskID, p.SessionID, 35)
+	s.progress(taskID, p.SessionID, 25)
+
+	// Publish the source frame to public object storage so the provider can fetch
+	// it by URL (happyhorse requires a publicly reachable image link).
+	imgName := fmt.Sprintf("video-src/%s%s", p.SourceAssetID, extForMime(asset.Mime))
+	imgURL, err := s.uploader.Upload(ctx, imgName, srcBytes, imageContentType(asset.Mime))
+	if err != nil {
+		s.fail(taskID, p.SessionID, fmt.Sprintf("publish source image: %v", err))
+		return
+	}
+	log.Printf("video.run: task=%s source published at %s", taskID, imgURL)
+	s.progress(taskID, p.SessionID, 40)
 
 	prompt := buildMotionPrompt(p.Motion)
-	out, err := s.prov.Generate(ctx, Request{Prompt: prompt, SourceImage: srcBytes, SourceMime: asset.Mime})
+	out, err := s.prov.Generate(ctx, Request{Prompt: prompt, ImageURL: imgURL})
 	if err != nil {
 		s.fail(taskID, p.SessionID, err.Error())
 		return
@@ -227,7 +267,25 @@ func extForMime(mime string) string {
 		return ".mp4"
 	case "video/webm":
 		return ".webm"
+	// Image source frames published to COS keep their original extension.
+	case "image/png":
+		return ".png"
+	case "image/jpeg":
+		return ".jpg"
+	case "image/webp":
+		return ".webp"
 	default:
 		return ".mp4"
+	}
+}
+
+// imageContentType normalizes an asset mime to a concrete image content type for
+// the COS upload, defaulting to PNG when unknown.
+func imageContentType(mime string) string {
+	switch mime {
+	case "image/png", "image/jpeg", "image/webp":
+		return mime
+	default:
+		return "image/png"
 	}
 }

@@ -1,0 +1,4 @@
+# React/Vite frontend build tooling.
+node_modules/
+dist-check/
+*.tsbuildinfo

@@ -10,6 +10,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io/fs"
 	"log"
 	"net/http"
@@ -21,6 +22,7 @@ import (
 
 	"gameasset/internal/agent"
 	"gameasset/internal/config"
+	"gameasset/internal/cos"
 	"gameasset/internal/crawl"
 	"gameasset/internal/crop"
 	"gameasset/internal/download"
@@ -87,8 +89,29 @@ func run() error {
 	)
 	genSvc := generation.NewService(gen, st, broker, cfg.AssetDir, id.New)
 
-	// Image-to-video service (happyhorse R2V; degrades when unconfigured).
+	// Image-to-video service (happyhorse). The provider fetches the source image
+	// by public URL, so video requires a COS uploader to publish the local frame
+	// first. Without COS configured the uploader stays nil, Service.Configured()
+	// is false, the tool is left out of the whitelist, and the agent politely
+	// reports "暂未配置" instead of attempting a call that cannot work.
 	vidSvc := video.NewService(video.NewHTTPProvider(cfg.Video), st, broker, cfg.AssetDir, id.New)
+	cosUploader, err := cos.New(cfg.COS)
+	if err != nil {
+		return fmt.Errorf("init cos uploader: %w", err)
+	}
+	if cosUploader != nil {
+		vidSvc.SetUploader(cosUploader)
+		log.Printf("video: COS uploader configured (bucket=%s), image-to-video enabled", cfg.COS.Bucket)
+	} else {
+		log.Printf("video: COS not configured, image-to-video disabled")
+	}
+
+	// Broadcast task_created over the WS conversation channel the instant a task
+	// is created, so the workspace paints a placeholder immediately rather than
+	// waiting for the agent turn to finish (deterministic, not callback-dependent).
+	announcer := taskAnnouncer{hub: hub}
+	genSvc.SetAnnouncer(announcer)
+	vidSvc.SetAnnouncer(announcer)
 
 	// Game-asset crawl service (pluggable source; degrades when unconfigured).
 	crawlSvc := crawl.NewService(crawl.NewHTTPSource(cfg.CrawlEndpoint, cfg.CrawlAPIKey), st, broker, cfg.AssetDir, id.New)
@@ -199,6 +222,21 @@ func run() error {
 func writeJSON(w http.ResponseWriter, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(v)
+}
+
+// taskAnnouncer adapts the WS hub to the generation/video TaskAnnouncer hook:
+// it broadcasts a task_created event to the session so the frontend can paint a
+// placeholder and subscribe to SSE progress the instant a task is created.
+type taskAnnouncer struct{ hub *transport.Hub }
+
+func (a taskAnnouncer) AnnounceTask(sessionID, taskID, kind string) {
+	log.Printf("announce: task_created session=%s task=%s kind=%s conns=%d", sessionID, taskID, kind, a.hub.ConnCount(sessionID))
+	a.hub.Send(sessionID, transport.Event{
+		Type:      transport.EventTaskCreated,
+		SessionID: sessionID,
+		TaskID:    taskID,
+		Data:      map[string]string{"task_id": taskID, "kind": kind},
+	})
 }
 
 // spaHandler serves static files from fsys, falling back to index.html for

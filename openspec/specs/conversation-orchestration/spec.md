@@ -4,22 +4,25 @@
 TBD - created by archiving change add-asset-studio-mvp. Update Purpose after archive.
 ## Requirements
 ### Requirement: 意图识别与白名单分发
-系统 SHALL 基于 Eino agent 识别用户意图，仅执行预设意图集合（换角色/换背景/换文案、切尺寸、下载/打包、**物料爬取、生视频**）。对集合外的请求，系统 SHALL 不执行任何工具，并礼貌返回说明及可执行能力清单。
+系统 SHALL 仅就预设意图（换背景/换角色/换文案/切尺寸/生视频/物料爬取/下载打包）调用对应工具，其余请求礼貌拒绝并列出能力清单；工具调用的完成事件 SHALL 结构化携带其所产生长任务的标识，使前端能够即时定位并订阅该任务的进度，而不必等待本轮对话结束。
 
-#### Scenario: 命中预设意图
-- **WHEN** 用户请求"把这张图的背景换成夜晚城市"
-- **THEN** agent 识别为换背景意图并分发到生图工具
-- **AND** 工具调用过程以事件形式可见于前端
+#### Scenario: 命中白名单意图
+- **WHEN** 用户请求命中预设意图
+- **THEN** 系统调用对应工具并以事件形式反馈调用生命周期
 
-#### Scenario: 命中爬取或生视频意图
-- **WHEN** 用户请求"爬取某游戏素材"或"让这张图动起来"
-- **THEN** agent 识别为物料爬取 / 生视频意图并分发到对应工具
-- **AND** 工具调用过程以事件形式可见于前端
+#### Scenario: 工具完成事件携带任务标识
+- **WHEN** 某工具调用成功并产生了一个异步长任务（生图/二次调整/生视频/爬取）
+- **THEN** 该工具的完成事件在结果数据中携带该任务的 id 及任务类型（如 generate/video/crawl）
+- **AND** 前端据此即时插入占位并订阅该任务的进度流
 
-#### Scenario: 超出预设意图礼貌拒绝
-- **WHEN** 用户请求与素材生成无关的任务（如"帮我写一封邮件"）
-- **THEN** 系统不执行任何工具
-- **AND** 返回礼貌说明，并列出当前支持的能力
+#### Scenario: 非长任务工具不携带任务标识
+- **WHEN** 工具调用不产生异步长任务（如列举尺寸、纯裁剪即时返回）
+- **THEN** 其完成事件不携带长任务 id
+- **AND** 前端不会为其插入占位骨架
+
+#### Scenario: 白名单外请求被拒绝
+- **WHEN** 用户请求不在预设意图内
+- **THEN** 系统不调用任何工具并礼貌说明能力范围
 
 ### Requirement: Context 滑动窗口管理
 系统 SHALL 对会话消息维护一个 token 预算受限的滑动窗口：超出预算时保留 system 提示与最近若干轮原文，对更早轮次做摘要压缩为单条 summary 消息，以防止 context 膨胀导致模型输出失真。
@@ -41,7 +44,7 @@ TBD - created by archiving change add-asset-studio-mvp. Update Purpose after arc
 - **THEN** 系统忽略该指定并使用服务端配置的模型
 
 ### Requirement: 流式对话输出
-系统 SHALL 以**真·流式**方式消费模型供应商的流式响应，并将 agent 的回复增量与思考增量分别实时推送给前端，而非先获取完整结果再切块模拟。当模型返回思考内容（reasoning/thinking）时，系统 SHALL 将其作为独立于回答正文的增量类型推送；当供应商流式解析失败时，系统 SHALL 降级为读取完整响应后补发，保证前端不空屏。
+系统 SHALL 以**真·流式**方式消费模型供应商的流式响应，并将 agent 的回复增量与思考增量分别实时推送给前端，而非先获取完整结果再切块模拟。当模型返回思考内容（reasoning/thinking）时，系统 SHALL 将其作为独立于回答正文的增量类型推送；对于支持显式开启思考的会话供应商（如 Anthropic extended thinking），系统 SHALL 在请求中开启思考能力，使思考增量得以产生并下发，从而保证前端的思考块有内容可逐字渲染；当供应商流式解析失败时，系统 SHALL 降级为读取完整响应后补发，保证前端不空屏。
 
 #### Scenario: 回答增量流式推送
 - **WHEN** agent 生成回复
@@ -51,6 +54,11 @@ TBD - created by archiving change add-asset-studio-mvp. Update Purpose after arc
 - **WHEN** 模型在回答前返回思考内容
 - **THEN** 系统将思考增量以区别于回答正文的事件类型逐片推送
 - **AND** 前端据此实时渲染思考块
+
+#### Scenario: 开启供应商思考能力
+- **WHEN** 当前会话供应商支持显式开启思考（如 Anthropic extended thinking）
+- **THEN** 系统在模型请求中开启思考能力并设置合理的思考预算与输出上限
+- **AND** 由此产生的思考增量经既有思考事件类型实时下发给前端
 
 #### Scenario: 流式失败降级
 - **WHEN** 供应商流式响应解析失败

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"strconv"
 	"strings"
@@ -73,6 +74,7 @@ func (m *chatModel) Stream(ctx context.Context, input []*schema.Message, opts ..
 	resp, err := m.openStream(ctx, input)
 	if err != nil {
 		// Setup failed before any byte streamed: safe to degrade to one-shot.
+		log.Printf("chatmodel: stream open failed, degrading to one-shot: %v", err)
 		return m.fallbackStream(ctx, input, opts...)
 	}
 	sr, sw := schema.Pipe[*schema.Message](16)
@@ -319,6 +321,16 @@ func (m *chatModel) anthropicBody(input []*schema.Message) map[string]any {
 		"model":      m.cfg.Model,
 		"max_tokens": 2048,
 		"messages":   msgs,
+	}
+	// Extended thinking is opt-in (config flag): some proxies/model ids reject the
+	// thinking field or alter tool-calling when it is set, so default off. When on,
+	// max_tokens must exceed budget_tokens (Anthropic constraint), so raise it.
+	if m.cfg.Thinking {
+		body["max_tokens"] = 3072
+		body["thinking"] = map[string]any{
+			"type":          "enabled",
+			"budget_tokens": 1024,
+		}
 	}
 	if system != "" {
 		body["system"] = system

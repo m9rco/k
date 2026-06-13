@@ -249,6 +249,28 @@ func (s *Store) DeleteUnfinishedTasks(sessionID string) error {
 	return nil
 }
 
+// DeleteTask removes a single task scoped to its session. Returns the number of
+// rows deleted so callers can tell a missing/already-removed task from a hit.
+func (s *Store) DeleteTask(sessionID, taskID string) (int64, error) {
+	res, err := s.db.Exec(`DELETE FROM tasks WHERE session_id = ? AND id = ?`, sessionID, taskID)
+	if err != nil {
+		return 0, fmt.Errorf("delete task: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	return n, nil
+}
+
+// DeleteFailedTasks removes all failed tasks for a session (one-click cleanup of
+// the failed milestone). Returns how many were removed.
+func (s *Store) DeleteFailedTasks(sessionID string) (int64, error) {
+	res, err := s.db.Exec(`DELETE FROM tasks WHERE session_id = ? AND status = 'failed'`, sessionID)
+	if err != nil {
+		return 0, fmt.Errorf("delete failed tasks: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	return n, nil
+}
+
 // --- Tasks ---
 
 // TaskRecord is a persisted long-running task row.

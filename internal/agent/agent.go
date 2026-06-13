@@ -7,7 +7,10 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"io"
+	"log"
 	"strings"
 	"sync"
 
@@ -118,6 +121,19 @@ func (o *Orchestrator) Handle(ctx context.Context, sessionID, userText string, l
 		ToolCallingModel: o.model,
 		ToolsConfig:      compose.ToolsNodeConfig{Tools: tools},
 		MaxStep:          12,
+		// The default checker only inspects the FIRST non-empty stream chunk for
+		// tool calls. Our model (deepseek via proxy, and Claude) often emits some
+		// reply/thinking text BEFORE the tool_call chunk, so the default wrongly
+		// concludes "no tool call" and routes straight to END — the tool node
+		// never runs even though the model did request a tool. Scan the whole
+		// stream instead (eino documents this exact pitfall on NewAgent).
+		StreamToolCallChecker: fullStreamToolCallChecker,
+		// edit_image / image_to_video / crawl_game_assets only START an async task
+		// (progress tracked over SSE). Return their result directly to the user
+		// instead of feeding {status:queued} back to the model — otherwise a small
+		// model reads "queued" as "not done yet" and re-invokes the tool in a loop,
+		// spawning endless generations.
+		ToolReturnDirectly: AsyncTaskTools(),
 	})
 	if err != nil {
 		return "", fmt.Errorf("build react agent: %w", err)
@@ -134,6 +150,7 @@ func (o *Orchestrator) Handle(ctx context.Context, sessionID, userText string, l
 	defer stream.Close()
 
 	var sb strings.Builder
+	toolCalls := 0
 	for {
 		chunk, err := stream.Recv()
 		if err != nil {
@@ -153,6 +170,7 @@ func (o *Orchestrator) Handle(ctx context.Context, sessionID, userText string, l
 			if tc.Function.Name == "" {
 				continue
 			}
+			toolCalls++
 			o.emit(sessionID, transport.Event{
 				Type:      transport.EventToolCall,
 				SessionID: sessionID,
@@ -174,6 +192,11 @@ func (o *Orchestrator) Handle(ctx context.Context, sessionID, userText string, l
 	}
 
 	reply := sb.String()
+	// Diagnostic: surface whether this turn actually invoked any tool. A request
+	// that should produce an asset but emitted 0 tool calls means the model only
+	// replied with text (e.g. a small model that "confirms" without acting) —
+	// this is the signal to inspect the model/prompt, not the workspace pipeline.
+	log.Printf("agent: session=%s turn done toolCalls=%d replyLen=%d", sessionID, toolCalls, len(reply))
 	w.Append(schema.AssistantMessage(reply, nil))
 	o.emit(sessionID, transport.Event{
 		Type:      transport.EventMessage,
@@ -195,6 +218,61 @@ func agentOption(h callbacks.Handler) einoagent.AgentOption {
 	return einoagent.WithComposeOptions(compose.WithCallbacks(h))
 }
 
+// fullStreamToolCallChecker reports whether a model's streaming output contains
+// any tool call, scanning the ENTIRE stream rather than only the first chunk.
+//
+// The react agent's default checker (firstChunkStreamToolCallChecker) returns
+// false as soon as it sees a non-empty content chunk with no tool calls. Models
+// that emit reply/thinking text before the tool_call chunk (deepseek via our
+// proxy, Claude) therefore get misrouted to END and their tool never executes.
+// We accumulate across the whole stream so a tool call appearing in any later
+// chunk is still detected. eino's NewAgent doc calls out this exact pitfall.
+func fullStreamToolCallChecker(_ context.Context, sr *schema.StreamReader[*schema.Message]) (bool, error) {
+	defer sr.Close()
+	for {
+		msg, err := sr.Recv()
+		if err == io.EOF {
+			return false, nil
+		}
+		if err != nil {
+			return false, err
+		}
+		if len(msg.ToolCalls) > 0 {
+			return true, nil
+		}
+	}
+}
+
+// toolKind maps a tool name to the long-task kind its successful result
+// produces, or "" when the tool returns immediately (no async task). Used to
+// tag tool_result events so the frontend can insert the right placeholder.
+func toolKind(name string) string {
+	switch name {
+	case "edit_image":
+		return "generate"
+	case "image_to_video":
+		return "video"
+	case "crawl_game_assets":
+		return "crawl"
+	default:
+		return ""
+	}
+}
+
+// taskIDFromResponse pulls the task_id out of a tool's JSON result. Long-task
+// tools (edit_image/image_to_video/crawl_game_assets) all return a {"task_id":...}
+// shaped object; immediate tools return arrays/other shapes with no task_id, so
+// this yields "" for them.
+func taskIDFromResponse(resp string) string {
+	var parsed struct {
+		TaskID string `json:"task_id"`
+	}
+	if err := json.Unmarshal([]byte(resp), &parsed); err != nil {
+		return ""
+	}
+	return parsed.TaskID
+}
+
 // toolCallbackHandler builds a handler that emits a tool_result event whenever
 // a tool finishes (success or error), so the UI can complete the action card.
 func (o *Orchestrator) toolCallbackHandler(sessionID string) callbacks.Handler {
@@ -208,14 +286,26 @@ func (o *Orchestrator) toolCallbackHandler(sessionID string) callbacks.Handler {
 			if output != nil {
 				summary = truncate(output.Response, 200)
 			}
+			data := map[string]any{
+				"name":    name,
+				"status":  "done",
+				"summary": summary,
+			}
+			// Surface the produced long-task id + kind so the frontend can
+			// insert a placeholder and subscribe to progress immediately,
+			// without waiting for the turn to finish (design D1).
+			if output != nil {
+				if taskID := taskIDFromResponse(output.Response); taskID != "" {
+					data["task_id"] = taskID
+					if kind := toolKind(name); kind != "" {
+						data["kind"] = kind
+					}
+				}
+			}
 			o.emit(sessionID, transport.Event{
 				Type:      transport.EventToolResult,
 				SessionID: sessionID,
-				Data: map[string]any{
-					"name":    name,
-					"status":  "done",
-					"summary": summary,
-				},
+				Data:      data,
 			})
 			return ctx
 		},

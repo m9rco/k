@@ -31,6 +31,14 @@ func (s *stubProvider) Generate(_ context.Context, r Request) (Output, error) {
 	return s.out, nil
 }
 
+// stubUploader records the last upload and returns a fixed public URL.
+type stubUploader struct{ lastName string }
+
+func (u *stubUploader) Upload(_ context.Context, name string, _ []byte, _ string) (string, error) {
+	u.lastName = name
+	return "https://public.example/" + name, nil
+}
+
 func newVideoService(t *testing.T, prov Provider) (*Service, *store.Store, string) {
 	t.Helper()
 	dir := t.TempDir()
@@ -66,6 +74,7 @@ func waitTask(t *testing.T, st *store.Store, taskID string) *store.TaskRecord {
 
 func TestStartDegradesWhenUnconfigured(t *testing.T) {
 	svc, _, _ := newVideoService(t, &stubProvider{configured: false})
+	svc.SetUploader(&stubUploader{})
 	if svc.Configured() {
 		t.Fatal("service should report unconfigured")
 	}
@@ -75,9 +84,19 @@ func TestStartDegradesWhenUnconfigured(t *testing.T) {
 	}
 }
 
+func TestStartDegradesWhenNoUploader(t *testing.T) {
+	// Provider configured but no public-image uploader: video cannot work.
+	svc, _, _ := newVideoService(t, &stubProvider{configured: true})
+	if svc.Configured() {
+		t.Fatal("service should report unconfigured without an uploader")
+	}
+}
+
 func TestStartProducesVideoAsset(t *testing.T) {
 	prov := &stubProvider{configured: true, out: Output{Data: []byte("FAKEMP4"), Mime: "video/mp4", Provider: "stub"}}
 	svc, st, dir := newVideoService(t, prov)
+	up := &stubUploader{}
+	svc.SetUploader(up)
 
 	// Seed a source image asset.
 	src := filepath.Join(dir, "src.png")
@@ -101,6 +120,13 @@ func TestStartProducesVideoAsset(t *testing.T) {
 	}
 	if asset.ParentID != "src" {
 		t.Errorf("video parent = %q, want src", asset.ParentID)
+	}
+	// Source image must have been published and its public URL passed to provider.
+	if up.lastName == "" {
+		t.Error("source image was not uploaded")
+	}
+	if prov.last == nil || prov.last.ImageURL == "" {
+		t.Error("provider did not receive a source image url")
 	}
 	// Motion prompt must be injection-defended (wrapped by template).
 	if prov.last == nil || prov.last.Prompt == "让角色走起来" {

@@ -23,6 +23,11 @@ const (
 	EventCapsule    EventType = "capsule"     // server asks user to pick (e.g. sizes)
 	EventError      EventType = "error"       // recoverable error notice (toast)
 
+	// EventTaskCreated is broadcast over the conversation (WS) channel the moment
+	// a long task is created, so the workspace can show an immediate placeholder
+	// and subscribe to its SSE progress without waiting for the agent turn to end.
+	EventTaskCreated EventType = "task_created"
+
 	// Task / SSE events.
 	EventTaskQueued   EventType = "task_queued"
 	EventTaskRunning  EventType = "task_running"

@@ -25,6 +25,10 @@ type ModelConfig struct {
 	BaseURL string
 	// APIKey is read from the environment; never hardcoded.
 	APIKey string
+	// Thinking enables Anthropic extended thinking. Default off: many proxies and
+	// some model ids reject the thinking field or change tool-calling behavior
+	// when it is set, so it must be opted into explicitly.
+	Thinking bool
 }
 
 // ImageProviderConfig describes one image-generation backend (gpt-image-1).
@@ -34,6 +38,22 @@ type ImageProviderConfig struct {
 	BaseURL string
 	APIKey  string
 	Model   string
+}
+
+// COSConfig describes a Tencent Cloud COS bucket used to publish assets to a
+// public URL. All fields must be present for it to be considered configured.
+type COSConfig struct {
+	SecretID        string
+	SecretKey       string
+	Region          string // e.g. ap-guangzhou
+	Bucket          string // e.g. t-gz-1252130512
+	BasePath        string // key prefix, e.g. mlab-linux-1
+	PublicURLPrefix string // e.g. https://s.0x06.cn (CDN/custom domain)
+}
+
+// Configured reports whether the COS uploader has enough to operate.
+func (c COSConfig) Configured() bool {
+	return c.SecretID != "" && c.SecretKey != "" && c.Region != "" && c.Bucket != "" && c.PublicURLPrefix != ""
 }
 
 // Size is one crop preset. Beyond pixel dimensions it carries optional
@@ -125,8 +145,18 @@ type Config struct {
 	DBPath string
 	// AssetDir is where generated/cropped image files are stored on disk.
 	AssetDir string
+	// AssetPublicBase is the public https base URL under which asset files are
+	// reachable from the internet (e.g. https://studio.example.com). Required for
+	// image-to-video: the happyhorse provider fetches the source image by URL, so
+	// without a public base the video capability cannot work and stays disabled.
+	AssetPublicBase string
 	// AssetRetentionHours controls how long produced assets are kept (0 = keep forever).
 	AssetRetentionHours int
+
+	// COS is the Tencent Cloud Object Storage config used to publish a source
+	// image to a public URL before image-to-video (the provider fetches by URL).
+	// When unset, the video capability stays disabled.
+	COS COSConfig
 
 	// Platforms holds the data-driven crop presets.
 	//
@@ -205,12 +235,14 @@ func Load(platformsPath string) (*Config, error) {
 			Model:    env("CHAT_PRIMARY_MODEL", "deepseek-v4-flash"),
 			BaseURL:  envFirst(yunwuBase, "CHAT_PRIMARY_BASE_URL"),
 			APIKey:   envFirst(yunwuKey, "CHAT_PRIMARY_API_KEY"),
+			Thinking: envBool("CHAT_PRIMARY_THINKING", false),
 		},
 		ChatTest: ModelConfig{
 			Provider: env("CHAT_TEST_PROVIDER", "openai"),
 			Model:    env("CHAT_TEST_MODEL", "claude-sonnet-4-5-20250929"),
 			BaseURL:  envFirst(yunwuBase, "CHAT_TEST_BASE_URL"),
 			APIKey:   envFirst(yunwuKey, "CHAT_TEST_API_KEY", "DEEPSEEK_API_KEY"),
+			Thinking: envBool("CHAT_TEST_THINKING", false),
 		},
 		UseTestModel: envBool("USE_TEST_MODEL", false),
 
@@ -231,8 +263,8 @@ func Load(platformsPath string) (*Config, error) {
 		// means the video capability reports "not configured" rather than failing.
 		Video: ImageProviderConfig{
 			Name:    env("VIDEO_NAME", "happyhorse"),
-			BaseURL: envFirst(env("HAPPYHORSE_BASE_URL", ""), "VIDEO_BASE_URL", yunwuBase),
-			APIKey:  envFirst(env("HAPPYHORSE_API_KEY", ""), "VIDEO_API_KEY", yunwuKey),
+			BaseURL: envFirst(yunwuBase, "HAPPYHORSE_BASE_URL", "VIDEO_BASE_URL"),
+			APIKey:  envFirst(yunwuKey, "HAPPYHORSE_API_KEY", "VIDEO_API_KEY"),
 			Model:   env("HAPPYHORSE_MODEL", ""),
 		},
 
@@ -240,8 +272,17 @@ func Load(platformsPath string) (*Config, error) {
 		CrawlEndpoint: env("CRAWL_ENDPOINT", ""),
 		CrawlAPIKey:   env("CRAWL_API_KEY", ""),
 
-		DBPath:              env("DB_PATH", "data/asset-studio.db"),
-		AssetDir:            env("ASSET_DIR", "data/assets"),
+		DBPath:          env("DB_PATH", "data/asset-studio.db"),
+		AssetDir:        env("ASSET_DIR", "data/assets"),
+		AssetPublicBase: env("ASSET_PUBLIC_BASE", ""),
+		COS: COSConfig{
+			SecretID:        env("COS_SECRET_ID", ""),
+			SecretKey:       env("COS_SECRET_KEY", ""),
+			Region:          env("COS_REGION", ""),
+			Bucket:          env("COS_BUCKET", ""),
+			BasePath:        env("COS_BASE_PATH", ""),
+			PublicURLPrefix: strings.TrimRight(env("COS_PUBLIC_URL_PREFIX", ""), "/"),
+		},
 		AssetRetentionHours: envInt("ASSET_RETENTION_HOURS", 0),
 
 		ContextTokenBudget: envInt("CONTEXT_TOKEN_BUDGET", 8000),
