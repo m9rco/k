@@ -392,6 +392,23 @@ export function useAppController() {
     }
   }, [toast]);
 
+  const removeSelected = React.useCallback(async () => {
+    const sid = stateRef.current.sessionId;
+    const ids = [...stateRef.current.selected];
+    if (ids.length === 0) return;
+    const results = await Promise.allSettled(ids.map((id) => api.deleteAsset(sid, id)));
+    const ok = ids.filter((_, i) => results[i].status === "fulfilled");
+    setState((s) => {
+      const assets = new Map(s.assets);
+      const sel = new Set(s.selected);
+      for (const id of ok) { assets.delete(id); sel.delete(id); }
+      return { ...s, assets, selected: sel };
+    });
+    const failed = ids.length - ok.length;
+    if (failed > 0) toast(`移除 ${ok.length} 张，${failed} 张失败`);
+    else toast(`已移除 ${ok.length} 张`, "ok");
+  }, [toast]);
+
   const removeTask = React.useCallback(async (taskId: string) => {
     const sid = stateRef.current.sessionId;
     try {
@@ -496,6 +513,7 @@ export function useAppController() {
     setOrder,
     reorderAsset,
     removeAsset,
+    removeSelected,
     removeTask,
     clearFailed,
     retryTask,

@@ -70,6 +70,15 @@ export function WorkspacePanel() {
               <Crop className="size-3.5" /> 批量切尺寸
             </Button>
           )}
+          {state.selected.size > 0 && (
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={() => { if (confirm(`确定移除选中的 ${state.selected.size} 张素材？此操作不可恢复。`)) app.removeSelected(); }}
+            >
+              <Trash2 className="size-3.5" /> 移除 {state.selected.size}
+            </Button>
+          )}
           {state.assets.size > 0 && (
             <Button variant="ghost" size="sm" onClick={() => { if (confirm("确定清空工作区？将删除全部素材，此操作不可恢复。")) app.clearWorkspace(); }}>
               <Trash2 className="size-3.5" /> 清空

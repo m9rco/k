@@ -30,10 +30,12 @@ const DialogContent = React.forwardRef<
 >(({ className, children, hideClose, ...props }, ref) => (
   <DialogPortal>
     <DialogOverlay />
-    <DialogPrimitive.Content ref={ref} asChild {...props}>
-      {/* Center via a fixed flex wrapper so Framer's transform (scale/y) doesn't
-          fight Tailwind's -translate centering. The motion element only animates. */}
-      <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+    {/* Center via a fixed flex wrapper that sits OUTSIDE the Content node, so a
+        click on the blank area counts as "outside" and Radix closes the dialog.
+        The motion element is the Content node and only animates (its Framer
+        transform no longer fights any translate centering). */}
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+      <DialogPrimitive.Content ref={ref} asChild {...props}>
         <motion.div
           initial={{ opacity: 0, scale: 0.97, y: 6 }}
           animate={{ opacity: 1, scale: 1, y: 0 }}
@@ -52,8 +54,8 @@ const DialogContent = React.forwardRef<
             </DialogPrimitive.Close>
           )}
         </motion.div>
-      </div>
-    </DialogPrimitive.Content>
+      </DialogPrimitive.Content>
+    </div>
   </DialogPortal>
 ));
 DialogContent.displayName = "DialogContent";
