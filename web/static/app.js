@@ -16,11 +16,16 @@ const state = {
   tasks: new Map(),
   taskStreams: new Map(),
   selected: new Set(),
-  activeAssetId: null,
   channels: [],
   streamingEl: null,
-  reasoningEl: null,
+  reasoningOpen: null,
   pendingTools: [],
+  prefs: new Map(),
+  // 打字机渲染：前端按固定速率逐字吐出，独立于后端/代理的到达节奏。
+  typeTarget: "",
+  typeShown: 0,
+  typeDone: false,
+  typeTimer: null,
 };
 
 const $ = (sel) => document.querySelector(sel);
@@ -147,49 +152,136 @@ function handleEvent(msg) {
 
 // ---------- 对话渲染 ----------
 
+// scrollChatToBottom keeps the log pinned to newest content, but only when the
+// user is already near the bottom — so reading earlier messages mid-stream
+// isn't yanked away (scroll anchoring).
+function scrollChatToBottom(force) {
+  const log = $("#chatLog");
+  const nearBottom = log.scrollHeight - log.scrollTop - log.clientHeight < 120;
+  if (force || nearBottom) log.scrollTop = log.scrollHeight;
+}
+
 function addBubble(role, text) {
   const log = $("#chatLog");
   const b = el("div", `msg msg-${role}`, text);
   log.appendChild(b);
-  log.scrollTop = log.scrollHeight;
+  scrollChatToBottom(true); // a brand-new bubble always pins
   return b;
 }
 
+// appendAssistantDelta feeds the typewriter buffer rather than writing the DOM
+// directly. Incremental frames append to the target; the done frame (which the
+// backend sends as the *full* reply) becomes the authoritative target so we
+// never lose or double text regardless of how chunks arrived. A timer reveals
+// characters at a fixed rate, giving a steady per-character animation even when
+// a proxy buffers the whole SSE response into one burst.
 function appendAssistantDelta(text, done) {
-  state.reasoningEl = null; // answer text ends the current thinking block
+  collapseReasoning(); // answer text ends & folds the current thinking block
   if (!state.streamingEl) {
     state.streamingEl = addBubble("assistant", "");
+    state.typeTarget = "";
+    state.typeShown = 0;
+    state.typeDone = false;
   }
   if (done) {
-    if (text) state.streamingEl.textContent = text;
-    state.streamingEl = null;
-    refreshWorkspace();
-  } else {
-    state.streamingEl.textContent += text;
+    // The done frame carries the complete reply; treat it as ground truth but
+    // only if it's at least as long as what we've accumulated (guards against
+    // an empty/short terminal frame clobbering streamed content).
+    if (text && text.length >= state.typeTarget.length) state.typeTarget = text;
+    state.typeDone = true;
+  } else if (text) {
+    state.typeTarget += text;
   }
-  $("#chatLog").scrollTop = $("#chatLog").scrollHeight;
+  pumpTyper();
 }
 
-// appendReasoning renders the model's thinking as a dimmed bubble, distinct
-// from the final answer. Chunks accumulate into one bubble per thinking turn.
+// pumpTyper reveals buffered characters one tick at a time. It self-schedules
+// until the shown text catches up to the target; on the done frame it finalizes
+// the bubble and triggers a workspace refresh.
+function pumpTyper() {
+  if (state.typeTimer) return; // already pumping
+  const step = () => {
+    state.typeTimer = null;
+    if (!state.streamingEl) return;
+    if (state.typeShown < state.typeTarget.length) {
+      // Reveal a few chars per tick; scale with backlog so a big burst still
+      // animates quickly without feeling inst... and never blocks the UI.
+      const backlog = state.typeTarget.length - state.typeShown;
+      const take = Math.max(2, Math.floor(backlog / 24));
+      state.typeShown = Math.min(state.typeTarget.length, state.typeShown + take);
+      state.streamingEl.textContent = state.typeTarget.slice(0, state.typeShown);
+      scrollChatToBottom();
+      state.typeTimer = setTimeout(step, 16); // ~60fps cadence
+      return;
+    }
+    // Caught up. If the stream is done, finalize; else wait for more input.
+    if (state.typeDone) {
+      state.streamingEl = null;
+      state.typeTarget = "";
+      state.typeShown = 0;
+      state.typeDone = false;
+      refreshWorkspace();
+    }
+  };
+  step();
+}
+
+// flushTyper completes the in-progress assistant bubble immediately (reveals
+// all buffered text and stops the timer). Used when the turn moves on to a
+// thinking block or tool call so a half-typed bubble isn't left dangling.
+function flushTyper() {
+  if (state.typeTimer) {
+    clearTimeout(state.typeTimer);
+    state.typeTimer = null;
+  }
+  if (state.streamingEl && state.typeTarget) {
+    state.streamingEl.textContent = state.typeTarget;
+  }
+  state.streamingEl = null;
+  state.typeTarget = "";
+  state.typeShown = 0;
+  state.typeDone = false;
+}
+
+// appendReasoning renders the model's thinking as a dimmed, collapsible block,
+// distinct from the final answer. Chunks accumulate into one block per thinking
+// turn; the block streams expanded, then auto-folds once the answer or a tool
+// call begins (see collapseReasoning).
 function appendReasoning(text) {
   if (!text) return;
-  state.streamingEl = null; // a new thinking block starts a fresh answer later
+  flushTyper(); // a new thinking block starts a fresh answer later
   const log = $("#chatLog");
-  if (!state.reasoningEl) {
+  if (!state.reasoningOpen) {
     const wrap = el("div", "msg reasoning");
-    wrap.appendChild(el("span", "reasoning-tag", "思考"));
-    const body = el("span", "reasoning-body", "");
+    const head = el("button", "reasoning-head");
+    head.type = "button";
+    head.appendChild(el("span", "reasoning-tag", "思考中"));
+    head.appendChild(el("span", "reasoning-chevron", "▾"));
+    const body = el("div", "reasoning-body", "");
+    head.onclick = () => wrap.classList.toggle("collapsed");
+    wrap.appendChild(head);
     wrap.appendChild(body);
     log.appendChild(wrap);
-    state.reasoningEl = body;
+    state.reasoningOpen = { wrap, head, body };
   }
-  state.reasoningEl.textContent += text;
-  log.scrollTop = log.scrollHeight;
+  state.reasoningOpen.body.textContent += text;
+  scrollChatToBottom();
+}
+
+// collapseReasoning folds the currently-open thinking block (if any) and marks
+// it as finished, leaving an expand affordance. Idempotent.
+function collapseReasoning() {
+  const r = state.reasoningOpen;
+  if (!r) return;
+  r.wrap.classList.add("collapsed");
+  const tag = r.head.querySelector(".reasoning-tag");
+  if (tag) tag.textContent = "已思考";
+  state.reasoningOpen = null;
 }
 
 function renderToolCall(data) {
-  state.reasoningEl = null;
+  flushTyper(); // finalize any in-progress answer before the tool card
+  collapseReasoning();
   const log = $("#chatLog");
   const card = el("div", "tool-card");
   if (data.id) card.dataset.callId = data.id;
@@ -198,10 +290,11 @@ function renderToolCall(data) {
   const spinner = el("span", "tc-spinner");
   head.appendChild(spinner);
   head.appendChild(el("span", "tc-name", data.name || "tool"));
+  head.appendChild(el("span", "tc-state", "执行中"));
   card.appendChild(head);
   if (data.arguments) card.appendChild(el("div", "tc-args", data.arguments));
   log.appendChild(card);
-  log.scrollTop = log.scrollHeight;
+  scrollChatToBottom();
   state.pendingTools.push(card);
 }
 
@@ -214,15 +307,17 @@ function applyToolResult(data) {
   state.pendingTools = state.pendingTools.filter((c) => c !== card);
   const head = card.querySelector(".tc-head");
   const spinner = head && head.querySelector(".tc-spinner");
+  const stateLabel = head && head.querySelector(".tc-state");
   const ok = data.status !== "error";
   if (spinner) {
     const mark = el("span", `tc-mark ${ok ? "ok" : "fail"}`, ok ? "✓" : "✗");
     spinner.replaceWith(mark);
   }
+  if (stateLabel) stateLabel.textContent = ok ? "完成" : "失败";
   card.classList.add(ok ? "tc-done" : "tc-failed");
   const detail = ok ? data.summary : data.error;
   if (detail) card.appendChild(el("div", "tc-result", detail));
-  $("#chatLog").scrollTop = $("#chatLog").scrollHeight;
+  scrollChatToBottom();
 }
 
 // matchPendingTool finds the spinning card for a tool name, else the oldest.
@@ -245,7 +340,11 @@ function finishPendingTools() {
   state.pendingTools = [];
 }
 
-function sendMessage(text) {
+// sendMessage sends a user message. ref, when supplied, is the explicit asset
+// id the message acts on; it is passed per-call rather than read from shared
+// state so an operation always targets the asset the user actually chose
+// (avoids the "selected the 3rd, operated on the 1st" mismatch).
+function sendMessage(text, ref) {
   const input = $("#msgInput");
   const value = (text != null ? text : input.value).trim();
   if (!value) return;
@@ -255,10 +354,9 @@ function sendMessage(text) {
   }
   addBubble("user", value);
   const payload = { type: "user_message", text: value };
-  if (state.activeAssetId) payload.ref = state.activeAssetId;
+  if (ref) payload.ref = ref;
   state.ws.send(JSON.stringify(payload));
   if (text == null) input.value = "";
-  state.activeAssetId = null;
 }
 
 // ---------- 工作区 ----------
@@ -301,19 +399,23 @@ function renderWorkspace() {
   }
   $("#zipBtn").hidden = state.assets.size === 0;
   $("#selectAllBtn").hidden = state.assets.size === 0;
+  // Batch crop applies to the current multi-selection; hidden until something is selected.
+  $("#batchCropBtn").hidden = state.selected.size === 0;
 }
 
 function taskCard(task) {
   const card = el("div", `card placeholder ${task.status === "failed" ? "failed" : ""}`);
   card.appendChild(el("div", "skeleton"));
   const status = el("div", "ph-status");
-  status.appendChild(el("div", null, statusLabel(task.status)));
-  if (task.status === "running" || task.status === "queued") {
+  const running = task.status === "running" || task.status === "queued";
+  status.appendChild(el("div", null, running ? runningStage(task.progress) : statusLabel(task.status)));
+  if (running) {
     const bar = el("div", "ph-bar");
     const fill = el("span");
     fill.style.width = (task.progress || 0) + "%";
     bar.appendChild(fill);
     status.appendChild(bar);
+    status.appendChild(el("div", "ph-pct", (task.progress || 0) + "%"));
   }
   if (task.status === "failed") {
     if (task.error) status.appendChild(el("div", null, task.error));
@@ -352,6 +454,16 @@ function statusLabel(s) {
   return { queued: "排队中", running: "生成中", failed: "失败", done: "完成" }[s] || s;
 }
 
+// runningStage maps progress to a human stage hint so a long generation reads
+// as moving through phases rather than sitting on a static "生成中".
+function runningStage(progress) {
+  const p = progress || 0;
+  if (p < 30) return "排队 · 准备中";
+  if (p < 50) return "分析参考图";
+  if (p < 80) return "生成中";
+  return "收尾处理";
+}
+
 function toggleSelect(id, card) {
   if (state.selected.has(id)) {
     state.selected.delete(id);
@@ -360,12 +472,13 @@ function toggleSelect(id, card) {
     state.selected.add(id);
     card.classList.add("selected");
   }
+  // Reflect selection-dependent actions (batch crop / zip) without a full re-render.
+  $("#batchCropBtn").hidden = state.selected.size === 0;
 }
 
 // ---------- lightbox / 二次调整 ----------
 
 function openLightbox(asset) {
-  state.activeAssetId = asset.id;
   $("#lightboxImg").src = asset.url;
   $("#lbAdjustInput").value = "";
   $("#lightbox").hidden = false;
@@ -377,9 +490,8 @@ function openLightbox(asset) {
   $("#lbAdjustBtn").onclick = () => {
     const txt = $("#lbAdjustInput").value.trim();
     if (!txt) return;
-    state.activeAssetId = asset.id;
     closeLightbox();
-    sendMessage(txt);
+    sendMessage(txt, asset.id); // explicit target: this lightbox's asset
   };
 }
 
@@ -551,21 +663,28 @@ async function loadPlatforms() {
 
 // capsuleState holds the live selection while the sheet is open. chosen maps a
 // size id → { id, label, channel } so the bottom bar can list cross-channel picks.
+// assetIds holds one or many source assets the chosen sizes will be applied to.
 const capsuleState = {
-  assetId: null,
+  assetIds: [],
   chosen: new Map(),
   groupFilter: "all",
   search: "",
   activeChannelId: null,
 };
 
-function openCapsule(assetId) {
-  capsuleState.assetId = assetId;
+// openCapsule opens the size selector for one asset id or an array of ids
+// (batch crop). All chosen sizes are applied to every source asset.
+function openCapsule(assetIdOrIds) {
+  capsuleState.assetIds = Array.isArray(assetIdOrIds) ? assetIdOrIds : [assetIdOrIds];
   capsuleState.chosen = new Map();
   capsuleState.groupFilter = "all";
   capsuleState.search = "";
   capsuleState.activeChannelId = state.channels.length ? state.channels[0].id : null;
   $("#channelSearch").value = "";
+  $("#capsuleTitle").textContent =
+    capsuleState.assetIds.length > 1
+      ? `选择目标尺寸（${capsuleState.assetIds.length} 张）`
+      : "选择目标尺寸";
   renderGroupTabs();
   renderChannelList();
   renderSizePanel();
@@ -659,6 +778,29 @@ function renderSizePanel() {
     panel.appendChild(el("div", "channel-empty", "选择左侧渠道查看尺寸"));
     return;
   }
+
+  // Channel-level select-all for producible sizes.
+  const producible = producibleSizes(ch);
+  const bar = el("div", "size-panel-bar");
+  const allChosen = producible.length > 0 && producible.every((sz) => capsuleState.chosen.has(sz.id));
+  const selBtn = el("button", "ghost-btn small", allChosen ? "取消全选" : "全选可裁剪");
+  selBtn.disabled = producible.length === 0;
+  selBtn.onclick = () => {
+    if (allChosen) {
+      for (const sz of producible) capsuleState.chosen.delete(sz.id);
+    } else {
+      for (const sz of producible) {
+        capsuleState.chosen.set(sz.id, { id: sz.id, label: `${ch.name} · ${sz.name}`, channel: ch.id });
+      }
+    }
+    renderChannelList();
+    renderSizePanel();
+    updateChosenBar();
+  };
+  bar.appendChild(el("span", "size-panel-hint", `${ch.name} · 可裁剪 ${producible.length} 项`));
+  bar.appendChild(selBtn);
+  panel.appendChild(bar);
+
   for (const at of ch.assetTypes || []) {
     const group = el("div", "capsule-group");
     group.appendChild(el("h4", null, at.name || at.type));
@@ -669,6 +811,17 @@ function renderSizePanel() {
     group.appendChild(row);
     panel.appendChild(group);
   }
+}
+
+// producibleSizes flattens a channel's croppable (producible) sizes.
+function producibleSizes(ch) {
+  const out = [];
+  for (const at of ch.assetTypes || []) {
+    for (const sz of at.sizes || []) {
+      if (sz.producible) out.push(sz);
+    }
+  }
+  return out;
 }
 
 function buildSizeChip(ch, sz) {
@@ -710,16 +863,19 @@ function updateChosenBar() {
   $("#capsuleConfirm").disabled = n === 0;
   $("#capsuleConfirm").onclick = () => {
     const items = [...capsuleState.chosen.values()];
-    cropToSizes(capsuleState.assetId, items.map((i) => i.id), items.map((i) => i.label));
+    const ids = items.map((i) => i.id);
+    const labels = items.map((i) => i.label);
+    for (const assetId of capsuleState.assetIds) {
+      cropToSizes(assetId, ids, labels);
+    }
     closeCapsule();
   };
 }
 
 function cropToSizes(assetId, sizeIds, labels) {
   if (!sizeIds.length) return;
-  state.activeAssetId = assetId;
   const shown = (labels && labels.length ? labels : sizeIds).join("、");
-  sendMessage(`把这张图裁剪成这些尺寸：${shown}`);
+  sendMessage(`把这张图裁剪成这些尺寸：${shown}`, assetId); // explicit target
 }
 
 // ---------- 下载 ----------
@@ -771,6 +927,84 @@ const SAMPLE_PROMPTS = [
   "裁成各平台尺寸 / 打包下载",
 ];
 
+// ---------- 偏好关键词（前端本地提取） ----------
+
+// 停用词：高频但无偏好信号的词/字，提取时过滤掉。含这些字的 2-gram 片段也丢弃，
+// 避免出现「把背」「景换」这类跨词噪声。
+const STOPWORDS = new Set([
+  "把", "的", "了", "成", "这", "那", "张", "图", "一", "个", "和", "与", "帮",
+  "我", "你", "请", "要", "想", "让", "给", "在", "对", "为", "是", "有", "做",
+  "换", "改", "加", "下", "上", "里", "中", "再", "也", "就", "都", "还", "去",
+  "的话", "一下", "一个", "这个", "那个", "可以", "需要", "怎么", "什么",
+  "图片", "素材", "尺寸", "背景", "角色", "文案",
+]);
+
+// 单字停用字集合（从上面拆出），用于判断 2-gram 是否含噪声字。
+const STOP_CHARS = new Set(
+  [...STOPWORDS].filter((w) => w.length === 1)
+);
+
+// extractKeywords pulls candidate preference terms from a user message: CJK
+// 2-4 char runs and ASCII words, minus stopwords. Long runs are sliced into
+// 2-grams; any gram containing a stopword char is dropped to avoid cross-word
+// noise. Lightweight, no backend.
+function extractKeywords(text) {
+  const out = [];
+  for (const m of text.matchAll(/[一-龥]{2,}/g)) {
+    const seg = m[0];
+    if (seg.length <= 4) {
+      if (!STOPWORDS.has(seg) && !hasStopChar(seg)) out.push(seg);
+    } else {
+      for (let i = 0; i < seg.length - 1; i++) {
+        const pair = seg.slice(i, i + 2);
+        if (!STOPWORDS.has(pair) && !hasStopChar(pair)) out.push(pair);
+      }
+    }
+  }
+  for (const m of text.matchAll(/[a-zA-Z][a-zA-Z0-9]{1,}/g)) {
+    out.push(m[0].toLowerCase());
+  }
+  return out;
+}
+
+// hasStopChar reports whether a segment contains any single-char stopword.
+function hasStopChar(seg) {
+  for (const ch of seg) {
+    if (STOP_CHARS.has(ch)) return true;
+  }
+  return false;
+}
+
+// recordPreferences accumulates keyword frequencies and refreshes the corner.
+function recordPreferences(text) {
+  for (const kw of extractKeywords(text)) {
+    state.prefs.set(kw, (state.prefs.get(kw) || 0) + 1);
+  }
+  renderPrefs();
+}
+
+// renderPrefs shows the top keyword preferences; hides the corner when empty.
+function renderPrefs() {
+  const corner = $("#prefsCorner");
+  const list = $("#prefsList");
+  const top = [...state.prefs.entries()]
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 8)
+    .filter(([, n]) => n >= 1);
+  if (top.length === 0) {
+    corner.hidden = true;
+    return;
+  }
+  list.innerHTML = "";
+  for (const [kw, n] of top) {
+    const li = el("li", "pref-item");
+    li.appendChild(el("span", "pref-word", kw));
+    if (n > 1) li.appendChild(el("span", "pref-count", String(n)));
+    list.appendChild(li);
+  }
+  corner.hidden = false;
+}
+
 function renderCapList() {
   const ul = $("#capList");
   for (const p of SAMPLE_PROMPTS) {
@@ -783,11 +1017,36 @@ function renderCapList() {
   }
 }
 
+// ---------- 未来能力路线图（仅展示规划） ----------
+
+const ROADMAP = [
+  { title: "自学习偏好", desc: "记住你的风格倾向，主动套用到新素材" },
+  { title: "团队知识库", desc: "沉淀团队素材规范与品牌资产，生成时自动遵循" },
+  { title: "生视频 / 动效", desc: "把静态宣发图一键转为短视频与动态素材" },
+  { title: "物料爬取", desc: "按竞品/平台抓取参考物料，辅助构图与文案" },
+];
+
+function renderRoadmap() {
+  const ul = $("#roadmapList");
+  if (!ul) return;
+  for (const item of ROADMAP) {
+    const li = el("li", "roadmap-item");
+    const head = el("div", "roadmap-head");
+    head.appendChild(el("span", "roadmap-title", item.title));
+    head.appendChild(el("span", "roadmap-badge", "规划中"));
+    li.appendChild(head);
+    li.appendChild(el("p", "roadmap-desc", item.desc));
+    ul.appendChild(li);
+  }
+}
+
 // ---------- 事件绑定 ----------
 
 function bindUI() {
   $("#composer").addEventListener("submit", (e) => {
     e.preventDefault();
+    const typed = $("#msgInput").value.trim();
+    if (typed) recordPreferences(typed); // only genuine user-typed messages
     sendMessage();
   });
 
@@ -802,6 +1061,13 @@ function bindUI() {
   $("#selectAllBtn").onclick = () => {
     for (const id of state.assets.keys()) state.selected.add(id);
     renderWorkspace();
+  };
+  $("#batchCropBtn").onclick = () => {
+    if (state.selected.size === 0) {
+      toast("先选中要切尺寸的素材", "warn");
+      return;
+    }
+    openCapsule([...state.selected]); // batch: apply chosen sizes to all selected
   };
 
   $("#capsuleClose").onclick = closeCapsule;
@@ -849,6 +1115,7 @@ function bindUI() {
 async function main() {
   bindUI();
   renderCapList();
+  renderRoadmap();
   try {
     await bootSession();
   } catch (e) {

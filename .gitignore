@@ -16,3 +16,6 @@
 
 # OS / editor cruft.
 .DS_Store
+
+# Playwright MCP browser-test artifacts (snapshots, console logs).
+.playwright-mcp/

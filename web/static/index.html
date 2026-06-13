@@ -11,7 +11,10 @@
   <header class="topbar">
     <div class="brand">
       <span class="brand-mark" aria-hidden="true"></span>
-      <span class="brand-name">Game Asset<strong>Studio</strong></span>
+      <span class="brand-text">
+        <span class="brand-name">Game Asset<strong>Studio</strong></span>
+        <span class="brand-tagline">对话式宣发素材工作台</span>
+      </span>
     </div>
     <div class="topbar-meta">
       <div class="ctx-panel" id="ctxPanel" title="当前会话上下文">
@@ -48,6 +51,7 @@
         <h2>工作区</h2>
         <div class="ws-actions">
           <button class="ghost-btn" id="selectAllBtn" hidden>全选</button>
+          <button class="ghost-btn" id="batchCropBtn" hidden>批量切尺寸</button>
           <button class="primary-btn" id="zipBtn" hidden>打包下载</button>
         </div>
       </div>
@@ -62,6 +66,12 @@
       <aside class="prefs-corner" id="prefsCorner" hidden>
         <h3>偏好</h3>
         <ul id="prefsList"></ul>
+      </aside>
+
+      <!-- 未来能力路线图：仅展示规划 -->
+      <aside class="roadmap" id="roadmap">
+        <h3>规划中的能力</h3>
+        <ul class="roadmap-list" id="roadmapList"></ul>
       </aside>
     </section>
   </main>

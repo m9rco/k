@@ -144,6 +144,74 @@ func TestZipAllInvalidIsBadRequest(t *testing.T) {
 	}
 }
 
+// writeCroppedAsset writes a PNG and inserts a cropped asset row carrying
+// channel/size metadata, mirroring what crop.Service persists.
+func writeCroppedAsset(t *testing.T, st *store.Store, dir, id, channelID, sizeID string) {
+	t.Helper()
+	img := image.NewRGBA(image.Rect(0, 0, 4, 4))
+	path := filepath.Join(dir, id+".png")
+	f, err := os.Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := png.Encode(f, img); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	meta, _ := json.Marshal(map[string]string{"channelId": channelID, "sizeId": sizeID})
+	if err := st.InsertAsset(store.AssetRecord{
+		ID: id, SessionID: "s", Kind: "cropped", Path: path, Mime: "image/png",
+		Width: 4, Height: 4, Meta: string(meta), CreatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestZipOrganizesByChannelAndSize(t *testing.T) {
+	svc, st, dir := newTestService(t)
+	writeCroppedAsset(t, st, dir, "c1", "taptap", "taptap.icon.512")
+	writeCroppedAsset(t, st, dir, "c2", "taptap", "taptap.icon.512") // same dir -> unique names
+	writeCroppedAsset(t, st, dir, "c3", "bilibili", "bilibili.banner.1")
+	writePNGAsset(t, st, dir, "g1") // no meta -> kind bucket
+	mux := http.NewServeMux()
+	svc.RegisterRoutes(mux)
+
+	body, _ := json.Marshal(zipRequest{AssetIDs: []string{"c1", "c2", "c3", "g1"}})
+	req := httptest.NewRequest("POST", "/api/session/s/download/zip", bytes.NewReader(body))
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d", rec.Code)
+	}
+	zr, err := zip.NewReader(bytes.NewReader(rec.Body.Bytes()), int64(rec.Body.Len()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	dirs := map[string]int{}
+	for _, f := range zr.File {
+		seg := f.Name[:strings.LastIndex(f.Name, "/")]
+		dirs[seg]++
+	}
+	if dirs["taptap/taptap.icon.512"] != 2 {
+		t.Errorf("expected 2 files under taptap/taptap.icon.512, got %d (%v)", dirs["taptap/taptap.icon.512"], dirs)
+	}
+	if dirs["bilibili/bilibili.banner.1"] != 1 {
+		t.Errorf("expected 1 file under bilibili/bilibili.banner.1, got %v", dirs)
+	}
+	if dirs["generated"] != 1 {
+		t.Errorf("expected non-cropped asset under generated/, got %v", dirs)
+	}
+	// Names within a directory must be unique.
+	names := map[string]bool{}
+	for _, f := range zr.File {
+		if names[f.Name] {
+			t.Errorf("duplicate zip entry name: %q", f.Name)
+		}
+		names[f.Name] = true
+	}
+}
+
 func TestExtForMime(t *testing.T) {
 	cases := map[string]string{
 		"image/png":  ".png",

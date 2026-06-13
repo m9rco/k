@@ -1,6 +1,7 @@
 package crop
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -77,6 +78,14 @@ type CropResult struct {
 	Bytes int `json:"bytes"`
 }
 
+// CropMeta is the JSON payload stored on a cropped asset's Meta field so
+// downstream features (zip packaging) can organize products by channel/size.
+type CropMeta struct {
+	ChannelID string `json:"channelId"`
+	SizeID    string `json:"sizeId"`
+	SizeName  string `json:"sizeName"`
+}
+
 // CropToSizes crops the source asset to each requested size id, persisting every
 // product as a "cropped" asset owned by the session. The source is loaded from
 // the store (enforcing session ownership). Sizes are looked up by their globally
@@ -120,6 +129,7 @@ func (s *Service) CropToSizes(sessionID, sourceAssetID string, sizeIDs []string)
 			return nil, fmt.Errorf("write crop file: %w", err)
 		}
 		now := s.now()
+		meta, _ := json.Marshal(CropMeta{ChannelID: ref.channelID, SizeID: sz.ID, SizeName: sz.Name})
 		if err := s.store.InsertAsset(store.AssetRecord{
 			ID:        id,
 			SessionID: sessionID,
@@ -129,6 +139,7 @@ func (s *Service) CropToSizes(sessionID, sourceAssetID string, sizeIDs []string)
 			Width:     res.Width,
 			Height:    res.Height,
 			ParentID:  sourceAssetID,
+			Meta:      string(meta),
 			CreatedAt: now,
 		}); err != nil {
 			return nil, fmt.Errorf("persist crop asset: %w", err)

@@ -74,7 +74,7 @@ func (s *Service) handleZip(w http.ResponseWriter, r *http.Request) {
 
 	// Resolve selections into valid files first so we can reject an all-invalid
 	// batch before streaming and report skipped ids deterministically.
-	type entry struct{ id, path, mime string }
+	type entry struct{ id, path, mime, kind, meta string }
 	var valid []entry
 	var skipped []string
 	for _, aid := range req.AssetIDs {
@@ -87,7 +87,7 @@ func (s *Service) handleZip(w http.ResponseWriter, r *http.Request) {
 			skipped = append(skipped, aid)
 			continue
 		}
-		valid = append(valid, entry{id: aid, path: asset.Path, mime: asset.Mime})
+		valid = append(valid, entry{id: aid, path: asset.Path, mime: asset.Mime, kind: asset.Kind, meta: asset.Meta})
 	}
 
 	if len(valid) == 0 {
@@ -105,14 +105,62 @@ func (s *Service) handleZip(w http.ResponseWriter, r *http.Request) {
 
 	zw := zip.NewWriter(w)
 	defer zw.Close()
-	for i, e := range valid {
-		// Prefix with an index to avoid name collisions across same-kind assets.
-		name := fmt.Sprintf("%02d-%s%s", i+1, e.id, extForMime(e.mime))
+	// Per-directory counters keep names unique within each channel/size folder.
+	seen := map[string]int{}
+	for _, e := range valid {
+		dir := zipDir(e.kind, e.meta)
+		seen[dir]++
+		name := fmt.Sprintf("%s/%02d-%s%s", dir, seen[dir], e.id, extForMime(e.mime))
 		if err := addToZip(zw, name, e.path); err != nil {
 			// Mid-stream failure: stop adding; the partial zip still has prior files.
 			return
 		}
 	}
+}
+
+// zipDir derives the in-zip directory for an asset. Cropped products carry a
+// CropMeta JSON ({channelId,sizeId}) and are filed under channel/size; anything
+// without that metadata (uploads, raw generations) falls back to a kind bucket.
+func zipDir(kind, meta string) string {
+	if meta != "" {
+		var m struct {
+			ChannelID string `json:"channelId"`
+			SizeID    string `json:"sizeId"`
+		}
+		if json.Unmarshal([]byte(meta), &m) == nil && m.ChannelID != "" {
+			seg := m.SizeID
+			if seg == "" {
+				seg = "misc"
+			}
+			return sanitizeSeg(m.ChannelID) + "/" + sanitizeSeg(seg)
+		}
+	}
+	switch kind {
+	case "upload":
+		return "uploads"
+	case "generated":
+		return "generated"
+	case "cropped":
+		return "cropped"
+	default:
+		return "misc"
+	}
+}
+
+// sanitizeSeg keeps a path segment safe for a zip entry: no separators or
+// traversal, trimmed to a sane length.
+func sanitizeSeg(s string) string {
+	s = strings.ReplaceAll(s, "/", "-")
+	s = strings.ReplaceAll(s, "\\", "-")
+	s = strings.ReplaceAll(s, "..", "-")
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return "misc"
+	}
+	if len(s) > 64 {
+		s = s[:64]
+	}
+	return s
 }
 
 // addToZip copies one file into the zip under name.

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -26,6 +27,9 @@ type chatModel struct {
 	cfg    config.ModelConfig
 	tools  []*schema.ToolInfo
 	client *http.Client
+	// retryBase is the base backoff unit between retries; 0 means 1s. Tests set
+	// it small to keep the suite fast.
+	retryBase time.Duration
 }
 
 // newChatModel builds a ToolCallingChatModel for the given provider config.
@@ -107,23 +111,31 @@ func (m *chatModel) openStream(ctx context.Context, input []*schema.Message) (*h
 	if err != nil {
 		return nil, fmt.Errorf("marshal stream request: %w", err)
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(buf))
+	hdr := map[string]string{
+		"Content-Type": "application/json",
+		"Accept":       "text/event-stream",
+	}
+	for k, v := range headers {
+		hdr[k] = v
+	}
+	// Share the retry path so a transient 429/5xx on stream open backs off and
+	// retries rather than immediately degrading to the (rhythm-less) fallback.
+	resp, err := m.sendWithRetry(ctx, url, buf, hdr)
 	if err != nil {
 		return nil, err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Accept", "text/event-stream")
-	for k, v := range headers {
-		req.Header.Set(k, v)
-	}
-	resp, err := m.client.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("stream request: %w", err)
 	}
 	if resp.StatusCode/100 != 2 {
 		data, _ := io.ReadAll(resp.Body)
 		resp.Body.Close()
 		return nil, fmt.Errorf("chat provider %s stream returned %d: %s", m.cfg.Provider, resp.StatusCode, truncate(string(data), 300))
+	}
+	// Some proxies accept stream:true but answer with a buffered, non-SSE JSON
+	// body. Our SSE scanner would find no `data:` lines and yield empty output.
+	// Detect that here and signal a degrade so the caller falls back to one-shot.
+	ct := resp.Header.Get("Content-Type")
+	if !strings.Contains(ct, "event-stream") {
+		resp.Body.Close()
+		return nil, fmt.Errorf("provider %s did not return an SSE stream (content-type %q)", m.cfg.Provider, ct)
 	}
 	return resp, nil
 }
@@ -393,17 +405,13 @@ func (m *chatModel) postJSONWithHeaders(ctx context.Context, url string, body an
 	if err != nil {
 		return nil, fmt.Errorf("marshal request: %w", err)
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(buf))
+	hdr := map[string]string{"Content-Type": "application/json"}
+	for k, v := range headers {
+		hdr[k] = v
+	}
+	resp, err := m.sendWithRetry(ctx, url, buf, hdr)
 	if err != nil {
 		return nil, err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	for k, v := range headers {
-		req.Header.Set(k, v)
-	}
-	resp, err := m.client.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("chat request: %w", err)
 	}
 	defer resp.Body.Close()
 	data, _ := io.ReadAll(resp.Body)
@@ -411,6 +419,86 @@ func (m *chatModel) postJSONWithHeaders(ctx context.Context, url string, body an
 		return nil, fmt.Errorf("chat provider %s returned %d: %s", m.cfg.Provider, resp.StatusCode, truncate(string(data), 300))
 	}
 	return data, nil
+}
+
+// maxRetries bounds transient-failure retries (429 / 5xx) per request.
+const maxRetries = 4
+
+// sendWithRetry POSTs body to url, retrying on rate-limit (429) and transient
+// server errors (5xx) with exponential backoff. It honors a Retry-After header
+// when present and aborts promptly on context cancellation. A fresh request is
+// built each attempt because the body reader is consumed on send. The returned
+// response (which the caller must close) is the first 2xx, or the last attempt
+// when retries are exhausted or the status is non-retryable.
+func (m *chatModel) sendWithRetry(ctx context.Context, url string, body []byte, headers map[string]string) (*http.Response, error) {
+	var lastErr error
+	for attempt := 0; attempt <= maxRetries; attempt++ {
+		if attempt > 0 {
+			delay := m.backoffDelay(attempt)
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-time.After(delay):
+			}
+		}
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+		if err != nil {
+			return nil, err
+		}
+		for k, v := range headers {
+			req.Header.Set(k, v)
+		}
+		resp, err := m.client.Do(req)
+		if err != nil {
+			lastErr = fmt.Errorf("chat request: %w", err)
+			continue // network error: retry
+		}
+		if !retryableStatus(resp.StatusCode) {
+			return resp, nil // success or non-retryable error: hand back to caller
+		}
+		// Retryable: drain+close this body and try again (after honoring Retry-After).
+		honorRetryAfter(ctx, resp)
+		lastErr = fmt.Errorf("chat provider %s returned %d (attempt %d/%d)", m.cfg.Provider, resp.StatusCode, attempt+1, maxRetries+1)
+		resp.Body.Close()
+	}
+	return nil, lastErr
+}
+
+// retryableStatus reports whether an HTTP status warrants a retry: rate limiting
+// (429) and transient upstream errors (502/503/504 and other 5xx).
+func retryableStatus(code int) bool {
+	return code == http.StatusTooManyRequests || code >= 500
+}
+
+// backoffDelay returns an exponential backoff for the given 1-based attempt,
+// capped so a stuck provider doesn't stall the request indefinitely.
+func (m *chatModel) backoffDelay(attempt int) time.Duration {
+	base := m.retryBase
+	if base <= 0 {
+		base = time.Second
+	}
+	d := time.Duration(1<<uint(attempt-1)) * base // base, 2x, 4x, 8x
+	if cap := 8 * base; d > cap {
+		d = cap
+	}
+	return d
+}
+
+// honorRetryAfter sleeps for a server-specified Retry-After (seconds) if present
+// and small, so we don't hammer a provider that told us exactly when to return.
+func honorRetryAfter(ctx context.Context, resp *http.Response) {
+	v := resp.Header.Get("Retry-After")
+	if v == "" {
+		return
+	}
+	secs, err := strconv.Atoi(strings.TrimSpace(v))
+	if err != nil || secs <= 0 || secs > 30 {
+		return
+	}
+	select {
+	case <-ctx.Done():
+	case <-time.After(time.Duration(secs) * time.Second):
+	}
 }
 
 func truncate(s string, n int) string {
