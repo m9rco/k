@@ -20,9 +20,11 @@ import (
 	utilcb "github.com/cloudwego/eino/utils/callbacks"
 
 	"gameasset/internal/config"
+	"gameasset/internal/crawl"
 	"gameasset/internal/crop"
 	"gameasset/internal/generation"
 	"gameasset/internal/transport"
+	"gameasset/internal/video"
 )
 
 // sessionKey scopes a tool invocation to its caller's session via context.
@@ -40,6 +42,8 @@ type Orchestrator struct {
 	model      *chatModel
 	gen        *generation.Service
 	crop       *crop.Service
+	video      *video.Service
+	crawl      *crawl.Service
 	budget     int
 	keepRecent int
 	hub        *transport.Hub
@@ -51,7 +55,7 @@ type Orchestrator struct {
 // NewOrchestrator builds the orchestrator from config and backing services.
 // The conversation model is selected from config (primary unless the test
 // model is enabled); users cannot switch it (requirement: model hardcoded).
-func NewOrchestrator(cfg *config.Config, gen *generation.Service, cr *crop.Service, hub *transport.Hub) *Orchestrator {
+func NewOrchestrator(cfg *config.Config, gen *generation.Service, cr *crop.Service, vid *video.Service, cw *crawl.Service, hub *transport.Hub) *Orchestrator {
 	mc := cfg.ChatPrimary
 	if cfg.UseTestModel {
 		mc = cfg.ChatTest
@@ -60,6 +64,8 @@ func NewOrchestrator(cfg *config.Config, gen *generation.Service, cr *crop.Servi
 		model:      newChatModel(mc),
 		gen:        gen,
 		crop:       cr,
+		video:      vid,
+		crawl:      cw,
 		budget:     cfg.ContextTokenBudget,
 		keepRecent: 6,
 		hub:        hub,
@@ -80,6 +86,15 @@ func (o *Orchestrator) window(sessionID string) *Window {
 	return w
 }
 
+// ResetContext discards a session's accumulated conversation history, restoring
+// a fresh window seeded only with the system prompt. Workspace assets are
+// untouched (this only clears the LLM context window).
+func (o *Orchestrator) ResetContext(sessionID string) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.windows[sessionID] = NewWindow(SystemPrompt(), o.budget, o.keepRecent, nil)
+}
+
 // Handle processes one user message for a session: it appends the message to
 // the session window, runs the ReAct agent with session-scoped tools, streams
 // the assistant's incremental text and tool-call steps to the session's WS
@@ -87,13 +102,13 @@ func (o *Orchestrator) window(sessionID string) *Window {
 //
 // The agent is rebuilt per call because each tool invocation is bound to this
 // session (tools read the session id from context to keep assets isolated).
-func (o *Orchestrator) Handle(ctx context.Context, sessionID, userText string) (string, error) {
+func (o *Orchestrator) Handle(ctx context.Context, sessionID, userText string, lossless bool) (string, error) {
 	w := o.window(sessionID)
 	w.Append(schema.UserMessage(userText))
 
 	ctx = withSession(ctx, sessionID)
 
-	deps := ToolDeps{Generation: o.gen, Crop: o.crop, SessionID: sessionID}
+	deps := ToolDeps{Generation: o.gen, Crop: o.crop, Video: o.video, Crawl: o.crawl, SessionID: sessionID, Lossless: lossless}
 	tools, err := deps.Tools()
 	if err != nil {
 		return "", fmt.Errorf("build tools: %w", err)

@@ -71,9 +71,48 @@ type TaskView struct {
 func (s *Service) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/session/{id}/assets", s.handleListAssets)
 	mux.HandleFunc("GET /api/session/{id}/assets/{assetId}/raw", s.handleAssetRaw)
+	mux.HandleFunc("DELETE /api/session/{id}/assets/{assetId}", s.handleDeleteAsset)
 	mux.HandleFunc("GET /api/session/{id}/tasks", s.handleListTasks)
 	mux.HandleFunc("POST /api/session/{id}/upload", s.handleUpload)
 	mux.HandleFunc("POST /api/session/{id}/tasks/{taskId}/retry", s.handleRetry)
+	mux.HandleFunc("POST /api/session/{id}/clear", s.handleClear)
+}
+
+// handleDeleteAsset removes a single asset (record + file) scoped to its
+// session. Returns 404 when the asset does not belong to the session.
+func (s *Service) handleDeleteAsset(w http.ResponseWriter, r *http.Request) {
+	sessionID := r.PathValue("id")
+	assetID := r.PathValue("assetId")
+	path, err := s.store.DeleteAsset(sessionID, assetID)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if path == "" {
+		http.NotFound(w, r)
+		return
+	}
+	_ = os.Remove(path) // best-effort file cleanup; row already gone
+	writeJSON(w, map[string]string{"status": "deleted", "assetId": assetID})
+}
+
+// handleClear empties the session workspace: deletes all assets (records +
+// files) and removes queued/running task placeholders. Scoped to the session.
+func (s *Service) handleClear(w http.ResponseWriter, r *http.Request) {
+	sessionID := r.PathValue("id")
+	paths, err := s.store.DeleteSessionAssets(sessionID)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	for _, p := range paths {
+		_ = os.Remove(p)
+	}
+	if err := s.store.DeleteUnfinishedTasks(sessionID); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, map[string]any{"status": "cleared", "removed": len(paths)})
 }
 
 func (s *Service) handleListAssets(w http.ResponseWriter, r *http.Request) {

@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"gameasset/internal/config"
+	"gameasset/internal/imageopt"
 	"gameasset/internal/store"
 )
 
@@ -89,8 +90,9 @@ type CropMeta struct {
 // CropToSizes crops the source asset to each requested size id, persisting every
 // product as a "cropped" asset owned by the session. The source is loaded from
 // the store (enforcing session ownership). Sizes are looked up by their globally
-// unique id across the whole channel catalog.
-func (s *Service) CropToSizes(sessionID, sourceAssetID string, sizeIDs []string) ([]CropResult, error) {
+// unique id across the whole channel catalog. When lossless is true, each PNG
+// product is losslessly optimized before persistence.
+func (s *Service) CropToSizes(sessionID, sourceAssetID string, sizeIDs []string, lossless bool) ([]CropResult, error) {
 	src, err := s.store.GetAsset(sessionID, sourceAssetID)
 	if err != nil {
 		return nil, err
@@ -125,7 +127,8 @@ func (s *Service) CropToSizes(sessionID, sourceAssetID string, sizeIDs []string)
 			ext = ".jpg"
 		}
 		path := filepath.Join(s.assetDir, id+ext)
-		if err := os.WriteFile(path, res.Data, 0o644); err != nil {
+		outData := imageopt.Optimize(res.Data, lossless)
+		if err := os.WriteFile(path, outData, 0o644); err != nil {
 			return nil, fmt.Errorf("write crop file: %w", err)
 		}
 		now := s.now()
@@ -147,7 +150,7 @@ func (s *Service) CropToSizes(sessionID, sourceAssetID string, sizeIDs []string)
 		results = append(results, CropResult{
 			AssetID: id, SizeID: sz.ID, ChannelID: ref.channelID, Path: path,
 			Name: sz.Name, Width: res.Width, Height: res.Height,
-			Mime: res.Mime, Bytes: len(res.Data),
+			Mime: res.Mime, Bytes: len(outData),
 		})
 	}
 	return results, nil

@@ -112,7 +112,7 @@ func TestCropToSizesProducesAssets(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	results, err := svc.CropToSizes("s", "src", []string{"test.square", "test.wide"})
+	results, err := svc.CropToSizes("s", "src", []string{"test.square", "test.wide"}, true)
 	if err != nil {
 		t.Fatalf("CropToSizes: %v", err)
 	}
@@ -144,7 +144,7 @@ func TestCropToSizesUnknownSourceFails(t *testing.T) {
 	svc, st, _ := newCropService(t)
 	now := time.Now().UTC()
 	_ = st.UpsertSession(store.SessionRecord{ID: "s", Fingerprint: "fp", CreatedAt: now, LastSeenAt: now})
-	if _, err := svc.CropToSizes("s", "missing", []string{"test.square"}); err == nil {
+	if _, err := svc.CropToSizes("s", "missing", []string{"test.square"}, true); err == nil {
 		t.Error("expected error for missing source asset")
 	}
 }

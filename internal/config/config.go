@@ -112,6 +112,15 @@ type Config struct {
 	ImagePrimary ImageProviderConfig
 	ImageBackup  ImageProviderConfig
 
+	// Video is the image-to-video provider (happyhorse R2V). It may be unset, in
+	// which case the video capability degrades to "not configured".
+	Video ImageProviderConfig
+
+	// Crawl configures the game-asset crawling source. CrawlEndpoint empty means
+	// the crawl capability degrades to "not configured".
+	CrawlEndpoint string
+	CrawlAPIKey   string
+
 	// DBPath is the SQLite file location.
 	DBPath string
 	// AssetDir is where generated/cropped image files are stored on disk.
@@ -217,6 +226,19 @@ func Load(platformsPath string) (*Config, error) {
 			APIKey:  envFirst(yunwuKey, "IMAGE_BACKUP_API_KEY"),
 			Model:   env("IMAGE_BACKUP_MODEL", "gpt-image-2"),
 		},
+
+		// Image-to-video (happyhorse R2V). Reserved provider; APIKey/Model empty
+		// means the video capability reports "not configured" rather than failing.
+		Video: ImageProviderConfig{
+			Name:    env("VIDEO_NAME", "happyhorse"),
+			BaseURL: envFirst(env("HAPPYHORSE_BASE_URL", ""), "VIDEO_BASE_URL", yunwuBase),
+			APIKey:  envFirst(env("HAPPYHORSE_API_KEY", ""), "VIDEO_API_KEY", yunwuKey),
+			Model:   env("HAPPYHORSE_MODEL", ""),
+		},
+
+		// Game-asset crawling. Empty endpoint => capability degrades gracefully.
+		CrawlEndpoint: env("CRAWL_ENDPOINT", ""),
+		CrawlAPIKey:   env("CRAWL_API_KEY", ""),
 
 		DBPath:              env("DB_PATH", "data/asset-studio.db"),
 		AssetDir:            env("ASSET_DIR", "data/assets"),

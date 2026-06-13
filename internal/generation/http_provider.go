@@ -134,6 +134,21 @@ func (p *HTTPProvider) buildEditRequest(ctx context.Context, req Request) (*http
 	if _, err := fw.Write(req.SourceImage); err != nil {
 		return nil, err
 	}
+	// Additional references (multi-image edit). Sent as image[] parts following
+	// the gpt-image multi-image convention; providers that don't support it
+	// ignore the extra parts and operate on the primary image alone.
+	for i, ref := range req.ReferenceImages {
+		if len(ref) == 0 {
+			continue
+		}
+		rw, err := mw.CreateFormFile("image[]", fmt.Sprintf("ref%d.png", i+1))
+		if err != nil {
+			return nil, err
+		}
+		if _, err := rw.Write(ref); err != nil {
+			return nil, err
+		}
+	}
 	if err := mw.Close(); err != nil {
 		return nil, err
 	}

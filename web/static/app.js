@@ -21,6 +21,8 @@ const state = {
   reasoningOpen: null,
   pendingTools: [],
   prefs: new Map(),
+  // 图片无损压缩开关：默认开启，随消息发往后端。
+  lossless: true,
   // 打字机渲染：前端按固定速率逐字吐出，独立于后端/代理的到达节奏。
   typeTarget: "",
   typeShown: 0,
@@ -353,8 +355,14 @@ function sendMessage(text, ref) {
     return;
   }
   addBubble("user", value);
-  const payload = { type: "user_message", text: value };
-  if (ref) payload.ref = ref;
+  const payload = { type: "user_message", text: value, lossless: state.lossless };
+  // ref may be a single asset id or an array (multi-reference, ≤6).
+  if (Array.isArray(ref)) {
+    if (ref.length === 1) payload.ref = ref[0];
+    else if (ref.length > 1) payload.refs = ref.slice(0, 6);
+  } else if (ref) {
+    payload.ref = ref;
+  }
   state.ws.send(JSON.stringify(payload));
   if (text == null) input.value = "";
 }
@@ -381,26 +389,127 @@ function renderWorkspace() {
   const grid = $("#wsGrid");
   grid.innerHTML = "";
 
-  let count = 0;
+  // Group into milestone stages: 进行中 (active tasks) → 已完成 (assets) → 失败.
+  const active = [];
+  const failed = [];
   for (const task of state.tasks.values()) {
     if (task.status === "done") continue;
-    grid.appendChild(taskCard(task));
-    count++;
+    if (task.status === "failed") failed.push(task);
+    else active.push(task); // queued / running
   }
-  for (const asset of state.assets.values()) {
-    grid.appendChild(assetCard(asset));
-    count++;
-  }
-  if (count === 0) {
+  const assets = [...state.assets.values()];
+
+  const total = active.length + failed.length + assets.length;
+  if (total === 0) {
     const empty = el("div", "ws-empty");
     empty.appendChild(el("div", "ws-empty-art"));
     empty.appendChild(el("p", null, "还没有素材。上传一张图或直接描述你的需求，产物会出现在这里。"));
     grid.appendChild(empty);
+  } else {
+    appendMilestone(grid, "进行中", active.length, active.map(taskCard));
+    appendMilestone(grid, "已完成", assets.length, assets.map(assetCard));
+    appendMilestone(grid, "失败", failed.length, failed.map(taskCard));
   }
+
   $("#zipBtn").hidden = state.assets.size === 0;
   $("#selectAllBtn").hidden = state.assets.size === 0;
+  $("#clearWsBtn").hidden = state.assets.size === 0;
   // Batch crop applies to the current multi-selection; hidden until something is selected.
   $("#batchCropBtn").hidden = state.selected.size === 0;
+  renderSuggestions();
+}
+
+// appendMilestone renders one status-stage section (header + its own card grid)
+// into the workspace, skipping empty stages.
+function appendMilestone(grid, title, count, cards) {
+  if (count === 0) return;
+  const section = el("div", "ws-stage");
+  const head = el("div", "ws-stage-head");
+  head.appendChild(el("span", "ws-stage-title", title));
+  head.appendChild(el("span", "ws-stage-count", String(count)));
+  section.appendChild(head);
+  const inner = el("div", "ws-stage-grid");
+  for (const c of cards) inner.appendChild(c);
+  section.appendChild(inner);
+  grid.appendChild(section);
+}
+
+// ---------- 下一步自动补全提示（前端启发式） ----------
+
+// renderSuggestions derives 1–3 next-step hints from the current workspace
+// state (newest product kind, current selection) and learned preference
+// keywords. It is purely heuristic and local — no backend call. The bar hides
+// when there is nothing to suggest.
+function renderSuggestions() {
+  const bar = $("#suggestBar");
+  const sugg = computeSuggestions();
+  if (sugg.length === 0) {
+    bar.hidden = true;
+    bar.innerHTML = "";
+    return;
+  }
+  bar.innerHTML = "";
+  bar.appendChild(el("span", "suggest-label", "下一步"));
+  for (const s of sugg) {
+    const chip = el("button", "suggest-chip", s.label);
+    chip.type = "button";
+    chip.onclick = s.run;
+    bar.appendChild(chip);
+  }
+  bar.hidden = false;
+}
+
+// computeSuggestions returns up to 3 {label, run} hints. run either prefills the
+// composer (text starter the user can edit) or triggers a direct action.
+function computeSuggestions() {
+  const out = [];
+  const fill = (text) => () => {
+    $("#msgInput").value = text;
+    $("#msgInput").focus();
+  };
+  const assets = [...state.assets.values()];
+  if (assets.length === 0) return out; // nothing to act on yet
+
+  const newest = assets[0]; // API returns newest-first
+  const topKw = topPreferenceKeyword();
+
+  if (state.selected.size > 1) {
+    out.push({ label: `批量切尺寸（${state.selected.size}）`, run: () => $("#batchCropBtn").click() });
+    out.push({ label: "打包下载", run: () => $("#zipBtn").click() });
+    return out.slice(0, 3);
+  }
+
+  switch (newest && newest.kind) {
+    case "upload":
+      out.push({ label: "换背景", run: fill("把这张图的背景换成") });
+      out.push({ label: "换角色", run: fill("把这张图的角色换成") });
+      out.push({ label: "切尺寸", run: () => openCapsule(newest.id) });
+      break;
+    case "generated":
+      out.push({ label: "切尺寸", run: () => openCapsule(newest.id) });
+      out.push({ label: "让它动起来", run: fill("让这张图里的角色动起来") });
+      out.push({ label: "下载", run: () => downloadSingle(newest.id) });
+      break;
+    case "cropped":
+      out.push({ label: "打包下载", run: () => $("#zipBtn").click() });
+      out.push({ label: "再切其他尺寸", run: () => openCapsule(newest.id) });
+      break;
+    default:
+      out.push({ label: "切尺寸", run: () => openCapsule(newest.id) });
+  }
+  if (topKw && out.length < 3) {
+    out.push({ label: `用「${topKw}」风格再生成`, run: fill(`用${topKw}风格再生成一张`) });
+  }
+  return out.slice(0, 3);
+}
+
+// topPreferenceKeyword returns the most frequent learned keyword, or "".
+function topPreferenceKeyword() {
+  let best = "", n = 0;
+  for (const [kw, c] of state.prefs) {
+    if (c > n) { best = kw; n = c; }
+  }
+  return n >= 2 ? best : ""; // only surface when seen a couple times
 }
 
 function taskCard(task) {
@@ -431,12 +540,31 @@ function assetCard(asset) {
   const card = el("div", "card");
   if (state.selected.has(asset.id)) card.classList.add("selected");
 
-  const img = el("img");
-  img.loading = "lazy";
-  img.src = asset.url;
-  img.alt = asset.kind;
-  card.appendChild(img);
-  card.appendChild(el("div", "card-tag", asset.kind));
+  const isVideo = (asset.mime || "").startsWith("video/") || asset.kind === "video";
+  if (isVideo) {
+    const vid = el("video");
+    vid.src = asset.url;
+    vid.muted = true;
+    vid.loop = true;
+    vid.playsInline = true;
+    vid.preload = "metadata";
+    // Preview on hover; pause when leaving to keep things calm.
+    card.addEventListener("mouseenter", () => vid.play().catch(() => {}));
+    card.addEventListener("mouseleave", () => { vid.pause(); vid.currentTime = 0; });
+    card.appendChild(vid);
+    card.classList.add("is-video");
+  } else {
+    const img = el("img");
+    img.loading = "lazy";
+    img.src = asset.url;
+    img.alt = asset.kind;
+    card.appendChild(img);
+  }
+  card.appendChild(el("div", "card-tag", isVideo ? "视频" : kindLabel(asset.kind)));
+  // Dimension badge (e.g. 512×512) when known.
+  if (asset.width && asset.height) {
+    card.appendChild(el("div", "card-dim", `${asset.width}×${asset.height}`));
+  }
 
   const check = el("div", "card-check", "✓");
   card.appendChild(check);
@@ -452,6 +580,11 @@ function assetCard(asset) {
 
 function statusLabel(s) {
   return { queued: "排队中", running: "生成中", failed: "失败", done: "完成" }[s] || s;
+}
+
+// kindLabel maps an asset kind to a short Chinese tag for the card badge.
+function kindLabel(k) {
+  return { upload: "上传", generated: "生成", cropped: "裁剪", crawled: "爬取", video: "视频" }[k] || k;
 }
 
 // runningStage maps progress to a human stage hint so a long generation reads
@@ -539,6 +672,56 @@ function runAssetAction(act, asset) {
     case "download":
       downloadSingle(asset.id);
       break;
+    case "remove":
+      removeAsset(asset.id);
+      break;
+  }
+}
+
+// removeAsset deletes a single asset (record + file) and refreshes the workspace.
+async function removeAsset(assetId) {
+  try {
+    const res = await fetch(`/api/session/${state.sessionId}/assets/${assetId}`, { method: "DELETE" });
+    if (!res.ok) throw new Error(await res.text());
+    state.assets.delete(assetId);
+    state.selected.delete(assetId);
+    renderWorkspace();
+    toast("已移除", "ok");
+  } catch (e) {
+    toast("移除失败：" + e.message);
+  }
+}
+
+// clearWorkspace empties the session workspace after explicit confirmation.
+async function clearWorkspace() {
+  if (state.assets.size === 0) return;
+  if (!confirm("确定清空工作区？将删除全部素材，此操作不可恢复。")) return;
+  try {
+    const res = await fetch(`/api/session/${state.sessionId}/clear`, { method: "POST" });
+    if (!res.ok) throw new Error(await res.text());
+    state.selected.clear();
+    await refreshWorkspace();
+    toast("工作区已清空", "ok");
+  } catch (e) {
+    toast("清空失败：" + e.message);
+  }
+}
+
+// clearContext resets the conversation window after confirmation; workspace
+// assets are untouched.
+async function clearContext() {
+  if (!confirm("清理当前会话上下文？将开始新话题，工作区素材不受影响。")) return;
+  try {
+    const res = await fetch(`/api/session/${state.sessionId}/context/clear`, { method: "POST" });
+    if (!res.ok) throw new Error(await res.text());
+    $("#chatLog").innerHTML = "";
+    state.streamingEl = null;
+    state.reasoningOpen = null;
+    state.pendingTools = [];
+    refreshContext();
+    toast("上下文已清理", "ok");
+  } catch (e) {
+    toast("清理失败：" + e.message);
   }
 }
 
@@ -859,23 +1042,70 @@ function buildSizeChip(ch, sz) {
 
 function updateChosenBar() {
   const n = capsuleState.chosen.size;
-  $("#chosenCount").textContent = `已选 ${n} 项`;
+  const assetCount = capsuleState.assetIds.length;
+  const total = n * assetCount; // products = sizes × source assets
+  $("#chosenCount").textContent =
+    assetCount > 1 ? `已选 ${n} 项 × ${assetCount} 张 = ${total} 个产物` : `已选 ${n} 项`;
   $("#capsuleConfirm").disabled = n === 0;
-  $("#capsuleConfirm").onclick = () => {
-    const items = [...capsuleState.chosen.values()];
-    const ids = items.map((i) => i.id);
-    const labels = items.map((i) => i.label);
-    for (const assetId of capsuleState.assetIds) {
-      cropToSizes(assetId, ids, labels);
-    }
-    closeCapsule();
-  };
+  $("#capsuleConfirm").onclick = () => runCrop();
 }
 
-function cropToSizes(assetId, sizeIds, labels) {
-  if (!sizeIds.length) return;
-  const shown = (labels && labels.length ? labels : sizeIds).join("、");
-  sendMessage(`把这张图裁剪成这些尺寸：${shown}`, assetId); // explicit target
+// CROP_INLINE_MAX bounds how many crop products get pushed into the workspace
+// inline; beyond this, products are packaged into a zip download instead.
+const CROP_INLINE_MAX = 6;
+
+// runCrop performs the crop directly against the server (pure image processing,
+// no agent round-trip). It crops every selected source asset to every chosen
+// size. If the total product count is within CROP_INLINE_MAX the products are
+// surfaced in the workspace; otherwise they are packaged into a zip download
+// (with a pre-confirmation), since dropping dozens of cards into the grid is
+// unwieldy.
+async function runCrop() {
+  const sizeIds = [...capsuleState.chosen.keys()];
+  const assetIds = capsuleState.assetIds.slice();
+  if (!sizeIds.length || !assetIds.length) return;
+
+  const total = sizeIds.length * assetIds.length;
+  const willPackage = total > CROP_INLINE_MAX;
+  if (willPackage) {
+    if (!confirm(`将裁剪出 ${total} 个文件（超过 ${CROP_INLINE_MAX} 个），完成后将按渠道/尺寸分目录打包下载。是否继续？`)) {
+      return;
+    }
+  }
+  closeCapsule();
+  toast(willPackage ? `正在裁剪 ${total} 个文件…` : "正在裁剪…", "ok");
+
+  // Crop each source asset to all chosen sizes; collect produced asset ids.
+  const produced = [];
+  let failed = 0;
+  for (const assetId of assetIds) {
+    try {
+      const res = await fetch(`/api/session/${state.sessionId}/crop`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ sourceAssetId: assetId, sizeIds, lossless: state.lossless }),
+      });
+      if (!res.ok) throw new Error(await res.text());
+      const data = await res.json();
+      for (const r of data.results || []) produced.push(r.assetId);
+    } catch (e) {
+      failed++;
+    }
+  }
+
+  if (produced.length === 0) {
+    toast("裁剪失败：未产出任何文件", "error");
+    return;
+  }
+
+  if (willPackage) {
+    const ok = await zipAndDownload(produced);
+    await refreshWorkspace(); // products still exist in workspace as backup
+    if (ok) toast(`已打包下载 ${produced.length} 个裁剪文件${failed ? `，${failed} 个源失败` : ""}`, "ok");
+  } else {
+    await refreshWorkspace(); // surface the new crops inline
+    toast(`已裁剪 ${produced.length} 个文件${failed ? `，${failed} 个源失败` : ""}`, "ok");
+  }
 }
 
 // ---------- 下载 ----------
@@ -889,11 +1119,21 @@ async function downloadZip() {
     toast("先选中要打包的素材", "warn");
     return;
   }
+  if (await zipAndDownload([...state.selected])) {
+    state.selected.clear();
+    renderWorkspace();
+  }
+}
+
+// zipAndDownload packages the given asset ids server-side (organized into
+// channel/size folders) and triggers a download. Returns true on success.
+async function zipAndDownload(assetIds) {
+  if (!assetIds.length) return false;
   try {
     const res = await fetch(`/api/session/${state.sessionId}/download/zip`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ assetIds: [...state.selected] }),
+      body: JSON.stringify({ assetIds }),
     });
     if (!res.ok) throw new Error(await res.text());
     const skipped = res.headers.get("X-Skipped-Assets");
@@ -902,10 +1142,10 @@ async function downloadZip() {
     const url = URL.createObjectURL(blob);
     triggerDownload(url, "assets.zip");
     setTimeout(() => URL.revokeObjectURL(url), 5000);
-    state.selected.clear();
-    renderWorkspace();
+    return true;
   } catch (e) {
     toast("打包失败：" + e.message);
+    return false;
   }
 }
 
@@ -1047,7 +1287,10 @@ function bindUI() {
     e.preventDefault();
     const typed = $("#msgInput").value.trim();
     if (typed) recordPreferences(typed); // only genuine user-typed messages
-    sendMessage();
+    // Multi-selected assets become references for this message (multi-reference
+    // generation); a single selection is passed as the acted-on asset.
+    const refs = [...state.selected].slice(0, 6);
+    sendMessage(null, refs.length ? refs : undefined);
   });
 
   const fileInput = $("#fileInput");
@@ -1055,6 +1298,15 @@ function bindUI() {
   fileInput.onchange = () => {
     if (fileInput.files.length) uploadFiles(fileInput.files);
     fileInput.value = "";
+  };
+
+  // 无损压缩开关
+  $("#losslessBtn").onclick = () => {
+    state.lossless = !state.lossless;
+    const btn = $("#losslessBtn");
+    btn.classList.toggle("on", state.lossless);
+    btn.setAttribute("aria-pressed", String(state.lossless));
+    btn.textContent = state.lossless ? "无损" : "原图";
   };
 
   $("#zipBtn").onclick = downloadZip;
@@ -1069,6 +1321,8 @@ function bindUI() {
     }
     openCapsule([...state.selected]); // batch: apply chosen sizes to all selected
   };
+  $("#clearWsBtn").onclick = clearWorkspace;
+  $("#clearCtxBtn").onclick = clearContext;
 
   $("#capsuleClose").onclick = closeCapsule;
   $("#capsuleSheet").onclick = (e) => {

@@ -4,8 +4,10 @@ import (
 	"context"
 	"fmt"
 
+	"gameasset/internal/crawl"
 	"gameasset/internal/crop"
 	"gameasset/internal/generation"
+	"gameasset/internal/video"
 
 	"github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/components/tool/utils"
@@ -17,9 +19,14 @@ import (
 type ToolDeps struct {
 	Generation *generation.Service
 	Crop       *crop.Service
+	Video      *video.Service
+	Crawl      *crawl.Service
 	// SessionID scopes every tool call to the caller's session so produced
 	// tasks and assets stay isolated per session.
 	SessionID string
+	// Lossless toggles program-side PNG lossless optimization of image products
+	// (default true; set per request from the frontend compression switch).
+	Lossless bool
 }
 
 // --- change_character / change_background / change_text -------------------
@@ -29,6 +36,10 @@ type editArgs struct {
 	Intent string `json:"intent" jsonschema:"description=The edit intent: change_character, change_background, or change_text,enum=change_character,enum=change_background,enum=change_text"`
 	// SourceAssetID is the existing asset to edit. Empty for a fresh generation.
 	SourceAssetID string `json:"source_asset_id,omitempty" jsonschema:"description=ID of an existing workspace asset to edit (二次调整). Empty to generate from scratch."`
+	// ReferenceAssetIDs lists up to 6 reference assets to reuse composition/style
+	// from. The first is the primary reference. Takes precedence over
+	// source_asset_id when provided.
+	ReferenceAssetIDs []string `json:"reference_asset_ids,omitempty" jsonschema:"description=IDs of up to 6 workspace assets to use as references (reuse composition/style/character). First is primary. Use for multi-reference generation."`
 	// CharacterDesc/BackgroundDesc/TextContent carry the per-intent payload.
 	CharacterDesc  string `json:"character_desc,omitempty" jsonschema:"description=Description of the new character (for change_character)"`
 	BackgroundDesc string `json:"background_desc,omitempty" jsonschema:"description=Description of the new background (for change_background)"`
@@ -57,8 +68,10 @@ func (d ToolDeps) newEditTool() (tool.InvokableTool, error) {
 				return editResult{}, fmt.Errorf("unsupported intent %q", a.Intent)
 			}
 			taskID, err := d.Generation.Start(ctx, generation.GenerateParams{
-				SessionID:     d.SessionID,
-				SourceAssetID: a.SourceAssetID,
+				SessionID:         d.SessionID,
+				SourceAssetID:     a.SourceAssetID,
+				ReferenceAssetIDs: a.ReferenceAssetIDs,
+				Lossless:          d.Lossless,
 				Slots: generation.Slots{
 					Kind:             kind,
 					CharacterDesc:    a.CharacterDesc,
@@ -97,7 +110,7 @@ func (d ToolDeps) newCropTool() (tool.InvokableTool, error) {
 			"Pure image processing, no AI. Each produced size becomes a new workspace asset. "+
 			"Unknown ids and non-producible sizes (e.g. video specs) are rejected with an error.",
 		func(_ context.Context, a cropArgs) ([]cropResultItem, error) {
-			results, err := d.Crop.CropToSizes(d.SessionID, a.SourceAssetID, a.SizeIDs)
+			results, err := d.Crop.CropToSizes(d.SessionID, a.SourceAssetID, a.SizeIDs, d.Lossless)
 			if err != nil {
 				return nil, err
 			}
@@ -172,6 +185,78 @@ func (d ToolDeps) newListSizesTool() (tool.InvokableTool, error) {
 	)
 }
 
+// --- image_to_video --------------------------------------------------------
+
+type videoArgs struct {
+	SourceAssetID string `json:"source_asset_id" jsonschema:"description=ID of the workspace image asset to animate into a video"`
+	Motion        string `json:"motion" jsonschema:"description=Describe the desired motion (e.g. 让角色走起来 / 镜头缓慢推进)"`
+}
+
+type videoResult struct {
+	TaskID string `json:"task_id"`
+	Status string `json:"status"`
+	Note   string `json:"note"`
+}
+
+func (d ToolDeps) newVideoTool() (tool.InvokableTool, error) {
+	return utils.InferTool(
+		"image_to_video",
+		"Generate a short video from a single workspace image plus a motion description "+
+			"(e.g. make the character walk). Returns a task id; progress streams over SSE and "+
+			"the video lands in the workspace. Use only when the user asks to animate/【让图动起来】.",
+		func(ctx context.Context, a videoArgs) (videoResult, error) {
+			if d.Video == nil || !d.Video.Configured() {
+				return videoResult{}, fmt.Errorf("图生视频暂未配置，暂不可用")
+			}
+			taskID, err := d.Video.Start(ctx, video.Params{
+				SessionID:     d.SessionID,
+				SourceAssetID: a.SourceAssetID,
+				Motion:        a.Motion,
+			})
+			if err != nil {
+				return videoResult{}, err
+			}
+			return videoResult{TaskID: taskID, Status: "queued", Note: "Video generation started; watch task progress."}, nil
+		},
+	)
+}
+
+// --- crawl_game_assets ------------------------------------------------------
+
+type crawlArgs struct {
+	Game  string `json:"game" jsonschema:"description=Game name to crawl marketing/asset image previews for"`
+	Limit int    `json:"limit,omitempty" jsonschema:"description=Max number of previews to fetch (default 8, max 20)"`
+}
+
+type crawlResult struct {
+	TaskID string `json:"task_id"`
+	Status string `json:"status"`
+	Note   string `json:"note"`
+}
+
+func (d ToolDeps) newCrawlTool() (tool.InvokableTool, error) {
+	return utils.InferTool(
+		"crawl_game_assets",
+		"Crawl image-asset previews for a game by name and add them to the workspace as "+
+			"reference material (info retrieval only, not for redistribution). Returns a task id; "+
+			"progress streams over SSE. Use when the user asks to fetch/crawl a game's materials.",
+		func(ctx context.Context, a crawlArgs) (crawlResult, error) {
+			if d.Crawl == nil || !d.Crawl.Configured() {
+				return crawlResult{}, fmt.Errorf("物料爬取暂未配置，暂不可用")
+			}
+			taskID, err := d.Crawl.Start(ctx, crawl.Params{
+				SessionID: d.SessionID,
+				Game:      a.Game,
+				Limit:     a.Limit,
+			})
+			if err != nil {
+				return crawlResult{}, err
+			}
+			return crawlResult{TaskID: taskID, Status: "queued", Note: "Crawl started; watch task progress."}, nil
+		},
+	)
+}
+
 // Tools builds the full whitelist of agent tools for this session.
 func (d ToolDeps) Tools() ([]tool.BaseTool, error) {
 	edit, err := d.newEditTool()
@@ -186,5 +271,23 @@ func (d ToolDeps) Tools() ([]tool.BaseTool, error) {
 	if err != nil {
 		return nil, fmt.Errorf("list sizes tool: %w", err)
 	}
-	return []tool.BaseTool{edit, cropTool, listSizes}, nil
+	tools := []tool.BaseTool{edit, cropTool, listSizes}
+	// image_to_video is only exposed when a video provider is configured, so the
+	// agent doesn't advertise a capability that will always fail.
+	if d.Video != nil && d.Video.Configured() {
+		vid, err := d.newVideoTool()
+		if err != nil {
+			return nil, fmt.Errorf("video tool: %w", err)
+		}
+		tools = append(tools, vid)
+	}
+	// crawl_game_assets is only exposed when a crawl source is configured.
+	if d.Crawl != nil && d.Crawl.Configured() {
+		cr, err := d.newCrawlTool()
+		if err != nil {
+			return nil, fmt.Errorf("crawl tool: %w", err)
+		}
+		tools = append(tools, cr)
+	}
+	return tools, nil
 }

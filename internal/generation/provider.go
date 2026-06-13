@@ -10,9 +10,14 @@ import (
 type Request struct {
 	// Prompt is the fully assembled, server-controlled prompt.
 	Prompt string
-	// SourceImage is the input image bytes to edit (may be nil for pure text-to-image).
+	// SourceImage is the primary input image bytes to edit (may be nil for pure
+	// text-to-image). It drives palette/size and is the main edit target.
 	SourceImage []byte
 	SourceMime  string
+	// ReferenceImages are additional reference images (beyond SourceImage) whose
+	// composition/style/characters should be reused, up to a small cap. Providers
+	// that cannot accept multiple images fall back to SourceImage only.
+	ReferenceImages [][]byte
 	// Width/Height are the desired output dimensions (0 = provider default).
 	Width  int
 	Height int

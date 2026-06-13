@@ -21,7 +21,7 @@ func TestSystemPromptListsWhitelistAndGuards(t *testing.T) {
 		}
 	}
 	// Must instruct refusal and injection resistance.
-	for _, want := range []string{"不要调用任何工具", "ignore previous instructions", "即将支持"} {
+	for _, want := range []string{"不要调用任何工具", "ignore previous instructions", "暂未配置"} {
 		if !strings.Contains(p, want) {
 			t.Errorf("system prompt missing guard text %q", want)
 		}

@@ -20,6 +20,14 @@ type Inbound struct {
 	Selection []string `json:"selection,omitempty"`
 	// Ref points at an asset id the message acts on (e.g. re-adjust an image).
 	Ref string `json:"ref,omitempty"`
+	// Refs lists multiple reference asset ids for multi-reference generation
+	// (up to 6). When set, surfaced to the agent so it can pass them as
+	// reference_asset_ids.
+	Refs []string `json:"refs,omitempty"`
+	// Lossless toggles program-side PNG lossless optimization of image products.
+	// Pointer so an omitted field defaults to enabled while an explicit false
+	// disables it.
+	Lossless *bool `json:"lossless,omitempty"`
 }
 
 // InboundHandler processes a client message for a session. Implementations

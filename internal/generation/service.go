@@ -14,6 +14,7 @@ import (
 	_ "image/jpeg" // .
 	_ "image/png"  // .
 
+	"gameasset/internal/imageopt"
 	"gameasset/internal/store"
 	"gameasset/internal/transport"
 )
@@ -54,13 +55,43 @@ func NewService(gen generator, st *store.Store, broker *transport.TaskBroker, as
 	}
 }
 
+// MaxReferenceImages bounds how many reference images one generation accepts.
+const MaxReferenceImages = 6
+
 // GenerateParams describes one generation request initiated by the agent.
 type GenerateParams struct {
 	SessionID string
 	Slots     Slots
 	// SourceAssetID, when set, is the existing asset to edit (二次调整 / 换背景).
 	// Its bytes become the generation source and its palette drives harmony.
+	// Treated as the primary reference when ReferenceAssetIDs is empty.
 	SourceAssetID string
+	// ReferenceAssetIDs lists reference assets to reuse composition/style from,
+	// up to MaxReferenceImages (excess is truncated). The first id is the primary
+	// reference (drives palette, size inheritance, and parent linkage); the rest
+	// are additional references. When empty, SourceAssetID is used as the sole
+	// reference (backward compatible).
+	ReferenceAssetIDs []string
+	// Lossless enables program-side PNG lossless optimization of the product
+	// before persistence. Defaults to true at the call sites.
+	Lossless bool
+}
+
+// primaryAndExtras resolves the effective reference list: the primary asset id
+// (drives palette/size/parent) plus any additional reference ids, capped at
+// MaxReferenceImages. Returns ("", nil) when there is no reference at all.
+func (p GenerateParams) primaryAndExtras() (string, []string) {
+	refs := p.ReferenceAssetIDs
+	if len(refs) == 0 && p.SourceAssetID != "" {
+		refs = []string{p.SourceAssetID}
+	}
+	if len(refs) > MaxReferenceImages {
+		refs = refs[:MaxReferenceImages]
+	}
+	if len(refs) == 0 {
+		return "", nil
+	}
+	return refs[0], refs[1:]
 }
 
 // Start creates a task, kicks off async generation, and returns the task id
@@ -129,13 +160,16 @@ func (s *Service) Retry(ctx context.Context, sessionID, taskID string) error {
 func (s *Service) run(ctx context.Context, taskID string, p GenerateParams) {
 	s.setStatus(taskID, p.SessionID, "running", transport.EventTaskRunning, 10, "", "")
 
-	// Load source bytes + palette for color adaptation.
+	// Resolve the primary reference (drives palette/size/parent) plus extras.
+	primaryID, extraIDs := p.primaryAndExtras()
+
+	// Load primary bytes + palette for color adaptation and size inheritance.
 	var srcBytes []byte
 	var srcMime string
 	var palette []PaletteColor
 	var srcW, srcH int
-	if p.SourceAssetID != "" {
-		asset, err := s.store.GetAsset(p.SessionID, p.SourceAssetID)
+	if primaryID != "" {
+		asset, err := s.store.GetAsset(p.SessionID, primaryID)
 		if err != nil || asset == nil {
 			s.fail(taskID, p.SessionID, fmt.Sprintf("source asset not found: %v", err))
 			return
@@ -151,6 +185,21 @@ func (s *Service) run(ctx context.Context, taskID string, p GenerateParams) {
 			palette = pal
 		}
 	}
+
+	// Load any additional reference images (best-effort: a missing/unreadable
+	// extra reference is skipped rather than failing the whole generation).
+	var extraImages [][]byte
+	for _, id := range extraIDs {
+		asset, err := s.store.GetAsset(p.SessionID, id)
+		if err != nil || asset == nil {
+			continue
+		}
+		b, err := os.ReadFile(asset.Path)
+		if err != nil {
+			continue
+		}
+		extraImages = append(extraImages, b)
+	}
 	s.progress(taskID, p.SessionID, 30)
 
 	prompt, err := BuildPrompt(p.Slots, palette)
@@ -162,11 +211,12 @@ func (s *Service) run(ctx context.Context, taskID string, p GenerateParams) {
 
 	// 二次调整：产物尺寸继承源图原尺寸（provider 端会 snap 到支持的尺寸 enum）。
 	out, err := s.gen.Generate(ctx, Request{
-		Prompt:      prompt,
-		SourceImage: srcBytes,
-		SourceMime:  srcMime,
-		Width:       srcW,
-		Height:      srcH,
+		Prompt:          prompt,
+		SourceImage:     srcBytes,
+		SourceMime:      srcMime,
+		ReferenceImages: extraImages,
+		Width:           srcW,
+		Height:          srcH,
 	})
 	if err != nil {
 		s.fail(taskID, p.SessionID, err.Error())
@@ -181,12 +231,14 @@ func (s *Service) run(ctx context.Context, taskID string, p GenerateParams) {
 		return
 	}
 	path := filepath.Join(s.assetDir, assetID+".png")
-	if err := os.WriteFile(path, out.Data, 0o644); err != nil {
+	// Lossless PNG optimization before persistence (pixels unchanged).
+	outData := imageopt.Optimize(out.Data, p.Lossless)
+	if err := os.WriteFile(path, outData, 0o644); err != nil {
 		s.fail(taskID, p.SessionID, fmt.Sprintf("write: %v", err))
 		return
 	}
 	// Record the produced image's actual dimensions so二次调整产物尺寸可追溯。
-	outW, outH := decodeDimensions(out.Data)
+	outW, outH := decodeDimensions(outData)
 	now := s.now()
 	if err := s.store.InsertAsset(store.AssetRecord{
 		ID:        assetID,
@@ -197,7 +249,7 @@ func (s *Service) run(ctx context.Context, taskID string, p GenerateParams) {
 		Width:     outW,
 		Height:    outH,
 		Provider:  out.Provider,
-		ParentID:  p.SourceAssetID,
+		ParentID:  primaryID,
 		CreatedAt: now,
 	}); err != nil {
 		s.fail(taskID, p.SessionID, fmt.Sprintf("persist: %v", err))

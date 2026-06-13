@@ -137,3 +137,74 @@ func TestTaskLifecycleAndActiveCount(t *testing.T) {
 		t.Errorf("active count after done = %d, want 0", n)
 	}
 }
+
+func TestDeleteAssetScopedAndReturnsPath(t *testing.T) {
+	s := newTestStore(t)
+	now := time.Now().UTC()
+	_ = s.UpsertSession(SessionRecord{ID: "sessA", Fingerprint: "fp", CreatedAt: now, LastSeenAt: now})
+	_ = s.UpsertSession(SessionRecord{ID: "sessB", Fingerprint: "fp", CreatedAt: now, LastSeenAt: now})
+	if err := s.InsertAsset(AssetRecord{ID: "a1", SessionID: "sessA", Kind: "generated", Path: "/tmp/a1.png", Mime: "image/png", CreatedAt: now}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Wrong session must not delete and returns empty path.
+	path, err := s.DeleteAsset("sessB", "a1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if path != "" {
+		t.Errorf("cross-session delete should return empty path, got %q", path)
+	}
+	if got, _ := s.GetAsset("sessA", "a1"); got == nil {
+		t.Fatal("asset wrongly deleted across sessions")
+	}
+
+	// Correct session deletes and returns the file path.
+	path, err = s.DeleteAsset("sessA", "a1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if path != "/tmp/a1.png" {
+		t.Errorf("expected returned path /tmp/a1.png, got %q", path)
+	}
+	if got, _ := s.GetAsset("sessA", "a1"); got != nil {
+		t.Error("asset not deleted")
+	}
+}
+
+func TestDeleteSessionAssetsAndUnfinishedTasks(t *testing.T) {
+	s := newTestStore(t)
+	now := time.Now().UTC()
+	_ = s.UpsertSession(SessionRecord{ID: "s", Fingerprint: "fp", CreatedAt: now, LastSeenAt: now})
+	_ = s.UpsertSession(SessionRecord{ID: "other", Fingerprint: "fp", CreatedAt: now, LastSeenAt: now})
+	_ = s.InsertAsset(AssetRecord{ID: "a1", SessionID: "s", Kind: "generated", Path: "/tmp/a1.png", Mime: "image/png", CreatedAt: now})
+	_ = s.InsertAsset(AssetRecord{ID: "a2", SessionID: "s", Kind: "cropped", Path: "/tmp/a2.png", Mime: "image/png", CreatedAt: now})
+	_ = s.InsertAsset(AssetRecord{ID: "b1", SessionID: "other", Kind: "generated", Path: "/tmp/b1.png", Mime: "image/png", CreatedAt: now})
+	_ = s.InsertTask(TaskRecord{ID: "t1", SessionID: "s", Kind: "generate", Status: "running", CreatedAt: now, UpdatedAt: now})
+	_ = s.InsertTask(TaskRecord{ID: "t2", SessionID: "s", Kind: "generate", Status: "done", CreatedAt: now, UpdatedAt: now})
+
+	paths, err := s.DeleteSessionAssets("s")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(paths) != 2 {
+		t.Errorf("expected 2 deleted paths, got %d", len(paths))
+	}
+	if assets, _ := s.ListAssets("s"); len(assets) != 0 {
+		t.Errorf("session assets not cleared: %d remain", len(assets))
+	}
+	if other, _ := s.ListAssets("other"); len(other) != 1 {
+		t.Error("other session's assets wrongly affected")
+	}
+
+	if err := s.DeleteUnfinishedTasks("s"); err != nil {
+		t.Fatal(err)
+	}
+	// Running task gone, done task kept.
+	if rec, _ := s.GetTask("s", "t1"); rec != nil {
+		t.Error("running task not deleted")
+	}
+	if rec, _ := s.GetTask("s", "t2"); rec == nil {
+		t.Error("completed task should be kept")
+	}
+}

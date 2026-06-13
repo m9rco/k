@@ -22,6 +22,7 @@
         <span class="ctx-text" id="ctxText">连接中…</span>
         <span class="ctx-budget" id="ctxBudget"></span>
       </div>
+      <button class="ghost-btn" id="clearCtxBtn" title="清理当前会话上下文（不影响工作区）">清上下文</button>
     </div>
   </header>
 
@@ -36,11 +37,16 @@
         </div>
       </div>
 
+      <!-- 下一步自动补全提示：无依据时隐藏 -->
+      <div class="suggest-bar" id="suggestBar" hidden></div>
+
       <form class="composer" id="composer" autocomplete="off">
         <button type="button" class="icon-btn" id="uploadBtn" title="上传图片">＋</button>
         <input type="file" id="fileInput" accept="image/*" multiple hidden />
         <input type="text" id="msgInput" class="composer-input"
                placeholder="例如：把背景换成夜晚的赛博朋克城市" />
+        <button type="button" class="toggle-btn on" id="losslessBtn"
+                title="无损压缩：开启时对 PNG 产物做无损优化" aria-pressed="true">无损</button>
         <button type="submit" class="send-btn" id="sendBtn">发送</button>
       </form>
     </section>
@@ -52,6 +58,7 @@
         <div class="ws-actions">
           <button class="ghost-btn" id="selectAllBtn" hidden>全选</button>
           <button class="ghost-btn" id="batchCropBtn" hidden>批量切尺寸</button>
+          <button class="ghost-btn" id="clearWsBtn" hidden>清空</button>
           <button class="primary-btn" id="zipBtn" hidden>打包下载</button>
         </div>
       </div>
@@ -107,6 +114,7 @@
     <button class="ctx-item" data-act="crop" role="menuitem">切尺寸</button>
     <button class="ctx-item" data-act="adjust" role="menuitem">二次调整</button>
     <button class="ctx-item" data-act="download" role="menuitem">下载</button>
+    <button class="ctx-item danger" data-act="remove" role="menuitem">移除</button>
   </div>
 
   <!-- 图片放大/二次调整预览 -->

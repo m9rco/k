@@ -15,11 +15,13 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
 	"gameasset/internal/agent"
 	"gameasset/internal/config"
+	"gameasset/internal/crawl"
 	"gameasset/internal/crop"
 	"gameasset/internal/download"
 	"gameasset/internal/generation"
@@ -27,6 +29,7 @@ import (
 	"gameasset/internal/session"
 	"gameasset/internal/store"
 	"gameasset/internal/transport"
+	"gameasset/internal/video"
 	"gameasset/internal/workspace"
 	"gameasset/web"
 )
@@ -84,6 +87,12 @@ func run() error {
 	)
 	genSvc := generation.NewService(gen, st, broker, cfg.AssetDir, id.New)
 
+	// Image-to-video service (happyhorse R2V; degrades when unconfigured).
+	vidSvc := video.NewService(video.NewHTTPProvider(cfg.Video), st, broker, cfg.AssetDir, id.New)
+
+	// Game-asset crawl service (pluggable source; degrades when unconfigured).
+	crawlSvc := crawl.NewService(crawl.NewHTTPSource(cfg.CrawlEndpoint, cfg.CrawlAPIKey), st, broker, cfg.AssetDir, id.New)
+
 	// Asset workspace: list assets/tasks, upload source images, partial retry.
 	wsSvc := workspace.NewService(st, cfg.AssetDir, func() string { return id.New("asset") },
 		func(sessionID, taskID string) error {
@@ -96,16 +105,26 @@ func run() error {
 	dlSvc.RegisterRoutes(mux)
 
 	// Conversation orchestration: Eino ReAct agent over the whitelist of tools.
-	orch := agent.NewOrchestrator(cfg, genSvc, cropSvc, hub)
+	orch := agent.NewOrchestrator(cfg, genSvc, cropSvc, vidSvc, crawlSvc, hub)
 	hub.SetHandler(func(ctx context.Context, sessionID string, msg transport.Inbound) {
 		switch msg.Type {
 		case "user_message":
 			text := msg.Text
-			if msg.Ref != "" {
+			if len(msg.Refs) > 0 {
+				// Multi-reference flow: surface up to 6 reference asset ids so the
+				// agent can pass them as reference_asset_ids for generation.
+				refs := msg.Refs
+				if len(refs) > 6 {
+					refs = refs[:6]
+				}
+				text = "[reference assets: " + strings.Join(refs, ", ") + "] " + text
+			} else if msg.Ref != "" {
 				// Re-adjust flow: the acted-on asset id is surfaced to the agent.
 				text = "[asset " + msg.Ref + "] " + text
 			}
-			if _, err := orch.Handle(ctx, sessionID, text); err != nil {
+			// Lossless compression defaults to on; an explicit false disables it.
+			lossless := msg.Lossless == nil || *msg.Lossless
+			if _, err := orch.Handle(ctx, sessionID, text, lossless); err != nil {
 				hub.Send(sessionID, transport.Event{
 					Type: transport.EventError,
 					Data: map[string]string{"message": err.Error()},
@@ -117,6 +136,12 @@ func run() error {
 	// Context-window state for the UI panel.
 	mux.HandleFunc("GET /api/session/{id}/window", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, orch.State(r.PathValue("id")))
+	})
+
+	// Context cleanup: reset the conversation window (workspace assets untouched).
+	mux.HandleFunc("POST /api/session/{id}/context/clear", func(w http.ResponseWriter, r *http.Request) {
+		orch.ResetContext(r.PathValue("id"))
+		writeJSON(w, map[string]string{"status": "cleared"})
 	})
 
 	// Embedded frontend (serves index.html and static assets).

@@ -334,3 +334,100 @@ func TestServiceInheritsSourceDimensions(t *testing.T) {
 		t.Errorf("recorded product dimensions = %v, want 64x48 (actual output)", asset)
 	}
 }
+
+// TestServiceMultiReferenceForwarded verifies extra reference images are loaded
+// and passed to the provider, the primary drives parent linkage, and the count
+// is capped at MaxReferenceImages.
+func TestServiceMultiReferenceForwarded(t *testing.T) {
+	dir := t.TempDir()
+	st, err := store.Open(filepath.Join(dir, "g.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	broker := transport.NewTaskBroker()
+	var n int
+	gen := func(prefix string) string { n++; return prefix + strconv.Itoa(n) }
+	cap := &capturingProvider{name: "primary", out: Output{Data: solidPNG(t, 16, 16, color.RGBA{5, 5, 5, 255}), Mime: "image/png"}}
+	svc := NewService(NewFailoverGenerator(cap, nil), st, broker, filepath.Join(dir, "assets"), gen)
+
+	now := time.Now().UTC()
+	_ = st.UpsertSession(store.SessionRecord{ID: "s", Fingerprint: "fp", CreatedAt: now, LastSeenAt: now})
+
+	// Seed 8 reference assets (more than MaxReferenceImages).
+	var ids []string
+	for i := 0; i < 8; i++ {
+		id := "ref" + strconv.Itoa(i)
+		p := filepath.Join(dir, id+".png")
+		if err := os.WriteFile(p, solidPNG(t, 8, 8, color.RGBA{uint8(i), 0, 0, 255}), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		_ = st.InsertAsset(store.AssetRecord{ID: id, SessionID: "s", Kind: "upload", Path: p, Mime: "image/png", Width: 8, Height: 8, CreatedAt: now})
+		ids = append(ids, id)
+	}
+
+	taskID, err := svc.Start(context.Background(), GenerateParams{
+		SessionID:         "s",
+		ReferenceAssetIDs: ids,
+		Slots:             Slots{Kind: EditBackground, BackgroundDesc: "forest"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec := waitTask(t, st, "s", taskID)
+	if rec.Status != "done" {
+		t.Fatalf("task not done: %q %q", rec.Status, rec.Error)
+	}
+	if cap.last == nil {
+		t.Fatal("provider not called")
+	}
+	// Primary loaded as SourceImage; extras capped at Max-1.
+	if len(cap.last.SourceImage) == 0 {
+		t.Error("primary SourceImage missing")
+	}
+	if got := len(cap.last.ReferenceImages); got != MaxReferenceImages-1 {
+		t.Errorf("extra references = %d, want %d (capped)", got, MaxReferenceImages-1)
+	}
+	// Parent should be the first (primary) reference.
+	asset, _ := st.GetAsset("s", rec.AssetID)
+	if asset == nil || asset.ParentID != "ref0" {
+		t.Errorf("parent = %v, want ref0", asset)
+	}
+}
+
+// TestServiceSingleSourceBackwardCompat verifies SourceAssetID still works when
+// ReferenceAssetIDs is empty (no extra references).
+func TestServiceSingleSourceBackwardCompat(t *testing.T) {
+	dir := t.TempDir()
+	st, err := store.Open(filepath.Join(dir, "g.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	broker := transport.NewTaskBroker()
+	var n int
+	gen := func(prefix string) string { n++; return prefix + strconv.Itoa(n) }
+	cap := &capturingProvider{name: "p", out: Output{Data: solidPNG(t, 16, 16, color.RGBA{5, 5, 5, 255}), Mime: "image/png"}}
+	svc := NewService(NewFailoverGenerator(cap, nil), st, broker, filepath.Join(dir, "assets"), gen)
+
+	now := time.Now().UTC()
+	_ = st.UpsertSession(store.SessionRecord{ID: "s", Fingerprint: "fp", CreatedAt: now, LastSeenAt: now})
+	p := filepath.Join(dir, "src.png")
+	_ = os.WriteFile(p, solidPNG(t, 8, 8, color.RGBA{1, 1, 1, 255}), 0o644)
+	_ = st.InsertAsset(store.AssetRecord{ID: "src", SessionID: "s", Kind: "upload", Path: p, Mime: "image/png", Width: 8, Height: 8, CreatedAt: now})
+
+	taskID, err := svc.Start(context.Background(), GenerateParams{SessionID: "s", SourceAssetID: "src", Slots: Slots{Kind: EditBackground, BackgroundDesc: "x"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec := waitTask(t, st, "s", taskID)
+	if rec.Status != "done" {
+		t.Fatalf("task not done: %q", rec.Error)
+	}
+	if len(cap.last.ReferenceImages) != 0 {
+		t.Errorf("expected no extra references, got %d", len(cap.last.ReferenceImages))
+	}
+	if len(cap.last.SourceImage) == 0 {
+		t.Error("source image missing")
+	}
+}

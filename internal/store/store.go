@@ -205,6 +205,50 @@ func (s *Store) ListAssets(sessionID string) ([]AssetRecord, error) {
 	return out, rows.Err()
 }
 
+// DeleteAsset removes a single asset row scoped to its session and returns the
+// deleted asset's file path (empty if not found) so the caller can remove the
+// underlying file. Session scoping enforces cross-session isolation.
+func (s *Store) DeleteAsset(sessionID, id string) (string, error) {
+	a, err := s.GetAsset(sessionID, id)
+	if err != nil {
+		return "", err
+	}
+	if a == nil {
+		return "", nil
+	}
+	if _, err := s.db.Exec(`DELETE FROM assets WHERE id = ? AND session_id = ?`, id, sessionID); err != nil {
+		return "", fmt.Errorf("delete asset: %w", err)
+	}
+	return a.Path, nil
+}
+
+// DeleteSessionAssets removes all asset rows for a session and returns their
+// file paths for cleanup.
+func (s *Store) DeleteSessionAssets(sessionID string) ([]string, error) {
+	assets, err := s.ListAssets(sessionID)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := s.db.Exec(`DELETE FROM assets WHERE session_id = ?`, sessionID); err != nil {
+		return nil, fmt.Errorf("delete session assets: %w", err)
+	}
+	paths := make([]string, 0, len(assets))
+	for _, a := range assets {
+		paths = append(paths, a.Path)
+	}
+	return paths, nil
+}
+
+// DeleteUnfinishedTasks removes queued/running task rows for a session (their
+// placeholders are cleared on workspace cleanup). Completed/failed history is
+// left intact.
+func (s *Store) DeleteUnfinishedTasks(sessionID string) error {
+	if _, err := s.db.Exec(`DELETE FROM tasks WHERE session_id = ? AND status IN ('queued','running')`, sessionID); err != nil {
+		return fmt.Errorf("delete unfinished tasks: %w", err)
+	}
+	return nil
+}
+
 // --- Tasks ---
 
 // TaskRecord is a persisted long-running task row.
