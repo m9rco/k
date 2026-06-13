@@ -152,27 +152,45 @@ func (m *chatModel) fallbackStream(ctx context.Context, input []*schema.Message,
 	sr, sw := schema.Pipe[*schema.Message](8)
 	go func() {
 		defer sw.Close()
+		// Re-chunk reasoning the same way as the body so the degraded path still
+		// yields a typewriter effect instead of one big block (parity with the
+		// streaming path's per-chunk reasoning frames).
 		if full.ReasoningContent != "" {
-			rm := schema.AssistantMessage("", nil)
-			rm.ReasoningContent = full.ReasoningContent
-			sw.Send(rm, nil)
+			for _, frag := range chunkRunes(full.ReasoningContent, 24) {
+				rm := schema.AssistantMessage("", nil)
+				rm.ReasoningContent = frag
+				sw.Send(rm, nil)
+			}
 		}
 		if len(full.ToolCalls) > 0 {
 			full.ReasoningContent = "" // already surfaced above; avoid double-emit
 			sw.Send(full, nil)
 			return
 		}
-		runes := []rune(full.Content)
-		const chunk = 24
-		for i := 0; i < len(runes); i += chunk {
-			end := i + chunk
-			if end > len(runes) {
-				end = len(runes)
-			}
-			sw.Send(schema.AssistantMessage(string(runes[i:end]), nil), nil)
+		for _, frag := range chunkRunes(full.Content, 24) {
+			sw.Send(schema.AssistantMessage(frag, nil), nil)
 		}
 	}()
 	return sr, nil
+}
+
+// chunkRunes splits s into rune-safe fragments of at most size runes each, so a
+// one-shot response can be re-emitted as incremental frames without splitting a
+// multi-byte character. Returns nil for empty input.
+func chunkRunes(s string, size int) []string {
+	if s == "" {
+		return nil
+	}
+	runes := []rune(s)
+	out := make([]string, 0, (len(runes)+size-1)/size)
+	for i := 0; i < len(runes); i += size {
+		end := i + size
+		if end > len(runes) {
+			end = len(runes)
+		}
+		out = append(out, string(runes[i:end]))
+	}
+	return out
 }
 
 func (m *chatModel) baseURL(def string) string {

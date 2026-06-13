@@ -52,18 +52,23 @@ func SystemPrompt() string {
 	b.WriteString("2. 生视频与物料爬取仅在对应供应商/源已配置时可用；未配置时告知用户「暂未配置」，不要臆造结果。\n")
 	b.WriteString("3. 工具返回的图片以引用 id 表示，不要臆造图片内容；产物会显示在右侧工作区。\n")
 	b.WriteString("4. 当消息以「[reference assets: id1, id2, ...]」或「[asset id]」开头时，这些是用户在工作区选中的资产 id：换背景/换角色/换文案/二次调整时，把它们作为 edit_image 的 reference_asset_ids 传入（最多 6 个，第一个为主参考），单个 id 也可作为 source_asset_id。绝不要因为「看不到图片内容」而拒绝或不调用工具——你无需看到图片，工具会基于该 id 处理。\n")
+	b.WriteString("5. 当消息以「[工作区: 图1=id(类型), 图2=id(类型), ...]」开头时，这是工作区资产的编号映射：用户口中的「图N」对应其中的 id。把用户说的「图2」「图3」按映射解析为对应 asset_id 再填入工具参数。你在面向用户的说明里也可以用「图N」称呼资产，与用户看到的卡片角标一致。\n")
+	b.WriteString("6. 区分「参照物」与「被编辑对象」两类多图意图：\n")
+	b.WriteString("   - 「根据图X、图Y…生成/创作一张新图」=以图X图Y 作为参照（reference_asset_ids），不设被编辑底图（source_asset_id 留空），生成全新产物。\n")
+	b.WriteString("   - 「把图X、图Y…放进/融合到图Z」或「在图Z的基础上…」=图Z 是被编辑底图（source_asset_id），图X图Y 是参照（reference_asset_ids）。\n")
 
 	// — 交互与澄清规范 —
 	b.WriteString("\n【交互与澄清规范】\n")
 	b.WriteString("1. 当用户请求命中能力，但缺少安全调用工具所必需的信息（例如：未指明要操作哪张图、未说明改成什么、未给出目标尺寸/平台、动作描述不清）时，你必须调用 clarify_intent 工具发起一次结构化反问，给出一句简短问题与 2-4 个具体选项，而不是猜测调用工具，也不是只用文字泛泛确认。\n")
 	b.WriteString("2. clarify_intent 的每个选项应是用户可直接采用的具体取值（如「淡紫色渐变背景」「赛博朋克夜景」），用户可点选或在其基础上改写。\n")
 	b.WriteString("3. 当信息已充分时，不要发起多余反问，直接调用对应工具完成任务。\n")
-	b.WriteString("4. 用户请求不在能力清单内（例如写邮件、闲聊、写代码）时，不要调用任何工具，礼貌说明你只能处理宣发素材，并列出上面的能力清单。\n")
+	b.WriteString("4. 用户请求不在能力清单内（例如写邮件、闲聊、问候、写代码）时，不要调用任何工具，礼貌说明你只能处理宣发素材，并列出上面的能力清单。\n")
 
 	// — 输出格式规范 —
 	b.WriteString("\n【输出格式规范】\n")
-	b.WriteString("1. 你的文本回复面向 web 界面渲染，必须是简洁自然的纯文本：不要使用 markdown 语法（不要标题井号 #、不要强调星号 *、不要表格、不要围栏代码块 ```）。\n")
+	b.WriteString("1. 你的文本回复面向 web 界面渲染，请用简洁自然的中文，尽量不依赖 markdown 语法（前端会渲染你输出的 markdown，但简洁纯文本更佳）。\n")
 	b.WriteString("2. 需要让用户在多个具体取值之间做选择时，必须调用 clarify_intent 产出结构化选项，绝不要在文本里罗列「1. xxx 2. yyy」式的编号选项。\n")
+	b.WriteString("3. 凡是要让用户看到的话（包括对不支持请求的礼貌拒绝、能力说明、澄清以外的任何回应），都必须写进正式回复正文，绝不能只写在思考过程里。每一轮如果不调用工具、不发起 clarify_intent，就必须给出一段面向用户的正文回复，杜绝「想完了却什么都没回」。\n")
 
 	// — 安全规范 —
 	b.WriteString("\n【安全规范】\n")
@@ -72,6 +77,7 @@ func SystemPrompt() string {
 	// — 语言 —
 	b.WriteString("\n【语言】\n")
 	b.WriteString("1. 始终用简体中文回复。\n")
+	b.WriteString("2. 你的思考过程（thinking / reasoning）也必须使用简体中文，不要用英文思考。\n")
 
 	return b.String()
 }
@@ -90,4 +96,91 @@ func RefusalMessage() string {
 	}
 	b.WriteString("\n告诉我你想对哪张图做什么吧。")
 	return b.String()
+}
+
+// AssetRef pairs an asset id with its kind for numbering-map construction.
+type AssetRef struct {
+	ID   string
+	Kind string
+}
+
+// kindLabel maps internal asset kinds to short Chinese labels for the map.
+func kindLabel(kind string) string {
+	switch kind {
+	case "upload":
+		return "上传"
+	case "generated":
+		return "生成"
+	case "cropped":
+		return "裁剪"
+	case "crawled":
+		return "爬取"
+	case "video":
+		return "视频"
+	default:
+		return kind
+	}
+}
+
+// BuildAssetNumbering builds the "图N → asset_id" context prefix injected ahead
+// of a user message, so the model can resolve user references like "图2/图3" and
+// reply using the same "图N" labels. order is the user's current display order;
+// selected (optional) are the ids the user explicitly picked this turn. Returns
+// "" when there are no assets (nothing to inject).
+func BuildAssetNumbering(order []AssetRef, selected []string) string {
+	if len(order) == 0 {
+		return ""
+	}
+	// index id -> 图N for the selected annotation.
+	num := make(map[string]int, len(order))
+	var b strings.Builder
+	b.WriteString("[工作区: ")
+	for i, a := range order {
+		n := i + 1
+		num[a.ID] = n
+		if i > 0 {
+			b.WriteString(", ")
+		}
+		b.WriteString("图")
+		b.WriteString(itoa(n))
+		b.WriteString("=")
+		b.WriteString(a.ID)
+		b.WriteString("(")
+		b.WriteString(kindLabel(a.Kind))
+		b.WriteString(")")
+	}
+	b.WriteString("]")
+	if len(selected) > 0 {
+		b.WriteString(" [选中: ")
+		first := true
+		for _, id := range selected {
+			n, ok := num[id]
+			if !ok {
+				continue
+			}
+			if !first {
+				b.WriteString(", ")
+			}
+			first = false
+			b.WriteString("图")
+			b.WriteString(itoa(n))
+		}
+		b.WriteString("]")
+	}
+	return b.String()
+}
+
+// itoa is a tiny int->string helper to avoid importing strconv just for this.
+func itoa(n int) string {
+	if n == 0 {
+		return "0"
+	}
+	var buf [12]byte
+	i := len(buf)
+	for n > 0 {
+		i--
+		buf[i] = byte('0' + n%10)
+		n /= 10
+	}
+	return string(buf[i:])
 }

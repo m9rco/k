@@ -4,6 +4,7 @@ import (
 	"context"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -185,7 +186,35 @@ func newRestoreOrch(t *testing.T, st *store.Store) *Orchestrator {
 		store:      st,
 		newID:      func(p string) string { return p + "1" },
 		windows:    make(map[string]*Window),
+		cancels:    make(map[string]context.CancelFunc),
+		turnMu:     make(map[string]*sync.Mutex),
 	}
+}
+
+func TestSessionTurnLockIsStablePerSession(t *testing.T) {
+	o := &Orchestrator{turnMu: make(map[string]*sync.Mutex), cancels: make(map[string]context.CancelFunc)}
+	a1 := o.sessionTurnLock("s1")
+	a2 := o.sessionTurnLock("s1")
+	b1 := o.sessionTurnLock("s2")
+	if a1 != a2 {
+		t.Error("same session should return the same lock")
+	}
+	if a1 == b1 {
+		t.Error("different sessions must have distinct locks")
+	}
+}
+
+func TestCancelTurnFiresRegisteredCancel(t *testing.T) {
+	o := &Orchestrator{turnMu: make(map[string]*sync.Mutex), cancels: make(map[string]context.CancelFunc)}
+	_, cancel := context.WithCancel(context.Background())
+	fired := false
+	o.cancels["s1"] = func() { fired = true; cancel() }
+	o.CancelTurn("s1")
+	if !fired {
+		t.Error("CancelTurn should invoke the registered cancel func")
+	}
+	// No-op when nothing registered (must not panic).
+	o.CancelTurn("nobody")
 }
 
 func TestWindowRestoresPersistedHistory(t *testing.T) {

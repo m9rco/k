@@ -18,11 +18,13 @@ const KIND_LABEL: Record<string, string> = {
 
 export function AssetCard({
   asset,
+  index,
   onPreview,
   onCrop,
   onVideo,
 }: {
   asset: Asset;
+  index?: number;
   onPreview: (a: Asset) => void;
   onCrop: (a: Asset) => void;
   onVideo: (a: Asset) => void;
@@ -97,9 +99,16 @@ export function AssetCard({
             </span>
           )}
 
-          <span className="absolute left-1.5 top-1.5 rounded-md bg-black/55 px-1.5 py-0.5 text-[10px] text-fg-dim backdrop-blur-sm">
-            {isVideo ? "视频" : KIND_LABEL[asset.kind] || asset.kind}
-          </span>
+          <div className="absolute left-1.5 top-1.5 flex items-center gap-1">
+            {index != null && (
+              <span className="rounded-md bg-accent/85 px-1.5 py-0.5 text-[10px] font-medium text-accent-fg backdrop-blur-sm">
+                图{index}
+              </span>
+            )}
+            <span className="rounded-md bg-black/55 px-1.5 py-0.5 text-[10px] text-fg-dim backdrop-blur-sm">
+              {isVideo ? "视频" : KIND_LABEL[asset.kind] || asset.kind}
+            </span>
+          </div>
           {!!(asset.width && asset.height) && (
             <span className="absolute bottom-1.5 left-1.5 rounded-md bg-black/55 px-1.5 py-0.5 text-[10px] tabular-nums text-fg-mute backdrop-blur-sm">
               {asset.width}×{asset.height}

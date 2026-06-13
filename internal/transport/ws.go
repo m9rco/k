@@ -12,7 +12,7 @@ import (
 
 // Inbound is a client→server message received over the WebSocket.
 type Inbound struct {
-	// Type is "user_message" or "capsule_select".
+	// Type is "user_message", "capsule_select", or "cancel_turn".
 	Type string `json:"type"`
 	// Text carries a free-form user message.
 	Text string `json:"text,omitempty"`
@@ -24,6 +24,11 @@ type Inbound struct {
 	// (up to 6). When set, surfaced to the agent so it can pass them as
 	// reference_asset_ids.
 	Refs []string `json:"refs,omitempty"`
+	// AssetOrder lists the session's asset ids in the user's current display
+	// order (including drag-reorders). The server uses it to build the
+	// "图N → asset_id" numbering map injected into the agent context, so the
+	// model understands user references like "图2/图3".
+	AssetOrder []string `json:"assetOrder,omitempty"`
 	// Lossless toggles program-side PNG lossless optimization of image products.
 	// Pointer so an omitted field defaults to enabled while an explicit false
 	// disables it.

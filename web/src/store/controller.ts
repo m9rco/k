@@ -4,6 +4,20 @@ import * as api from "@/lib/api";
 import { type AppState, type ChatItem, initialState, uid } from "./types";
 import { useToast } from "@/components/toast-host";
 
+// orderedAssetIds returns the session's asset ids in the user's current display
+// order (honoring drag-reorders in state.order, then appending any new ids),
+// matching the workspace panel's orderedAssets. Sent as `assetOrder` so the
+// backend can build the "图N → id" map the agent uses to resolve "图2/图3".
+function orderedAssetIds(s: AppState): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const id of s.order) {
+    if (s.assets.has(id)) { out.push(id); seen.add(id); }
+  }
+  for (const id of s.assets.keys()) if (!seen.has(id)) out.push(id);
+  return out;
+}
+
 // useAppController owns all app state and the real-time side effects (WS
 // conversation + per-task SSE), mirroring the legacy app.js behavior.
 export function useAppController() {
@@ -19,6 +33,10 @@ export function useAppController() {
   const typer = React.useRef({ id: "", target: "", shown: 0, done: false });
   const reasoner = React.useRef({ id: "", target: "", shown: 0 });
   const tickRef = React.useRef<number | null>(null);
+  // producedRef tracks whether the current turn produced any visible output
+  // (assistant text / tool call / capsule); reset on turn_start, consulted on
+  // turn_end to decide whether an empty-reply fallback line is needed.
+  const producedRef = React.useRef(false);
 
   const setChat = React.useCallback((fn: (c: ChatItem[]) => ChatItem[]) => {
     setState((s) => ({ ...s, chat: fn(s.chat) }));
@@ -268,11 +286,45 @@ export function useAppController() {
     setChat((c) => c.map((it) => (it.kind === "tool" && it.tool.status === "running" ? { ...it, tool: { ...it.tool, status: "done" } } : it)));
   }, [setChat]);
 
+  // sendNow performs the actual WS send for one user message: it appends the
+  // user bubble, shows the loading state, and emits the user_message frame with
+  // the current asset display order. Callers gate on `thinking` before calling.
+  const sendNow = React.useCallback((value: string, ref?: string | string[]) => {
+    const ws = wsRef.current;
+    if (!ws || ws.readyState !== WebSocket.OPEN) {
+      toast("连接尚未就绪，请稍候");
+      return;
+    }
+    setChat((c) => [...c, { kind: "user", id: uid("u"), text: value }]);
+    showLoading();
+    const payload: Record<string, unknown> = { type: "user_message", text: value, lossless: stateRef.current.lossless };
+    const order = orderedAssetIds(stateRef.current);
+    if (order.length) payload.assetOrder = order;
+    if (Array.isArray(ref)) {
+      if (ref.length === 1) payload.ref = ref[0];
+      else if (ref.length > 1) payload.refs = ref.slice(0, 6);
+    } else if (ref) {
+      payload.ref = ref;
+    }
+    ws.send(JSON.stringify(payload));
+  }, [setChat, toast, showLoading]);
+
   const onTurnEnd = React.useCallback((sid: string, data: Record<string, unknown>) => {
     clearLoading();
     setState((s) => ({ ...s, thinking: false }));
     flushTyper();
     finishPendingTools();
+    // Empty-reply fallback: if the turn produced no body text, no tool, and no
+    // capsule, surface a short standby line so the user never sees "thought but
+    // said nothing". The backend suppresses the empty done-message; this guards
+    // the UI side per the connectWS-tracked produced flag.
+    const replyEmpty = data.replyEmpty === true;
+    const toolUsed = data.toolUsed === true;
+    const hasCapsule = data.hasCapsule === true;
+    const cancelled = data.cancelled === true;
+    if (replyEmpty && !toolUsed && !hasCapsule && !cancelled && !producedRef.current) {
+      setChat((c) => [...c, { kind: "assistant", id: uid("a"), text: "我在的，有什么宣发素材需要我帮你处理吗？", streaming: false }]);
+    }
     // Prefer the context snapshot carried on turn_end; fall back to a fetch.
     const ctx = data.context as AppState["context"] | undefined;
     if (ctx && typeof ctx.estimatedTokens === "number") {
@@ -280,7 +332,14 @@ export function useAppController() {
     } else {
       void refreshContext(sid);
     }
-  }, [clearLoading, flushTyper, finishPendingTools, refreshContext]);
+    // Auto-flush the next queued message, if any.
+    const next = stateRef.current.queue[0];
+    if (next) {
+      setState((s) => ({ ...s, queue: s.queue.slice(1) }));
+      // Defer so the thinking=false / queue update lands before the next send.
+      setTimeout(() => sendNow(next.text, next.ref), 0);
+    }
+  }, [clearLoading, flushTyper, finishPendingTools, refreshContext, setChat, sendNow]);
 
   const onCapsule = React.useCallback((data: Record<string, unknown>) => {
     clearLoading();
@@ -313,15 +372,18 @@ export function useAppController() {
       const d = msg.data || {};
       switch (msg.type) {
         case "turn_start":
+          producedRef.current = false;
           showLoading();
           break;
         case "turn_end":
           onTurnEnd(sid, d);
           break;
         case "capsule":
+          producedRef.current = true;
           onCapsule(d);
           break;
         case "message":
+          if ((d.text as string) || "") producedRef.current = true;
           onAssistantDelta((d.text as string) || "", !!d.done);
           if (d.done) { finishPendingTools(); void refreshContext(sid); }
           break;
@@ -329,6 +391,7 @@ export function useAppController() {
           onReasoning((d.text as string) || "");
           break;
         case "tool_call":
+          producedRef.current = true;
           onToolCall(d);
           break;
         case "tool_result":
@@ -347,25 +410,59 @@ export function useAppController() {
   }, [onAssistantDelta, onReasoning, onToolCall, onToolResult, ensureTaskPlaceholder, finishPendingTools, refreshContext, toast, showLoading, onTurnEnd, onCapsule, clearLoading]);
 
   // ============ actions ============
+  // sendMessage routes a user input: when a turn is in flight it joins the
+  // pending queue (auto-flushed on turn_end); otherwise it sends immediately.
   const sendMessage = React.useCallback((text: string, ref?: string | string[]) => {
     const value = text.trim();
     if (!value) return;
+    if (stateRef.current.thinking) {
+      setState((s) => ({ ...s, queue: [...s.queue, { id: uid("q"), text: value, ref }] }));
+      return;
+    }
+    sendNow(value, ref);
+  }, [sendNow]);
+
+  // promoteQueued moves a queued message to the front so it is the next to send.
+  const promoteQueued = React.useCallback((id: string) => {
+    setState((s) => {
+      const idx = s.queue.findIndex((q) => q.id === id);
+      if (idx <= 0) return s;
+      const q = [...s.queue];
+      const [item] = q.splice(idx, 1);
+      return { ...s, queue: [item, ...q] };
+    });
+  }, []);
+
+  // removeQueued drops a queued message before it is sent.
+  const removeQueued = React.useCallback((id: string) => {
+    setState((s) => ({ ...s, queue: s.queue.filter((q) => q.id !== id) }));
+  }, []);
+
+  // interruptSend cancels the in-flight turn and immediately sends a message:
+  // either the given queued message, or a fresh text. It dequeues the chosen
+  // message and sends a cancel_turn before the new user_message so the backend
+  // aborts the old turn first.
+  const interruptSend = React.useCallback((arg: { id?: string; text?: string; ref?: string | string[] }) => {
     const ws = wsRef.current;
     if (!ws || ws.readyState !== WebSocket.OPEN) {
       toast("连接尚未就绪，请稍候");
       return;
     }
-    setChat((c) => [...c, { kind: "user", id: uid("u"), text: value }]);
-    showLoading();
-    const payload: Record<string, unknown> = { type: "user_message", text: value, lossless: stateRef.current.lossless };
-    if (Array.isArray(ref)) {
-      if (ref.length === 1) payload.ref = ref[0];
-      else if (ref.length > 1) payload.refs = ref.slice(0, 6);
-    } else if (ref) {
-      payload.ref = ref;
+    let value = (arg.text || "").trim();
+    let ref = arg.ref;
+    if (arg.id) {
+      const item = stateRef.current.queue.find((q) => q.id === arg.id);
+      if (item) { value = item.text; ref = item.ref; }
+      setState((s) => ({ ...s, queue: s.queue.filter((q) => q.id !== arg.id) }));
     }
-    ws.send(JSON.stringify(payload));
-  }, [setChat, toast, showLoading]);
+    if (!value) return;
+    // Abort the running turn, then send the new message. The backend serializes
+    // on the per-session turn lock, so the cancelled turn releases before the
+    // new one starts.
+    ws.send(JSON.stringify({ type: "cancel_turn" }));
+    setState((s) => ({ ...s, thinking: false }));
+    sendNow(value, ref);
+  }, [sendNow, toast]);
 
   // capsuleSelect answers a clarify capsule: it marks the bubble answered, shows
   // a user echo of the chosen/edited text, and sends it back over the WS so the
@@ -383,7 +480,10 @@ export function useAppController() {
     );
     setChat((c) => [...c, { kind: "user", id: uid("u"), text }]);
     showLoading();
-    ws.send(JSON.stringify({ type: "capsule_select", text, lossless: stateRef.current.lossless }));
+    const csPayload: Record<string, unknown> = { type: "capsule_select", text, lossless: stateRef.current.lossless };
+    const csOrder = orderedAssetIds(stateRef.current);
+    if (csOrder.length) csPayload.assetOrder = csOrder;
+    ws.send(JSON.stringify(csPayload));
   }, [setChat, toast, showLoading]);
 
   // ============ boot ============
@@ -584,6 +684,9 @@ export function useAppController() {
     setState,
     sendMessage,
     capsuleSelect,
+    promoteQueued,
+    removeQueued,
+    interruptSend,
     refreshWorkspace,
     refreshContext,
     subscribeTask,

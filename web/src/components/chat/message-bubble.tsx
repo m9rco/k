@@ -1,10 +1,12 @@
 import { motion } from "framer-motion";
-import { cn, stripMarkdown } from "@/lib/utils";
+import { cn } from "@/lib/utils";
+import { Markdown } from "@/lib/markdown";
 
-// MessageBubble renders a user or assistant message. Assistant text streams via
-// the controller's typewriter; a thin caret shows while streaming. Assistant
-// text is passed through stripMarkdown so any stray markdown the model emits
-// (despite the no-markdown prompt rule) never shows as literal ** / ## / ``` .
+// MessageBubble renders a user or assistant message. User text is shown verbatim
+// (preserving newlines). Assistant text is rendered through a safe lightweight
+// markdown renderer, so any markdown the model emits is displayed as rich text
+// rather than raw source — and no raw HTML is ever injected. A thin caret shows
+// while the assistant message is still streaming.
 export function MessageBubble({
   role,
   text,
@@ -15,7 +17,6 @@ export function MessageBubble({
   streaming?: boolean;
 }) {
   const isUser = role === "user";
-  const display = isUser ? text : stripMarkdown(text);
   return (
     <motion.div
       initial={{ opacity: 0, y: 4 }}
@@ -25,11 +26,11 @@ export function MessageBubble({
     >
       <div
         className={cn(
-          "max-w-[85%] whitespace-pre-wrap rounded-lg px-3.5 py-2.5 text-[13px] leading-relaxed",
-          isUser ? "bg-accent/15 text-fg" : "bg-bg-elev text-fg",
+          "max-w-[85%] rounded-lg px-3.5 py-2.5 text-[13px] leading-relaxed",
+          isUser ? "whitespace-pre-wrap bg-accent/15 text-fg" : "bg-bg-elev text-fg",
         )}
       >
-        {display}
+        {isUser ? text : <Markdown text={text} />}
         {streaming && <span className="ml-0.5 inline-block h-3.5 w-px animate-pulse bg-accent align-middle" />}
       </div>
     </motion.div>

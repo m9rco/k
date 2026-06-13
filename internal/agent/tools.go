@@ -52,11 +52,11 @@ type editArgs struct {
 	// Intent is one of change_character, change_background, change_text.
 	Intent string `json:"intent" jsonschema:"description=The edit intent: change_character, change_background, or change_text,enum=change_character,enum=change_background,enum=change_text"`
 	// SourceAssetID is the existing asset to edit. Empty for a fresh generation.
-	SourceAssetID string `json:"source_asset_id,omitempty" jsonschema:"description=ID of an existing workspace asset to edit (二次调整). Empty to generate from scratch."`
+	SourceAssetID string `json:"source_asset_id,omitempty" jsonschema:"description=The base image to EDIT ON TOP OF (被编辑底图). Set this when the user says '把X放进图Z' or '在图Z基础上修改' — Z is the source. Leave EMPTY when generating a brand-new image purely from references."`
 	// ReferenceAssetIDs lists up to 6 reference assets to reuse composition/style
 	// from. The first is the primary reference. Takes precedence over
 	// source_asset_id when provided.
-	ReferenceAssetIDs []string `json:"reference_asset_ids,omitempty" jsonschema:"description=IDs of up to 6 workspace assets to use as references (reuse composition/style/character). First is primary. Use for multi-reference generation."`
+	ReferenceAssetIDs []string `json:"reference_asset_ids,omitempty" jsonschema:"description=IDs of up to 6 assets used as REFERENCES (参照物 for style/character/composition). First is primary. For '根据图X图Y生成新图' put X and Y here and leave source_asset_id empty; for '把图X放进图Z' put X here and Z in source_asset_id."`
 	// CharacterDesc/BackgroundDesc/TextContent carry the per-intent payload.
 	CharacterDesc  string `json:"character_desc,omitempty" jsonschema:"description=Description of the new character (for change_character)"`
 	BackgroundDesc string `json:"background_desc,omitempty" jsonschema:"description=Description of the new background (for change_background)"`

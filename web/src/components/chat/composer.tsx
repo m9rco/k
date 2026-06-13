@@ -1,5 +1,5 @@
 import * as React from "react";
-import { Plus, Sparkles, Send, X } from "lucide-react";
+import { Plus, Sparkles, Send, X, ArrowUp, Zap } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { useApp } from "@/store/context";
@@ -94,6 +94,28 @@ export function Composer() {
           </button>
         </div>
       )}
+      {state.queue.length > 0 && (
+        <div className="mb-2 space-y-1">
+          <div className="text-[11px] text-fg-mute">待发送队列（当前回合结束后自动发送）</div>
+          {state.queue.map((q, i) => (
+            <div key={q.id} className="flex items-center gap-1.5 rounded-md border border-line bg-bg-elev/60 px-2 py-1 text-xs">
+              <span className="grid size-4 shrink-0 place-items-center rounded-full bg-bg text-[10px] text-fg-mute">{i + 1}</span>
+              <span className="flex-1 truncate text-fg-dim" title={q.text}>{q.text}</span>
+              {i > 0 && (
+                <button type="button" title="提前到队首" onClick={() => app.promoteQueued(q.id)} className="text-fg-mute transition-colors hover:text-fg">
+                  <ArrowUp className="size-3.5" />
+                </button>
+              )}
+              <button type="button" title="打断当前并立即发送" onClick={() => app.interruptSend({ id: q.id })} className="text-fg-mute transition-colors hover:text-accent">
+                <Zap className="size-3.5" />
+              </button>
+              <button type="button" title="移除" onClick={() => app.removeQueued(q.id)} className="text-fg-mute transition-colors hover:text-danger">
+                <X className="size-3.5" />
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
       <form onSubmit={submit} className="flex items-center gap-2">
         <input
           ref={fileRef}
@@ -138,7 +160,27 @@ export function Composer() {
         >
           {state.lossless ? "无损" : "原图"}
         </Button>
-        <Button type="submit" size="icon" title="发送">
+        {state.thinking && text.trim() && (
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
+                type="button"
+                variant="outline"
+                size="icon"
+                title="打断当前回合并立即发送"
+                onClick={() => {
+                  const refs = [...state.selected].slice(0, 6);
+                  app.interruptSend({ text, ref: refs.length ? refs : undefined });
+                  setText("");
+                }}
+              >
+                <Zap />
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent>打断当前并发送</TooltipContent>
+          </Tooltip>
+        )}
+        <Button type="submit" size="icon" title={state.thinking ? "加入队列（回合结束后发送）" : "发送"}>
           <Send />
         </Button>
       </form>

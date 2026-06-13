@@ -23,6 +23,14 @@ export interface ConnState {
   connected: boolean;
 }
 
+// QueuedMessage is a user input held while a turn is in flight. It is sent when
+// the current turn ends, or promoted/flushed via interrupt by the user.
+export interface QueuedMessage {
+  id: string;
+  text: string;
+  ref?: string | string[];
+}
+
 export interface AppState {
   sessionId: string;
   connected: boolean;
@@ -35,6 +43,9 @@ export interface AppState {
   // thinking is true between turn_start and turn_end: the agent has acknowledged
   // the message and is working, even before the first model increment arrives.
   thinking: boolean;
+  // queue holds messages typed while a turn is in flight; auto-flushed on
+  // turn_end, or reordered/interrupt-sent by the user (Cursor-style).
+  queue: QueuedMessage[];
   context: { estimatedTokens: number; budget: number; compressed: boolean } | null;
 }
 
@@ -48,6 +59,7 @@ export const initialState: AppState = {
   selected: new Set(),
   lossless: true,
   thinking: false,
+  queue: [],
   context: null,
 };
 

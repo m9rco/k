@@ -146,26 +146,24 @@ func run() error {
 		switch msg.Type {
 		case "user_message":
 			text := msg.Text
-			if len(msg.Refs) > 0 {
-				// Multi-reference flow: surface up to 6 reference asset ids so the
-				// agent can pass them as reference_asset_ids for generation.
+			// Asset numbering map: lets the model resolve "图N" the user typed and
+			// reply with matching labels. Built from the client-provided display
+			// order (authoritative for drag-reorders) joined with stored kinds.
+			if numbering := buildNumbering(st, sessionID, msg.AssetOrder, msg.Refs, msg.Ref); numbering != "" {
+				text = numbering + " " + text
+			} else if len(msg.Refs) > 0 {
+				// Fallback (no display order supplied): surface up to 6 reference ids.
 				refs := msg.Refs
 				if len(refs) > 6 {
 					refs = refs[:6]
 				}
 				text = "[reference assets: " + strings.Join(refs, ", ") + "] " + text
 			} else if msg.Ref != "" {
-				// Re-adjust flow: the acted-on asset id is surfaced to the agent.
 				text = "[asset " + msg.Ref + "] " + text
 			}
 			// Lossless compression defaults to on; an explicit false disables it.
 			lossless := msg.Lossless == nil || *msg.Lossless
-			if _, err := orch.Handle(ctx, sessionID, text, lossless); err != nil {
-				hub.Send(sessionID, transport.Event{
-					Type: transport.EventError,
-					Data: map[string]string{"message": err.Error()},
-				})
-			}
+			runTurn(ctx, orch, hub, sessionID, text, lossless)
 		case "capsule_select":
 			// A reply to a clarify capsule: prefer the (possibly edited) free text,
 			// else fall back to the chosen option value(s). Feed it back into the
@@ -181,12 +179,12 @@ func run() error {
 				text = "[asset " + msg.Ref + "] " + text
 			}
 			lossless := msg.Lossless == nil || *msg.Lossless
-			if _, err := orch.Handle(ctx, sessionID, text, lossless); err != nil {
-				hub.Send(sessionID, transport.Event{
-					Type: transport.EventError,
-					Data: map[string]string{"message": err.Error()},
-				})
-			}
+			runTurn(ctx, orch, hub, sessionID, text, lossless)
+		case "cancel_turn":
+			// Interrupt the in-flight turn for this session. The next inbound
+			// user_message (sent right after by the client) will then start a new
+			// turn once the cancelled one releases the per-session turn lock.
+			orch.CancelTurn(sessionID)
 		}
 	})
 
@@ -256,6 +254,46 @@ func run() error {
 func writeJSON(w http.ResponseWriter, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(v)
+}
+
+// runTurn dispatches an agent turn asynchronously so the connection's readPump
+// stays free to read a cancel_turn while a turn is in flight (otherwise an
+// interrupt could never be delivered). The orchestrator's per-session turn lock
+// keeps concurrently-dispatched turns ordered.
+func runTurn(ctx context.Context, orch *agent.Orchestrator, hub *transport.Hub, sessionID, text string, lossless bool) {
+	go func() {
+		if _, err := orch.Handle(ctx, sessionID, text, lossless); err != nil {
+			hub.Send(sessionID, transport.Event{
+				Type: transport.EventError,
+				Data: map[string]string{"message": err.Error()},
+			})
+		}
+	}()
+}
+
+// buildNumbering joins the client-supplied display order with stored asset kinds
+// into the "图N → asset_id" context prefix (see agent.BuildAssetNumbering). The
+// selected ids (refs / single ref) are annotated so the model knows which the
+// user picked. Returns "" when there is no display order to number.
+func buildNumbering(st *store.Store, sessionID string, order, refs []string, ref string) string {
+	if len(order) == 0 {
+		return ""
+	}
+	kinds := map[string]string{}
+	if assets, err := st.ListAssets(sessionID); err == nil {
+		for _, a := range assets {
+			kinds[a.ID] = a.Kind
+		}
+	}
+	refList := make([]agent.AssetRef, 0, len(order))
+	for _, id := range order {
+		refList = append(refList, agent.AssetRef{ID: id, Kind: kinds[id]})
+	}
+	selected := refs
+	if len(selected) == 0 && ref != "" {
+		selected = []string{ref}
+	}
+	return agent.BuildAssetNumbering(refList, selected)
 }
 
 // taskAnnouncer adapts the WS hub to the generation/video TaskAnnouncer hook:

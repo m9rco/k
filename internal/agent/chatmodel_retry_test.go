@@ -105,3 +105,72 @@ func TestStreamDegradesWhenNotSSE(t *testing.T) {
 		t.Errorf("degraded stream content = %q, want %q", got.String(), "degraded ok")
 	}
 }
+
+func TestChunkRunes(t *testing.T) {
+	cases := []struct {
+		in   string
+		size int
+		want int // expected number of fragments
+	}{
+		{"", 24, 0},
+		{"短", 24, 1},
+		{strings.Repeat("字", 24), 24, 1},
+		{strings.Repeat("字", 25), 24, 2},
+		{strings.Repeat("字", 50), 24, 3},
+	}
+	for _, c := range cases {
+		got := chunkRunes(c.in, c.size)
+		if len(got) != c.want {
+			t.Errorf("chunkRunes(%d runes, %d) = %d frags, want %d", len([]rune(c.in)), c.size, len(got), c.want)
+		}
+		// Rejoining must reproduce the input exactly (rune-safe, no loss).
+		if strings.Join(got, "") != c.in {
+			t.Errorf("chunkRunes rejoin mismatch for %q", c.in)
+		}
+	}
+}
+
+func TestDegradedStreamChunksReasoning(t *testing.T) {
+	// A non-SSE 200 with a long reasoning_content must degrade and re-emit the
+	// reasoning as MULTIPLE frames (not one block), preserving the typewriter.
+	longReason := strings.Repeat("思考", 40) // 80 runes -> >1 frame at size 24
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"答复","reasoning_content":"` + longReason + `"}}]}`))
+	}))
+	defer srv.Close()
+
+	m := fastRetryModel(srv.URL)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	sr, err := m.Stream(ctx, []*schema.Message{schema.UserMessage("hi")})
+	if err != nil {
+		t.Fatalf("Stream: %v", err)
+	}
+	defer sr.Close()
+	reasonFrames := 0
+	var reason, content strings.Builder
+	for {
+		msg, err := sr.Recv()
+		if err != nil {
+			break
+		}
+		if msg == nil {
+			continue
+		}
+		if msg.ReasoningContent != "" {
+			reasonFrames++
+			reason.WriteString(msg.ReasoningContent)
+		}
+		content.WriteString(msg.Content)
+	}
+	if reasonFrames < 2 {
+		t.Errorf("expected reasoning re-chunked into >=2 frames, got %d", reasonFrames)
+	}
+	if reason.String() != longReason {
+		t.Errorf("reasoning content lost in re-chunk: got %d runes, want %d", len([]rune(reason.String())), len([]rune(longReason)))
+	}
+	if content.String() != "答复" {
+		t.Errorf("content = %q, want 答复", content.String())
+	}
+}

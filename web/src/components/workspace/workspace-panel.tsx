@@ -108,10 +108,11 @@ export function WorkspacePanel() {
             </Stage>
             <Stage title="已完成" count={assets.length}>
               <AnimatePresence initial={false}>
-                {assets.map((a) => (
+                {assets.map((a, i) => (
                   <AssetCard
                     key={a.id}
                     asset={a}
+                    index={i + 1}
                     onPreview={setPreview}
                     onCrop={(x) => setCropFor([x.id])}
                     onVideo={(x) => { setPreview(x); }}

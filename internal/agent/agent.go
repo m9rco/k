@@ -57,6 +57,12 @@ type Orchestrator struct {
 
 	mu      sync.Mutex
 	windows map[string]*Window
+	// cancels holds the cancel func for each session's in-flight turn so an
+	// inbound interrupt can abort the model stream / ReAct loop mid-turn.
+	cancels map[string]context.CancelFunc
+	// turnMu serializes Handle per session so two turns never interleave writes
+	// into the same window (one lock per session id).
+	turnMu map[string]*sync.Mutex
 }
 
 // NewOrchestrator builds the orchestrator from config and backing services.
@@ -79,6 +85,34 @@ func NewOrchestrator(cfg *config.Config, gen *generation.Service, cr *crop.Servi
 		store:      st,
 		newID:      newID,
 		windows:    make(map[string]*Window),
+		cancels:    make(map[string]context.CancelFunc),
+		turnMu:     make(map[string]*sync.Mutex),
+	}
+}
+
+// sessionTurnLock returns the per-session turn mutex (creating on first use), so
+// concurrent Handle calls for the same session serialize rather than interleave.
+func (o *Orchestrator) sessionTurnLock(sessionID string) *sync.Mutex {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	m, ok := o.turnMu[sessionID]
+	if !ok {
+		m = &sync.Mutex{}
+		o.turnMu[sessionID] = m
+	}
+	return m
+}
+
+// CancelTurn aborts the in-flight conversation turn for a session, if any. It
+// only cancels the turn's model inference / tool loop (via its context); it does
+// NOT cancel already-submitted async generation/video tasks (those have their
+// own cancel entry points). Safe to call when no turn is running.
+func (o *Orchestrator) CancelTurn(sessionID string) {
+	o.mu.Lock()
+	cancel := o.cancels[sessionID]
+	o.mu.Unlock()
+	if cancel != nil {
+		cancel()
 	}
 }
 
@@ -147,6 +181,29 @@ func (o *Orchestrator) ResetContext(sessionID string) {
 // The agent is rebuilt per call because each tool invocation is bound to this
 // session (tools read the session id from context to keep assets isolated).
 func (o *Orchestrator) Handle(ctx context.Context, sessionID, userText string, lossless bool) (string, error) {
+	// Serialize turns per session so two never interleave writes into the same
+	// window. A pending turn waits here until the prior one finishes or is
+	// cancelled.
+	lock := o.sessionTurnLock(sessionID)
+	lock.Lock()
+	defer lock.Unlock()
+
+	// Make this turn cancellable and register its cancel func so an inbound
+	// interrupt (CancelTurn) can abort the model stream / ReAct loop mid-flight.
+	ctx, cancel := context.WithCancel(ctx)
+	o.mu.Lock()
+	o.cancels[sessionID] = cancel
+	o.mu.Unlock()
+	defer func() {
+		o.mu.Lock()
+		if o.cancels[sessionID] != nil {
+			// Only clear if it is still ours (a newer turn may have replaced it).
+			o.cancels[sessionID] = nil
+		}
+		o.mu.Unlock()
+		cancel()
+	}()
+
 	w := o.window(sessionID)
 	w.Append(schema.UserMessage(userText))
 
@@ -172,7 +229,7 @@ func (o *Orchestrator) Handle(ctx context.Context, sessionID, userText string, l
 	deps := ToolDeps{Generation: o.gen, Crop: o.crop, Video: o.video, Crawl: o.crawl, SessionID: sessionID, Lossless: lossless, Clarify: clarify}
 	tools, err := deps.Tools()
 	if err != nil {
-		o.emitTurnEnd(sessionID, 0, false)
+		o.emitTurnEnd(sessionID, turnEndInfo{replyEmpty: true})
 		return "", fmt.Errorf("build tools: %w", err)
 	}
 
@@ -195,7 +252,7 @@ func (o *Orchestrator) Handle(ctx context.Context, sessionID, userText string, l
 		ToolReturnDirectly: AsyncTaskTools(),
 	})
 	if err != nil {
-		o.emitTurnEnd(sessionID, 0, false)
+		o.emitTurnEnd(sessionID, turnEndInfo{replyEmpty: true})
 		return "", fmt.Errorf("build react agent: %w", err)
 	}
 
@@ -205,7 +262,7 @@ func (o *Orchestrator) Handle(ctx context.Context, sessionID, userText string, l
 
 	stream, err := ra.Stream(ctx, w.Messages(), agentOption(toolCB))
 	if err != nil {
-		o.emitTurnEnd(sessionID, 0, false)
+		o.emitTurnEnd(sessionID, turnEndInfo{replyEmpty: true})
 		return "", fmt.Errorf("agent stream: %w", err)
 	}
 	defer stream.Close()
@@ -253,22 +310,46 @@ func (o *Orchestrator) Handle(ctx context.Context, sessionID, userText string, l
 	}
 
 	reply := sb.String()
+	cancelled := ctx.Err() != nil
 	// Diagnostic: surface whether this turn actually invoked any tool. A request
 	// that should produce an asset but emitted 0 tool calls means the model only
 	// replied with text (e.g. a small model that "confirms" without acting) —
 	// this is the signal to inspect the model/prompt, not the workspace pipeline.
-	log.Printf("agent: session=%s turn done toolCalls=%d replyLen=%d capsule=%t", sessionID, toolCalls, len(reply), capsuleAsked)
+	log.Printf("agent: session=%s turn done toolCalls=%d replyLen=%d capsule=%t cancelled=%t", sessionID, toolCalls, len(reply), capsuleAsked, cancelled)
+
+	if cancelled {
+		// Interrupted mid-turn: persist whatever was produced (keeps context
+		// coherent for the next turn) but tell the frontend the turn was
+		// cancelled so it can close the loading state without a stray bubble.
+		w.Append(schema.AssistantMessage(reply, nil))
+		o.persist(sessionID, "user", userText)
+		if strings.TrimSpace(reply) != "" {
+			o.persist(sessionID, "assistant", reply)
+		}
+		o.emitTurnEnd(sessionID, turnEndInfo{toolCalls: toolCalls, hasCapsule: capsuleAsked, replyEmpty: strings.TrimSpace(reply) == "", cancelled: true})
+		return reply, nil
+	}
+
+	replyEmpty := strings.TrimSpace(reply) == ""
 	w.Append(schema.AssistantMessage(reply, nil))
-	o.emit(sessionID, transport.Event{
-		Type:      transport.EventMessage,
-		SessionID: sessionID,
-		Data:      map[string]any{"text": reply, "done": true},
-	})
+	// Only emit a final body message when there is actual text; an empty
+	// done-message would otherwise render as a blank assistant bubble (the
+	// frontend also guards via turn_end.replyEmpty, but suppressing here keeps
+	// the wire clean).
+	if !replyEmpty {
+		o.emit(sessionID, transport.Event{
+			Type:      transport.EventMessage,
+			SessionID: sessionID,
+			Data:      map[string]any{"text": reply, "done": true},
+		})
+	}
 	// Persist this turn so the conversation survives a server restart / reconnect.
 	// Only text is stored (large tool payloads stay out of the DB, mirroring D3).
 	o.persist(sessionID, "user", userText)
-	o.persist(sessionID, "assistant", reply)
-	o.emitTurnEnd(sessionID, toolCalls, capsuleAsked)
+	if !replyEmpty {
+		o.persist(sessionID, "assistant", reply)
+	}
+	o.emitTurnEnd(sessionID, turnEndInfo{toolCalls: toolCalls, hasCapsule: capsuleAsked, replyEmpty: replyEmpty})
 	return reply, nil
 }
 
@@ -293,17 +374,28 @@ func (o *Orchestrator) persist(sessionID, role, content string) {
 	}
 }
 
+// turnEndInfo carries the metadata sent with a turn_end event.
+type turnEndInfo struct {
+	toolCalls  int
+	hasCapsule bool
+	replyEmpty bool // no body text produced (frontend suppresses the empty bubble)
+	cancelled  bool // the turn was interrupted by the user
+}
+
 // emitTurnEnd sends a turn_end event carrying turn metadata (tool usage, whether
-// a clarify capsule was produced) and the latest context window state, so the
-// frontend can close its loading state and refresh the context indicator.
-func (o *Orchestrator) emitTurnEnd(sessionID string, toolCalls int, hasCapsule bool) {
+// a clarify capsule was produced, whether the reply was empty or the turn was
+// cancelled) and the latest context window state, so the frontend can close its
+// loading state, suppress empty bubbles, and refresh the context indicator.
+func (o *Orchestrator) emitTurnEnd(sessionID string, info turnEndInfo) {
 	st := o.State(sessionID)
 	o.emit(sessionID, transport.Event{
 		Type:      transport.EventTurnEnd,
 		SessionID: sessionID,
 		Data: map[string]any{
-			"toolUsed":   toolCalls > 0,
-			"hasCapsule": hasCapsule,
+			"toolUsed":   info.toolCalls > 0,
+			"hasCapsule": info.hasCapsule,
+			"replyEmpty": info.replyEmpty,
+			"cancelled":  info.cancelled,
 			"context":    st,
 		},
 	})
