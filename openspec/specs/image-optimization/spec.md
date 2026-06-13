@@ -1,0 +1,26 @@
+# image-optimization Specification
+
+## Purpose
+TBD - created by archiving change expand-studio-capabilities. Update Purpose after archive.
+## Requirements
+### Requirement: 图片无损优化
+系统 SHALL 提供程序侧的 **PNG 无损优化**：对 PNG 图片重新编码、去除非必要数据块以减小体积，且**像素数据保持不变**（真无损）。所有产出图片的操作（生图、裁剪、下载/打包）SHALL 默认应用该优化，并提供可关闭的开关。非 PNG 格式 SHALL 原样保留，不做有损处理。优化失败时 SHALL 回退原图，不阻断产出。
+
+#### Scenario: 默认无损优化
+- **WHEN** 系统产出或下载一张 PNG 图片且未关闭优化
+- **THEN** 系统对其做无损优化以减小体积
+- **AND** 优化后图片的像素数据与优化前完全一致
+
+#### Scenario: 可关闭开关
+- **WHEN** 用户在某次图片操作中关闭无损压缩选项
+- **THEN** 系统跳过优化，直接产出原始字节
+
+#### Scenario: 非 PNG 不处理
+- **WHEN** 待处理图片不是 PNG 格式
+- **THEN** 系统原样保留该图片，不做有损压缩
+
+#### Scenario: 优化失败回退
+- **WHEN** 无损优化过程出错
+- **THEN** 系统回退为原始图片字节并正常产出
+- **AND** 不因优化失败中断该操作
+
