@@ -120,6 +120,19 @@ func run() error {
 	wsSvc := workspace.NewService(st, cfg.AssetDir, func() string { return id.New("asset") },
 		func(sessionID, taskID string) error {
 			return genSvc.Retry(context.Background(), sessionID, taskID)
+		},
+		// cancelFn aborts an in-flight task. Dispatch by kind: video tasks go to
+		// the video service, everything else to generation. Both share the same
+		// store, so the one that owns the in-memory cancel also deletes the row.
+		func(sessionID, taskID string) (int64, error) {
+			rec, err := st.GetTask(sessionID, taskID)
+			if err != nil {
+				return 0, err
+			}
+			if rec != nil && rec.Kind == "video" {
+				return vidSvc.Cancel(sessionID, taskID)
+			}
+			return genSvc.Cancel(sessionID, taskID)
 		})
 	wsSvc.RegisterRoutes(mux)
 

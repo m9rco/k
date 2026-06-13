@@ -267,6 +267,67 @@ func waitTask(t *testing.T, st *store.Store, session, taskID string) *store.Task
 	}
 }
 
+// blockingProvider blocks in Generate until the context is cancelled, so a test
+// can cancel a task mid-flight and assert the pipeline aborts cleanly.
+type blockingProvider struct {
+	name    string
+	started chan struct{}
+	out     Output
+}
+
+func (b blockingProvider) Name() string { return b.name }
+func (b blockingProvider) Generate(ctx context.Context, _ Request) (Output, error) {
+	select {
+	case b.started <- struct{}{}:
+	default:
+	}
+	<-ctx.Done()
+	return b.out, ctx.Err()
+}
+
+func TestServiceCancelAbortsAndPersistsNothing(t *testing.T) {
+	dir := t.TempDir()
+	st, err := store.Open(filepath.Join(dir, "g.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	broker := transport.NewTaskBroker()
+	var n int
+	gen := func(p string) string { n++; return p + strconv.Itoa(n) }
+	started := make(chan struct{}, 1)
+	g := NewFailoverGenerator(blockingProvider{name: "p", started: started, out: Output{Data: solidPNG(t, 8, 8, color.RGBA{1, 2, 3, 255}), Mime: "image/png"}}, nil)
+	svc := NewService(g, st, broker, filepath.Join(dir, "assets"), gen)
+	now := time.Now().UTC()
+	_ = st.UpsertSession(store.SessionRecord{ID: "s", Fingerprint: "fp", CreatedAt: now, LastSeenAt: now})
+
+	taskID, err := svc.Start(context.Background(), GenerateParams{SessionID: "s", Slots: Slots{Kind: EditBackground, BackgroundDesc: "x"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("provider never started")
+	}
+	removed, err := svc.Cancel("s", taskID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if removed != 1 {
+		t.Fatalf("expected 1 task row removed, got %d", removed)
+	}
+	rec, _ := st.GetTask("s", taskID)
+	if rec != nil {
+		t.Fatalf("task record still present after cancel: %+v", rec)
+	}
+	time.Sleep(50 * time.Millisecond)
+	assets, _ := st.ListAssets("s")
+	if len(assets) != 0 {
+		t.Fatalf("expected no assets after cancel, got %d", len(assets))
+	}
+}
+
 // capturingProvider records the last Request it received so tests can assert
 // what dimensions the service forwarded.
 type capturingProvider struct {

@@ -25,7 +25,7 @@ func newWS(t *testing.T) (*Service, *store.Store, *http.ServeMux) {
 	}
 	t.Cleanup(func() { _ = st.Close() })
 	var n int
-	svc := NewService(st, filepath.Join(dir, "assets"), func() string { n++; return "a" + string(rune('0'+n)) }, nil)
+	svc := NewService(st, filepath.Join(dir, "assets"), func() string { n++; return "a" + string(rune('0'+n)) }, nil, nil)
 	mux := http.NewServeMux()
 	svc.RegisterRoutes(mux)
 	return svc, st, mux
@@ -117,7 +117,7 @@ func TestRetryOnlyFailedTasks(t *testing.T) {
 	svc := NewService(st, filepath.Join(dir, "assets"), func() string { return "a" }, func(_, taskID string) error {
 		retried = taskID
 		return nil
-	})
+	}, nil)
 	mux := http.NewServeMux()
 	svc.RegisterRoutes(mux)
 

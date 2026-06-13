@@ -47,6 +47,10 @@ type Service struct {
 	// without the caller re-supplying inputs (short-term in-memory store, D7).
 	mu     sync.Mutex
 	params map[string]GenerateParams
+	// cancels holds the cancel func for each in-flight task's run context, so a
+	// user-initiated cancel can abort the underlying provider HTTP request and
+	// stop the pipeline before it persists an orphan product.
+	cancels map[string]context.CancelFunc
 }
 
 // TaskAnnouncer broadcasts a task-created notice to a session's live clients.
@@ -69,6 +73,7 @@ func NewService(gen generator, st *store.Store, broker *transport.TaskBroker, as
 		now:      func() time.Time { return time.Now().UTC() },
 		newID:    newID,
 		params:   make(map[string]GenerateParams),
+		cancels:  make(map[string]context.CancelFunc),
 	}
 }
 
@@ -139,7 +144,11 @@ func (s *Service) Start(ctx context.Context, p GenerateParams) (string, error) {
 	}
 	s.broker.Publish(taskID, transport.EventTaskQueued, p.SessionID, map[string]string{"intent": string(p.Slots.Kind)})
 
-	go s.run(context.WithoutCancel(ctx), taskID, p)
+	runCtx, cancel := context.WithCancel(context.WithoutCancel(ctx))
+	s.mu.Lock()
+	s.cancels[taskID] = cancel
+	s.mu.Unlock()
+	go s.run(runCtx, taskID, p)
 	return taskID, nil
 }
 
@@ -174,12 +183,39 @@ func (s *Service) Retry(ctx context.Context, sessionID, taskID string) error {
 	}
 	s.broker.Publish(taskID, transport.EventTaskQueued, sessionID, map[string]string{"intent": string(p.Slots.Kind), "retry": "true"})
 
-	go s.run(context.WithoutCancel(ctx), taskID, p)
+	runCtx, cancel := context.WithCancel(context.WithoutCancel(ctx))
+	s.mu.Lock()
+	s.cancels[taskID] = cancel
+	s.mu.Unlock()
+	go s.run(runCtx, taskID, p)
 	return nil
+}
+
+// Cancel aborts an in-flight task: it fires the run context's cancel (which
+// interrupts the provider HTTP request and stops the pipeline before it can
+// persist an orphan product) and deletes the task record. Returns the number of
+// task rows removed (0 if the task was unknown or already terminal). Session
+// scoping is enforced via the store delete.
+func (s *Service) Cancel(sessionID, taskID string) (int64, error) {
+	s.mu.Lock()
+	cancel := s.cancels[taskID]
+	delete(s.cancels, taskID)
+	s.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+	return s.store.DeleteTask(sessionID, taskID)
 }
 
 // run executes the generation pipeline for a task.
 func (s *Service) run(ctx context.Context, taskID string, p GenerateParams) {
+	// Drop the cancel entry once the pipeline ends (success, failure, or abort)
+	// so the map doesn't leak and a stale cancel can't fire on a reused id.
+	defer func() {
+		s.mu.Lock()
+		delete(s.cancels, taskID)
+		s.mu.Unlock()
+	}()
 	s.setStatus(taskID, p.SessionID, "running", transport.EventTaskRunning, 10, "", "")
 
 	// Resolve the primary reference (drives palette/size/parent) plus extras.
@@ -248,6 +284,14 @@ func (s *Service) run(ctx context.Context, taskID string, p GenerateParams) {
 		return
 	}
 	log.Printf("gen.run: task=%s provider.Generate OK in %s (%d bytes)", taskID, time.Since(genStart), len(out.Data))
+
+	// If the task was cancelled while the provider was working, drop the result
+	// instead of persisting it — otherwise a cancelled task leaves an orphan
+	// asset that resurfaces on the next workspace refresh.
+	if ctx.Err() != nil {
+		log.Printf("gen.run: task=%s cancelled, discarding product", taskID)
+		return
+	}
 	s.progress(taskID, p.SessionID, 80)
 
 	// Persist the product.

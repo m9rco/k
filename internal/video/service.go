@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"gameasset/internal/store"
@@ -71,6 +72,10 @@ type Service struct {
 	newID    func(prefix string) string
 	announce TaskAnnouncer
 	uploader ImageUploader
+	// cancels holds the cancel func for each in-flight task so a user-initiated
+	// cancel can abort the provider request and stop the pipeline.
+	mu      sync.Mutex
+	cancels map[string]context.CancelFunc
 }
 
 // TaskAnnouncer broadcasts a task-created notice to a session's live clients so
@@ -96,6 +101,7 @@ func NewService(prov Provider, st *store.Store, broker *transport.TaskBroker, as
 		assetDir: assetDir,
 		now:      func() time.Time { return time.Now().UTC() },
 		newID:    newID,
+		cancels:  make(map[string]context.CancelFunc),
 	}
 }
 
@@ -137,12 +143,35 @@ func (s *Service) Start(ctx context.Context, p Params) (string, error) {
 		s.announce.AnnounceTask(p.SessionID, taskID, "video")
 	}
 	s.broker.Publish(taskID, transport.EventTaskQueued, p.SessionID, map[string]string{"intent": "image_to_video"})
-	go s.run(context.WithoutCancel(ctx), taskID, p)
+	runCtx, cancel := context.WithCancel(context.WithoutCancel(ctx))
+	s.mu.Lock()
+	s.cancels[taskID] = cancel
+	s.mu.Unlock()
+	go s.run(runCtx, taskID, p)
 	return taskID, nil
+}
+
+// Cancel aborts an in-flight video task: it fires the run context's cancel
+// (interrupting the provider request) and deletes the task record. Returns the
+// number of task rows removed (0 if unknown or already terminal).
+func (s *Service) Cancel(sessionID, taskID string) (int64, error) {
+	s.mu.Lock()
+	cancel := s.cancels[taskID]
+	delete(s.cancels, taskID)
+	s.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+	return s.store.DeleteTask(sessionID, taskID)
 }
 
 // run executes the video pipeline for a task.
 func (s *Service) run(ctx context.Context, taskID string, p Params) {
+	defer func() {
+		s.mu.Lock()
+		delete(s.cancels, taskID)
+		s.mu.Unlock()
+	}()
 	s.setStatus(taskID, p.SessionID, "running", transport.EventTaskRunning, 10)
 
 	asset, err := s.store.GetAsset(p.SessionID, p.SourceAssetID)
@@ -172,6 +201,11 @@ func (s *Service) run(ctx context.Context, taskID string, p Params) {
 	out, err := s.prov.Generate(ctx, Request{Prompt: prompt, ImageURL: imgURL})
 	if err != nil {
 		s.fail(taskID, p.SessionID, err.Error())
+		return
+	}
+	// Drop the result if cancelled mid-flight, so no orphan video is persisted.
+	if ctx.Err() != nil {
+		log.Printf("video.run: task=%s cancelled, discarding product", taskID)
 		return
 	}
 	s.progress(taskID, p.SessionID, 85)

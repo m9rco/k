@@ -30,17 +30,22 @@ type Service struct {
 	newID    func() string
 	// retry runs a failed task again; injected to avoid importing generation.
 	retry func(sessionID, taskID string) error
+	// cancel aborts an in-flight (queued/running) task and deletes its record;
+	// injected so workspace doesn't import generation/video. Returns rows removed.
+	cancel func(sessionID, taskID string) (int64, error)
 }
 
 // NewService constructs the workspace service. retryFn re-runs a failed task
-// (wired to generation.Service.Retry in main).
-func NewService(st *store.Store, assetDir string, newID func() string, retryFn func(sessionID, taskID string) error) *Service {
+// (wired to generation.Service.Retry in main). cancelFn aborts an in-flight task
+// (wired to the generation/video cancel dispatch in main).
+func NewService(st *store.Store, assetDir string, newID func() string, retryFn func(sessionID, taskID string) error, cancelFn func(sessionID, taskID string) (int64, error)) *Service {
 	return &Service{
 		store:    st,
 		assetDir: assetDir,
 		now:      func() time.Time { return time.Now().UTC() },
 		newID:    newID,
 		retry:    retryFn,
+		cancel:   cancelFn,
 	}
 }
 
@@ -255,11 +260,39 @@ func (s *Service) handleRetry(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]string{"status": "queued", "taskId": taskID})
 }
 
-// handleDeleteTask removes a single task (e.g. a failed placeholder the user
-// wants to dismiss), scoped to its session. 404 when the task is not found.
+// handleDeleteTask removes a single task. For an in-flight (queued/running)
+// task it routes through cancel — aborting the underlying generation so no
+// orphan product is persisted. For a terminal task (done/failed) it just
+// deletes the record. 404 when the task is not found.
 func (s *Service) handleDeleteTask(w http.ResponseWriter, r *http.Request) {
 	sessionID := r.PathValue("id")
 	taskID := r.PathValue("taskId")
+
+	rec, err := s.store.GetTask(sessionID, taskID)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if rec == nil {
+		http.NotFound(w, r)
+		return
+	}
+
+	inFlight := rec.Status == "queued" || rec.Status == "running"
+	if inFlight && s.cancel != nil {
+		n, err := s.cancel(sessionID, taskID)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		if n == 0 {
+			http.NotFound(w, r)
+			return
+		}
+		writeJSON(w, map[string]string{"status": "cancelled", "taskId": taskID})
+		return
+	}
+
 	n, err := s.store.DeleteTask(sessionID, taskID)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)

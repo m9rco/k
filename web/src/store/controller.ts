@@ -411,6 +411,8 @@ export function useAppController() {
 
   const removeTask = React.useCallback(async (taskId: string) => {
     const sid = stateRef.current.sessionId;
+    const t = stateRef.current.tasks.get(taskId);
+    const inFlight = t?.status === "queued" || t?.status === "running";
     try {
       await api.deleteTask(sid, taskId);
       closeStream(taskId);
@@ -419,8 +421,9 @@ export function useAppController() {
         tasks.delete(taskId);
         return { ...s, tasks };
       });
+      toast(inFlight ? "已取消任务" : "已移除", "ok");
     } catch (e) {
-      toast("移除失败：" + (e as Error).message);
+      toast((inFlight ? "取消失败：" : "移除失败：") + (e as Error).message);
     }
   }, [closeStream, toast]);
 

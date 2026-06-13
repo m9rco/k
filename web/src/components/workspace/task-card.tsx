@@ -1,5 +1,5 @@
 import { motion } from "framer-motion";
-import { RotateCcw, Trash2 } from "lucide-react";
+import { RotateCcw, Trash2, Loader2, X } from "lucide-react";
 import type { Task } from "@/lib/types";
 import { useApp } from "@/store/context";
 import { Button } from "@/components/ui/button";
@@ -41,13 +41,32 @@ export function TaskCard({ task }: { task: Task }) {
     >
       <div className="relative flex-1 overflow-hidden">
         {!failed && (
-          <div className="absolute inset-0 animate-pulse bg-gradient-to-br from-bg-elev-2 to-bg-elev" />
+          <>
+            {/* 提亮的骨架基底,与卡片背景拉开亮度差 */}
+            <div className="absolute inset-0 bg-bg-elev-2" />
+            {/* 横向扫光,在暗色上做出明显的流动感 */}
+            <div className="absolute inset-0 -translate-x-full animate-shimmer bg-gradient-to-r from-transparent via-fg/10 to-transparent" />
+            {/* 中心旋转的 loading 图标,给出明确的"处理中"语义 */}
+            <div className="absolute inset-0 grid place-items-center">
+              <Loader2 className="size-6 animate-spin text-accent/80" />
+            </div>
+          </>
         )}
       </div>
       <div className="space-y-1.5 p-2.5 text-xs">
         {!failed ? (
           <>
-            <div className="text-fg-dim">{stageLabel(pct, task.kind)}</div>
+            <div className="flex items-center gap-2">
+              <span className="text-fg-dim">{stageLabel(pct, task.kind)}</span>
+              <button
+                type="button"
+                title="取消任务"
+                onClick={() => app.removeTask(task.id)}
+                className="ml-auto grid size-5 shrink-0 place-items-center rounded text-fg-mute transition-colors hover:bg-bg hover:text-danger"
+              >
+                <X className="size-3.5" />
+              </button>
+            </div>
             <div className="h-1 overflow-hidden rounded-full bg-bg">
               <div className="h-full rounded-full bg-accent transition-[width] duration-300 ease-linear" style={{ width: `${pct}%` }} />
             </div>
