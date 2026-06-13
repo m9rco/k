@@ -24,7 +24,8 @@ function stageLabel(p: number, kind: string): string {
 }
 
 // TaskCard renders a running placeholder (skeleton + performed progress) or a
-// failed card (error + retry/remove).
+// failed card (error + retry/remove) in the grid view. The timeline view has its
+// own active-node renderer; this is the grid equivalent.
 export function TaskCard({ task }: { task: Task }) {
   const app = useApp();
   const pct = usePerformedProgress(task);
@@ -42,11 +43,8 @@ export function TaskCard({ task }: { task: Task }) {
       <div className="relative flex-1 overflow-hidden">
         {!failed && (
           <>
-            {/* 提亮的骨架基底,与卡片背景拉开亮度差 */}
             <div className="absolute inset-0 bg-bg-elev-2" />
-            {/* 横向扫光,在暗色上做出明显的流动感 */}
             <div className="absolute inset-0 -translate-x-full animate-shimmer bg-gradient-to-r from-transparent via-fg/10 to-transparent" />
-            {/* 中心旋转的 loading 图标,给出明确的"处理中"语义 */}
             <div className="absolute inset-0 grid place-items-center">
               <Loader2 className="size-6 animate-spin text-accent/80" />
             </div>
@@ -57,7 +55,7 @@ export function TaskCard({ task }: { task: Task }) {
         {!failed ? (
           <>
             <div className="flex items-center gap-2">
-              <span className="text-fg-dim">{stageLabel(pct, task.kind)}</span>
+              <span className="text-fg-dim">{task.note || stageLabel(pct, task.kind)}</span>
               <button
                 type="button"
                 title="取消任务"

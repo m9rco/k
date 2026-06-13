@@ -37,7 +37,6 @@ export interface AppState {
   chat: ChatItem[];
   assets: Map<string, Asset>;
   tasks: Map<string, Task>;
-  order: string[]; // display order of asset ids
   selected: Set<string>;
   lossless: boolean;
   // thinking is true between turn_start and turn_end: the agent has acknowledged
@@ -55,7 +54,6 @@ export const initialState: AppState = {
   chat: [],
   assets: new Map(),
   tasks: new Map(),
-  order: [],
   selected: new Set(),
   lossless: true,
   thinking: false,

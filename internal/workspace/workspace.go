@@ -59,6 +59,9 @@ type AssetView struct {
 	Provider string `json:"provider,omitempty"`
 	ParentID string `json:"parentId,omitempty"`
 	URL      string `json:"url"`
+	// CreatedAt lets the frontend order the timeline by real creation time and
+	// show relative timestamps. RFC3339; sourced from the stored asset row.
+	CreatedAt string `json:"createdAt,omitempty"`
 }
 
 // TaskView is the workspace representation of one task (placeholder card).
@@ -134,7 +137,8 @@ func (s *Service) handleListAssets(w http.ResponseWriter, r *http.Request) {
 		out = append(out, AssetView{
 			ID: a.ID, Kind: a.Kind, Mime: a.Mime, Width: a.Width, Height: a.Height,
 			Provider: a.Provider, ParentID: a.ParentID,
-			URL: fmt.Sprintf("/api/session/%s/assets/%s/raw", sessionID, a.ID),
+			URL:       fmt.Sprintf("/api/session/%s/assets/%s/raw", sessionID, a.ID),
+			CreatedAt: a.CreatedAt.Format(time.RFC3339),
 		})
 	}
 	writeJSON(w, map[string]any{"assets": out})
@@ -239,7 +243,8 @@ func (s *Service) handleUpload(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, AssetView{
 		ID: assetID, Kind: "upload", Mime: mime, Width: cfg.Width, Height: cfg.Height,
-		URL: fmt.Sprintf("/api/session/%s/assets/%s/raw", sessionID, assetID),
+		URL:       fmt.Sprintf("/api/session/%s/assets/%s/raw", sessionID, assetID),
+		CreatedAt: rec.CreatedAt.Format(time.RFC3339),
 	})
 }
 

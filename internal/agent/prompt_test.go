@@ -44,20 +44,22 @@ func TestBuildAssetNumbering(t *testing.T) {
 		t.Errorf("empty order should yield empty string, got %q", got)
 	}
 
+	// Images and videos are numbered in two independent sequences (图N / 视频N).
 	order := []AssetRef{
 		{ID: "a1", Kind: "upload"},
 		{ID: "a2", Kind: "generated"},
+		{ID: "v1", Kind: "video"},
 		{ID: "a3", Kind: "cropped"},
+		{ID: "v2", Kind: "video"},
 	}
-	got := BuildAssetNumbering(order, []string{"a2", "a3"})
-	// Numbering by display order, 1-based.
-	for _, want := range []string{"图1=a1(上传)", "图2=a2(生成)", "图3=a3(裁剪)"} {
+	got := BuildAssetNumbering(order, []string{"a2", "v1"})
+	for _, want := range []string{"图1=a1(上传)", "图2=a2(生成)", "视频1=v1(视频)", "图3=a3(裁剪)", "视频2=v2(视频)"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("numbering missing %q in %q", want, got)
 		}
 	}
-	// Selected annotation references the same 图N labels.
-	if !strings.Contains(got, "[选中: 图2, 图3]") {
+	// Selected annotation references the same labels (mixed 图/视频).
+	if !strings.Contains(got, "[选中: 图2, 视频1]") {
 		t.Errorf("selected annotation wrong in %q", got)
 	}
 

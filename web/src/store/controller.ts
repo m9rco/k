@@ -1,21 +1,22 @@
 import * as React from "react";
 import type { Task, TaskKind, ToolCardData } from "@/lib/types";
 import * as api from "@/lib/api";
+import { describeToolCall } from "@/lib/timeline";
 import { type AppState, type ChatItem, initialState, uid } from "./types";
 import { useToast } from "@/components/toast-host";
 
-// orderedAssetIds returns the session's asset ids in the user's current display
-// order (honoring drag-reorders in state.order, then appending any new ids),
-// matching the workspace panel's orderedAssets. Sent as `assetOrder` so the
-// backend can build the "图N → id" map the agent uses to resolve "图2/图3".
+// orderedAssetIds returns the session's asset ids in timeline order (by real
+// creation time, earliest first). Sent as `assetOrder` so the backend builds the
+// "图N/视频N → id" map the agent uses to resolve user references. Timeline order
+// is stable (no drag reorder), keeping the numbering anchor consistent.
 function orderedAssetIds(s: AppState): string[] {
-  const seen = new Set<string>();
-  const out: string[] = [];
-  for (const id of s.order) {
-    if (s.assets.has(id)) { out.push(id); seen.add(id); }
-  }
-  for (const id of s.assets.keys()) if (!seen.has(id)) out.push(id);
-  return out;
+  const assets = [...s.assets.values()];
+  assets.sort((a, b) => {
+    const ta = a.createdAt ? Date.parse(a.createdAt) : 0;
+    const tb = b.createdAt ? Date.parse(b.createdAt) : 0;
+    return ta - tb;
+  });
+  return assets.map((a) => a.id);
 }
 
 // useAppController owns all app state and the real-time side effects (WS
@@ -37,7 +38,9 @@ export function useAppController() {
   // (assistant text / tool call / capsule); reset on turn_start, consulted on
   // turn_end to decide whether an empty-reply fallback line is needed.
   const producedRef = React.useRef(false);
-
+  // lastToolNoteRef holds the agent's humanized understanding of the most recent
+  // tool call, stamped onto the task when its tool_result (with task_id) lands.
+  const lastToolNoteRef = React.useRef<string | undefined>(undefined);
   const setChat = React.useCallback((fn: (c: ChatItem[]) => ChatItem[]) => {
     setState((s) => ({ ...s, chat: fn(s.chat) }));
   }, []);
@@ -129,11 +132,17 @@ export function useAppController() {
   }
 
   const ensureTaskPlaceholder = React.useCallback(
-    (sid: string, taskId: string, kind: TaskKind) => {
+    (sid: string, taskId: string, kind: TaskKind, note?: string) => {
       setState((s) => {
-        if (s.tasks.has(taskId)) return s;
+        const existing = s.tasks.get(taskId);
         const tasks = new Map(s.tasks);
-        tasks.set(taskId, { id: taskId, kind, status: "running", progress: 0 });
+        if (existing) {
+          // Backfill the note if newly known; otherwise leave the task as-is.
+          if (note && !existing.note) tasks.set(taskId, { ...existing, note });
+          else return s;
+        } else {
+          tasks.set(taskId, { id: taskId, kind, status: "running", progress: 0, note });
+        }
         return { ...s, tasks };
       });
       subscribeTask(sid, taskId);
@@ -260,6 +269,9 @@ export function useAppController() {
       args,
       status: "running",
     };
+    // Capture the agent's understanding of this op so the timeline node can show
+    // it once the tool_result (which carries the task_id) arrives.
+    lastToolNoteRef.current = describeToolCall(card.name, args);
     setChat((c) => [...c, { kind: "tool", id: card.id!, tool: card }]);
   }, [flushTyper, collapseReasoning, setChat]);
 
@@ -267,7 +279,8 @@ export function useAppController() {
     const ok = data.status !== "error";
     const name = data.name as string | undefined;
     if (ok && typeof data.task_id === "string") {
-      ensureTaskPlaceholder(sid, data.task_id, ((data.kind as TaskKind) || "generate"));
+      ensureTaskPlaceholder(sid, data.task_id, ((data.kind as TaskKind) || "generate"), lastToolNoteRef.current);
+      lastToolNoteRef.current = undefined;
     }
     setChat((c) => {
       // complete the most recent running card matching the name (or any).
@@ -531,28 +544,6 @@ export function useAppController() {
     setState((s) => ({ ...s, lossless: v }));
   }, []);
 
-  const setOrder = React.useCallback((order: string[]) => {
-    setState((s) => ({ ...s, order }));
-  }, []);
-
-  const reorderAsset = React.useCallback((draggedId: string, targetId: string, after: boolean) => {
-    setState((s) => {
-      // Build the current effective order (display order with new ids appended).
-      const seen = new Set<string>();
-      const cur: string[] = [];
-      for (const id of s.order) if (s.assets.has(id)) { cur.push(id); seen.add(id); }
-      for (const a of s.assets.values()) if (!seen.has(a.id)) cur.push(a.id);
-      const from = cur.indexOf(draggedId);
-      if (from < 0) return s;
-      cur.splice(from, 1);
-      let to = cur.indexOf(targetId);
-      if (to < 0) return s;
-      if (after) to += 1;
-      cur.splice(to, 0, draggedId);
-      return { ...s, order: cur };
-    });
-  }, []);
-
   const removeAsset = React.useCallback(async (assetId: string) => {
     const sid = stateRef.current.sessionId;
     try {
@@ -695,8 +686,6 @@ export function useAppController() {
     selectAll,
     clearSelection,
     setLossless,
-    setOrder,
-    reorderAsset,
     removeAsset,
     removeSelected,
     removeTask,

@@ -18,13 +18,13 @@ const KIND_LABEL: Record<string, string> = {
 
 export function AssetCard({
   asset,
-  index,
+  label,
   onPreview,
   onCrop,
   onVideo,
 }: {
   asset: Asset;
-  index?: number;
+  label?: string;
   onPreview: (a: Asset) => void;
   onCrop: (a: Asset) => void;
   onVideo: (a: Asset) => void;
@@ -61,18 +61,6 @@ export function AssetCard({
           exit={{ opacity: 0, scale: 0.97 }}
           transition={{ duration: 0.2, ease: "easeOut" }}
           onClick={() => app.toggleSelect(asset.id)}
-          draggable
-          onDragStart={((e: React.DragEvent) => e.dataTransfer.setData("text/plain", asset.id)) as never}
-          onDragOver={((e: React.DragEvent) => e.preventDefault()) as never}
-          onDrop={((e: React.DragEvent) => {
-            e.preventDefault();
-            e.stopPropagation();
-            const dragged = e.dataTransfer.getData("text/plain");
-            if (!dragged || dragged === asset.id) return;
-            const rect = e.currentTarget.getBoundingClientRect();
-            const after = e.clientX > rect.left + rect.width / 2;
-            app.reorderAsset(dragged, asset.id, after);
-          }) as never}
           onMouseEnter={() => isVideo && vidRef.current?.play().catch(() => {})}
           onMouseLeave={() => {
             if (isVideo && vidRef.current) {
@@ -100,9 +88,9 @@ export function AssetCard({
           )}
 
           <div className="absolute left-1.5 top-1.5 flex items-center gap-1">
-            {index != null && (
+            {label && (
               <span className="rounded-md bg-accent/85 px-1.5 py-0.5 text-[10px] font-medium text-accent-fg backdrop-blur-sm">
-                图{index}
+                {label}
               </span>
             )}
             <span className="rounded-md bg-black/55 px-1.5 py-0.5 text-[10px] text-fg-dim backdrop-blur-sm">

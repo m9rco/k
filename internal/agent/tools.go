@@ -105,7 +105,7 @@ func (d ToolDeps) newEditTool() (tool.InvokableTool, error) {
 			log.Printf("edit_image: started task=%s", taskID)
 			return editResult{TaskID: taskID, Status: "queued", Note: "Generation started; watch task progress."}, nil
 		},
-		utils.WithMarshalOutput(friendlyMarshal("好的，正在按你的要求处理这张图，产物会很快出现在右侧工作区。")),
+		utils.WithMarshalOutput(friendlyMarshal("好的，正在按你的要求处理这张图，产物会很快出现在左侧工作区。")),
 	)
 }
 
@@ -239,7 +239,7 @@ func (d ToolDeps) newVideoTool() (tool.InvokableTool, error) {
 			}
 			return videoResult{TaskID: taskID, Status: "queued", Note: "Video generation started; watch task progress."}, nil
 		},
-		utils.WithMarshalOutput(friendlyMarshal("好的，正在把这张图生成视频，完成后会出现在右侧工作区。")),
+		utils.WithMarshalOutput(friendlyMarshal("好的，正在把这张图生成视频，完成后会出现在左侧工作区。")),
 	)
 }
 
@@ -276,7 +276,7 @@ func (d ToolDeps) newCrawlTool() (tool.InvokableTool, error) {
 			}
 			return crawlResult{TaskID: taskID, Status: "queued", Note: "Crawl started; watch task progress."}, nil
 		},
-		utils.WithMarshalOutput(friendlyMarshal("好的，正在抓取该游戏的素材预览，结果会出现在右侧工作区。")),
+		utils.WithMarshalOutput(friendlyMarshal("好的，正在抓取该游戏的素材预览，结果会出现在左侧工作区。")),
 	)
 }
 

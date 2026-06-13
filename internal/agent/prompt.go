@@ -50,9 +50,9 @@ func SystemPrompt() string {
 	b.WriteString("\n【工具使用规范】\n")
 	b.WriteString("1. 用户请求命中上述能力且信息充分时，你必须在本轮直接调用对应的工具来完成，而不是只用文字说你将要做什么。严禁出现「好的，我来帮你换背景」这类只回复确认却不调用工具的情况——确认话术（若要说）必须与工具调用在同一轮一起给出。\n")
 	b.WriteString("2. 生视频与物料爬取仅在对应供应商/源已配置时可用；未配置时告知用户「暂未配置」，不要臆造结果。\n")
-	b.WriteString("3. 工具返回的图片以引用 id 表示，不要臆造图片内容；产物会显示在右侧工作区。\n")
+	b.WriteString("3. 工具返回的图片以引用 id 表示，不要臆造图片内容；产物会显示在左侧工作区。\n")
 	b.WriteString("4. 当消息以「[reference assets: id1, id2, ...]」或「[asset id]」开头时，这些是用户在工作区选中的资产 id：换背景/换角色/换文案/二次调整时，把它们作为 edit_image 的 reference_asset_ids 传入（最多 6 个，第一个为主参考），单个 id 也可作为 source_asset_id。绝不要因为「看不到图片内容」而拒绝或不调用工具——你无需看到图片，工具会基于该 id 处理。\n")
-	b.WriteString("5. 当消息以「[工作区: 图1=id(类型), 图2=id(类型), ...]」开头时，这是工作区资产的编号映射：用户口中的「图N」对应其中的 id。把用户说的「图2」「图3」按映射解析为对应 asset_id 再填入工具参数。你在面向用户的说明里也可以用「图N」称呼资产，与用户看到的卡片角标一致。\n")
+	b.WriteString("5. 当消息以「[工作区: 图1=id(类型), 图2=id(类型), 视频1=id(视频), ...]」开头时，这是工作区资产的编号映射：图片用「图N」、视频用「视频N」，用户口中的「图2」「视频1」对应其中的 id。把用户说的编号按映射解析为对应 asset_id 再填入工具参数。你在面向用户的说明里也可以用「图N」「视频N」称呼资产，与用户看到的卡片角标一致。\n")
 	b.WriteString("6. 区分「参照物」与「被编辑对象」两类多图意图：\n")
 	b.WriteString("   - 「根据图X、图Y…生成/创作一张新图」=以图X图Y 作为参照（reference_asset_ids），不设被编辑底图（source_asset_id 留空），生成全新产物。\n")
 	b.WriteString("   - 「把图X、图Y…放进/融合到图Z」或「在图Z的基础上…」=图Z 是被编辑底图（source_asset_id），图X图Y 是参照（reference_asset_ids）。\n")
@@ -122,27 +122,35 @@ func kindLabel(kind string) string {
 	}
 }
 
-// BuildAssetNumbering builds the "图N → asset_id" context prefix injected ahead
-// of a user message, so the model can resolve user references like "图2/图3" and
-// reply using the same "图N" labels. order is the user's current display order;
-// selected (optional) are the ids the user explicitly picked this turn. Returns
-// "" when there are no assets (nothing to inject).
+// BuildAssetNumbering builds the "编号 → asset_id" context prefix injected ahead
+// of a user message, so the model can resolve user references like "图2/图3/视频1"
+// and reply using the same labels. Images are numbered 图N and videos 视频N in
+// two independent sequences (matching the frontend badge), in the given order
+// (timeline order: earliest first). selected (optional) are the ids the user
+// explicitly picked this turn. Returns "" when there are no assets.
 func BuildAssetNumbering(order []AssetRef, selected []string) string {
 	if len(order) == 0 {
 		return ""
 	}
-	// index id -> 图N for the selected annotation.
-	num := make(map[string]int, len(order))
+	// id -> label ("图N" / "视频N") for the selected annotation.
+	label := make(map[string]string, len(order))
 	var b strings.Builder
 	b.WriteString("[工作区: ")
+	img, vid := 0, 0
 	for i, a := range order {
-		n := i + 1
-		num[a.ID] = n
+		var lbl string
+		if a.Kind == "video" {
+			vid++
+			lbl = "视频" + itoa(vid)
+		} else {
+			img++
+			lbl = "图" + itoa(img)
+		}
+		label[a.ID] = lbl
 		if i > 0 {
 			b.WriteString(", ")
 		}
-		b.WriteString("图")
-		b.WriteString(itoa(n))
+		b.WriteString(lbl)
 		b.WriteString("=")
 		b.WriteString(a.ID)
 		b.WriteString("(")
@@ -154,7 +162,7 @@ func BuildAssetNumbering(order []AssetRef, selected []string) string {
 		b.WriteString(" [选中: ")
 		first := true
 		for _, id := range selected {
-			n, ok := num[id]
+			lbl, ok := label[id]
 			if !ok {
 				continue
 			}
@@ -162,8 +170,7 @@ func BuildAssetNumbering(order []AssetRef, selected []string) string {
 				b.WriteString(", ")
 			}
 			first = false
-			b.WriteString("图")
-			b.WriteString(itoa(n))
+			b.WriteString(lbl)
 		}
 		b.WriteString("]")
 	}

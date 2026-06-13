@@ -11,6 +11,8 @@ export interface Asset {
   width?: number;
   height?: number;
   parentId?: string;
+  // createdAt (RFC3339) drives timeline ordering and relative-time display.
+  createdAt?: string;
 }
 
 export type TaskStatus = "queued" | "running" | "done" | "failed";
@@ -23,6 +25,10 @@ export interface Task {
   progress: number;
   error?: string;
   assetId?: string;
+  // note is a short human-readable summary of the agent's understanding of this
+  // operation (derived from the tool-call args), shown on the timeline node —
+  // e.g. "换背景 · 淡紫色渐变".
+  note?: string;
 }
 
 export interface ContextState {

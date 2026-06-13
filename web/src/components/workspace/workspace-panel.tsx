@@ -1,33 +1,19 @@
 import * as React from "react";
-import { AnimatePresence } from "framer-motion";
-import { Download, Trash2, CheckCheck, Crop } from "lucide-react";
+import { Download, Trash2, CheckCheck, Crop, LayoutGrid, GitCommitVertical } from "lucide-react";
 import type { Asset } from "@/lib/types";
 import { useApp } from "@/store/context";
 import { Button } from "@/components/ui/button";
 import { BrandMark } from "@/components/brand-mark";
-import { AssetCard } from "./asset-card";
-import { TaskCard } from "./task-card";
+import { Timeline } from "./timeline";
+import { WorkspaceGrid } from "./workspace-grid";
 import { Lightbox } from "./lightbox";
 import { SizePicker } from "./size-picker";
+import { buildTimeline, assetLabels } from "@/lib/timeline";
+import { cn } from "@/lib/utils";
 import * as api from "@/lib/api";
 
-function Stage({ title, count, action, children }: {
-  title: string; count: number; action?: React.ReactNode; children: React.ReactNode;
-}) {
-  if (count === 0) return null;
-  return (
-    <section className="mb-5">
-      <div className="sticky top-0 z-10 mb-2.5 flex items-center gap-2 bg-bg/85 py-1 backdrop-blur">
-        <span className="text-xs font-semibold tracking-wide text-fg-dim">{title}</span>
-        <span className="grid h-[18px] min-w-[18px] place-items-center rounded-full border border-line px-1.5 text-[11px] text-fg-mute">
-          {count}
-        </span>
-        {action && <div className="ml-auto">{action}</div>}
-      </div>
-      <div className="grid grid-cols-[repeat(auto-fill,minmax(150px,1fr))] gap-3.5">{children}</div>
-    </section>
-  );
-}
+type ViewMode = "grid" | "timeline";
+const VIEW_KEY = "gas_workspace_view";
 
 export function WorkspacePanel() {
   const app = useApp();
@@ -35,10 +21,37 @@ export function WorkspacePanel() {
   const [preview, setPreview] = React.useState<Asset | null>(null);
   const [cropFor, setCropFor] = React.useState<string[] | null>(null);
 
-  const active = [...state.tasks.values()].filter((t) => t.status === "queued" || t.status === "running");
-  const failed = [...state.tasks.values()].filter((t) => t.status === "failed");
-  const assets = orderedAssets(state.assets, state.order);
-  const total = active.length + failed.length + assets.length;
+  // View mode: grid (show-all, default) or timeline (production line). Persisted
+  // in sessionStorage so a reload keeps the user's choice.
+  const [view, setView] = React.useState<ViewMode>(() => {
+    const v = typeof sessionStorage !== "undefined" ? sessionStorage.getItem(VIEW_KEY) : null;
+    return v === "timeline" ? "timeline" : "grid";
+  });
+  const pickView = (v: ViewMode) => {
+    setView(v);
+    try { sessionStorage.setItem(VIEW_KEY, v); } catch { /* ignore */ }
+  };
+
+  // A coarse clock so relative times ("3 分钟前") refresh and active nodes keep
+  // floating to the top. 30s cadence is plenty for minute-granularity labels.
+  const [nowMs, setNowMs] = React.useState(() => Date.now());
+  React.useEffect(() => {
+    const id = window.setInterval(() => setNowMs(Date.now()), 30000);
+    return () => window.clearInterval(id);
+  }, []);
+
+  const assets = React.useMemo(() => [...state.assets.values()], [state.assets]);
+  const tasks = React.useMemo(() => [...state.tasks.values()], [state.tasks]);
+  const nodes = React.useMemo(() => buildTimeline(assets, tasks, nowMs), [assets, tasks, nowMs]);
+  const labels = React.useMemo(() => assetLabels(assets), [assets]);
+  // Assets in creation order (earliest first) — matches numbering labels; the
+  // grid reverses for newest-first display while keeping the label numbering.
+  const assetsByTime = React.useMemo(
+    () => [...assets].sort((a, b) => (a.createdAt ? Date.parse(a.createdAt) : 0) - (b.createdAt ? Date.parse(b.createdAt) : 0)),
+    [assets],
+  );
+  const hasFailed = tasks.some((t) => t.status === "failed");
+  const isEmpty = nodes.length === 0;
 
   const allSelected = state.assets.size > 0 && state.selected.size >= state.assets.size;
 
@@ -58,7 +71,26 @@ export function WorkspacePanel() {
     <div className="flex h-full min-h-0 flex-col">
       <div className="flex items-center gap-2 border-b border-line px-5 py-3">
         <BrandMark className="size-5 text-accent" />
-        <h2 className="text-sm font-semibold">工作区</h2>
+        <h2 className="text-sm font-semibold">资产工作区</h2>
+        {/* View toggle: grid (all) ↔ timeline (production line) */}
+        <div className="ml-3 flex items-center rounded-md border border-line p-0.5">
+          <button
+            type="button"
+            title="全部展示（网格）"
+            onClick={() => pickView("grid")}
+            className={cn("grid size-6 place-items-center rounded transition-colors", view === "grid" ? "bg-bg-elev-2 text-fg" : "text-fg-mute hover:text-fg")}
+          >
+            <LayoutGrid className="size-3.5" />
+          </button>
+          <button
+            type="button"
+            title="时间轴（加工流水）"
+            onClick={() => pickView("timeline")}
+            className={cn("grid size-6 place-items-center rounded transition-colors", view === "timeline" ? "bg-bg-elev-2 text-fg" : "text-fg-mute hover:text-fg")}
+          >
+            <GitCommitVertical className="size-3.5" />
+          </button>
+        </div>
         <div className="ml-auto flex items-center gap-1.5">
           {state.assets.size > 0 && (
             <Button variant="ghost" size="sm" onClick={() => (allSelected ? app.clearSelection() : app.selectAll())}>
@@ -79,6 +111,11 @@ export function WorkspacePanel() {
               <Trash2 className="size-3.5" /> 移除 {state.selected.size}
             </Button>
           )}
+          {hasFailed && (
+            <Button variant="ghost" size="sm" onClick={app.clearFailed}>
+              清除失败
+            </Button>
+          )}
           {state.assets.size > 0 && (
             <Button variant="ghost" size="sm" onClick={() => { if (confirm("确定清空工作区？将删除全部素材，此操作不可恢复。")) app.clearWorkspace(); }}>
               <Trash2 className="size-3.5" /> 清空
@@ -93,45 +130,29 @@ export function WorkspacePanel() {
       </div>
 
       <div className="flex-1 overflow-y-auto px-5 py-4">
-        {total === 0 ? (
+        {isEmpty ? (
           <div className="grid h-full place-items-center text-center">
             <div className="max-w-xs text-[13px] leading-relaxed text-fg-mute">
-              还没有素材。上传一张图或直接描述你的需求，产物会出现在这里。
+              工作区还空着。上传一张图或直接描述你的需求，产物会出现在这里。
             </div>
           </div>
+        ) : view === "timeline" ? (
+          <Timeline
+            nodes={nodes}
+            labels={labels}
+            nowMs={nowMs}
+            onPreview={setPreview}
+            onCrop={(x) => setCropFor([x.id])}
+            onVideo={(x) => { setPreview(x); }}
+          />
         ) : (
-          <>
-            <Stage title="进行中" count={active.length}>
-              <AnimatePresence initial={false}>
-                {active.map((t) => <TaskCard key={t.id} task={t} />)}
-              </AnimatePresence>
-            </Stage>
-            <Stage title="已完成" count={assets.length}>
-              <AnimatePresence initial={false}>
-                {assets.map((a, i) => (
-                  <AssetCard
-                    key={a.id}
-                    asset={a}
-                    index={i + 1}
-                    onPreview={setPreview}
-                    onCrop={(x) => setCropFor([x.id])}
-                    onVideo={(x) => { setPreview(x); }}
-                  />
-                ))}
-              </AnimatePresence>
-            </Stage>
-            <Stage
-              title="失败"
-              count={failed.length}
-              action={
-                <Button variant="ghost" size="xs" onClick={app.clearFailed}>清除全部</Button>
-              }
-            >
-              <AnimatePresence initial={false}>
-                {failed.map((t) => <TaskCard key={t.id} task={t} />)}
-              </AnimatePresence>
-            </Stage>
-          </>
+          <WorkspaceGrid
+            assets={assetsByTime}
+            labels={labels}
+            onPreview={setPreview}
+            onCrop={(x) => setCropFor([x.id])}
+            onVideo={(x) => { setPreview(x); }}
+          />
         )}
       </div>
 
@@ -141,15 +162,3 @@ export function WorkspacePanel() {
   );
 }
 
-// orderedAssets honors the user's drag order for ids still present, appending
-// any new ids in backend order (newest-first).
-function orderedAssets(map: Map<string, Asset>, order: string[]): Asset[] {
-  const seen = new Set<string>();
-  const out: Asset[] = [];
-  for (const id of order) {
-    const a = map.get(id);
-    if (a) { out.push(a); seen.add(id); }
-  }
-  for (const a of map.values()) if (!seen.has(a.id)) out.push(a);
-  return out;
-}
