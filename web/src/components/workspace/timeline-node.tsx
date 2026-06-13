@@ -6,7 +6,7 @@ import { relativeTime } from "@/lib/timeline";
 import { useApp } from "@/store/context";
 import { Button } from "@/components/ui/button";
 import { AssetCard } from "./asset-card";
-import { usePerformedProgress } from "./use-performed-progress";
+import { usePerformedProgress, useElapsed } from "./use-performed-progress";
 import { cn } from "@/lib/utils";
 
 // Action phrase + icon per node kind, evoking a workshop production step.
@@ -117,6 +117,7 @@ function ActiveNode({ node }: { node: TimelineNode }) {
   const task = node.task!;
   const failed = node.state === "failed";
   const pct = usePerformedProgress(task);
+  const elapsed = useElapsed(task);
 
   return (
     <div className="max-w-[260px] rounded-lg border border-line bg-bg-elev p-2.5">
@@ -128,7 +129,10 @@ function ActiveNode({ node }: { node: TimelineNode }) {
           <div className="h-1 overflow-hidden rounded-full bg-bg">
             <div className="h-full rounded-full bg-accent transition-[width] duration-300 ease-linear" style={{ width: `${pct}%` }} />
           </div>
-          <div className="tabular-nums text-[11px] text-accent">{pct}%</div>
+          <div className="flex items-center justify-between tabular-nums text-[11px] text-accent">
+            <span>{pct}%</span>
+            {elapsed && <span className="text-fg-mute">{elapsed}</span>}
+          </div>
         </div>
       ) : (
         <div className="space-y-1.5 text-xs">

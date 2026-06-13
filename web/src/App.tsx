@@ -20,11 +20,11 @@ function Shell() {
 
   if (isEmpty) {
     return (
-      <div className="grid h-full place-items-center px-4">
+      <div className="grid h-full place-items-center overflow-hidden px-4">
         <motion.div
           layout
-          initial={{ opacity: 0, y: 10 }}
-          animate={{ opacity: 1, y: 0 }}
+          initial={{ opacity: 0, scale: 0.98 }}
+          animate={{ opacity: 1, scale: 1 }}
           transition={{ duration: 0.4, ease: "easeOut" }}
           className="flex h-full max-h-[820px] w-full max-w-[600px] flex-col"
         >

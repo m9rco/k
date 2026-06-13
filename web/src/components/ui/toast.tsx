@@ -11,7 +11,9 @@ const ToastViewport = React.forwardRef<
   <ToastPrimitive.Viewport
     ref={ref}
     className={cn(
-      "fixed bottom-4 right-4 z-[100] flex max-h-screen w-80 flex-col gap-2 outline-none",
+      // Top-center so transient notices never cover the composer/input at the
+      // bottom of the chat column.
+      "fixed left-1/2 top-4 z-[100] flex max-h-screen w-80 -translate-x-1/2 flex-col gap-2 outline-none",
       className,
     )}
     {...props}

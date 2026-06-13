@@ -3,7 +3,7 @@ import { RotateCcw, Trash2, Loader2, X } from "lucide-react";
 import type { Task } from "@/lib/types";
 import { useApp } from "@/store/context";
 import { Button } from "@/components/ui/button";
-import { usePerformedProgress } from "./use-performed-progress";
+import { usePerformedProgress, useElapsed } from "./use-performed-progress";
 
 function stageLabel(p: number, kind: string): string {
   if (kind === "video") {
@@ -29,6 +29,7 @@ function stageLabel(p: number, kind: string): string {
 export function TaskCard({ task }: { task: Task }) {
   const app = useApp();
   const pct = usePerformedProgress(task);
+  const elapsed = useElapsed(task);
   const failed = task.status === "failed";
 
   return (
@@ -68,7 +69,10 @@ export function TaskCard({ task }: { task: Task }) {
             <div className="h-1 overflow-hidden rounded-full bg-bg">
               <div className="h-full rounded-full bg-accent transition-[width] duration-300 ease-linear" style={{ width: `${pct}%` }} />
             </div>
-            <div className="tabular-nums text-accent">{pct}%</div>
+            <div className="flex items-center justify-between tabular-nums text-accent">
+              <span>{pct}%</span>
+              {elapsed && <span className="text-fg-mute">{elapsed}</span>}
+            </div>
           </>
         ) : (
           <>

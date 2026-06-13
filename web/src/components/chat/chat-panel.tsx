@@ -69,7 +69,7 @@ export function ChatPanel({ onboarding = false }: { onboarding?: boolean }) {
   return (
     <div className="flex h-full min-h-0 flex-col">
       {!onboarding && <ContextBar />}
-      <div ref={logRef} className={onboarding ? "flex flex-1 flex-col justify-center overflow-y-auto px-4 py-4" : "flex-1 space-y-3 overflow-y-auto px-4 py-4"}>
+      <div ref={logRef} className={onboarding ? "flex flex-1 flex-col justify-center overflow-hidden px-4 py-4" : "flex-1 space-y-3 overflow-y-auto px-4 py-4"}>
         {onboarding && <BrandHero />}
         {state.chat.length === 0 && <Welcome />}
         <AnimatePresence initial={false}>
