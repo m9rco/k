@@ -60,6 +60,20 @@ CREATE TABLE IF NOT EXISTS tasks (
 );
 CREATE INDEX IF NOT EXISTS idx_tasks_session ON tasks(session_id);
 
+-- Conversation history: one row per persisted turn message (user/assistant),
+-- text + reference ids only (never raw image/base64 payloads). Lets the agent
+-- rebuild a session's context window after a process restart.
+CREATE TABLE IF NOT EXISTS messages (
+	id          TEXT PRIMARY KEY,
+	session_id  TEXT NOT NULL,
+	role        TEXT NOT NULL,            -- user | assistant
+	content     TEXT NOT NULL DEFAULT '',
+	tool_refs   TEXT NOT NULL DEFAULT '', -- optional compact tool reference summary
+	created_at  DATETIME NOT NULL,
+	FOREIGN KEY (session_id) REFERENCES sessions(id)
+);
+CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id, created_at);
+
 -- Reserved for the future memory/preference system (not used in MVP).
 CREATE TABLE IF NOT EXISTS preferences (
 	id          TEXT PRIMARY KEY,
@@ -356,4 +370,61 @@ func (s *Store) CountActiveTasks(sessionID string) (int, error) {
 		return 0, fmt.Errorf("count active tasks: %w", err)
 	}
 	return n, nil
+}
+
+// --- Conversation messages ---
+
+// MessageRecord is one persisted conversation turn message. Only text and
+// reference ids are stored — never raw image/binary payloads (those live as
+// assets addressed by id), keeping the table small and the LLM context clean.
+type MessageRecord struct {
+	ID        string
+	SessionID string
+	Role      string // user | assistant
+	Content   string
+	ToolRefs  string // optional JSON/compact note of tool reference ids
+	CreatedAt time.Time
+}
+
+// InsertMessage persists one conversation message so a session's chat history
+// survives a server restart and can rehydrate the context window.
+func (s *Store) InsertMessage(rec MessageRecord) error {
+	_, err := s.db.Exec(`
+		INSERT INTO messages (id, session_id, role, content, tool_refs, created_at)
+		VALUES (?, ?, ?, ?, ?, ?)`,
+		rec.ID, rec.SessionID, rec.Role, rec.Content, rec.ToolRefs, rec.CreatedAt)
+	if err != nil {
+		return fmt.Errorf("insert message: %w", err)
+	}
+	return nil
+}
+
+// ListMessages returns a session's conversation messages oldest-first, so the
+// orchestrator can replay them into a fresh context window on restart.
+func (s *Store) ListMessages(sessionID string) ([]MessageRecord, error) {
+	rows, err := s.db.Query(`
+		SELECT id, session_id, role, content, tool_refs, created_at
+		FROM messages WHERE session_id = ? ORDER BY created_at ASC, rowid ASC`, sessionID)
+	if err != nil {
+		return nil, fmt.Errorf("list messages: %w", err)
+	}
+	defer rows.Close()
+	var out []MessageRecord
+	for rows.Next() {
+		var m MessageRecord
+		if err := rows.Scan(&m.ID, &m.SessionID, &m.Role, &m.Content, &m.ToolRefs, &m.CreatedAt); err != nil {
+			return nil, fmt.Errorf("scan message: %w", err)
+		}
+		out = append(out, m)
+	}
+	return out, rows.Err()
+}
+
+// DeleteMessages removes a session's persisted conversation history (used when
+// the user clears context, so a fresh window is not re-seeded from old turns).
+func (s *Store) DeleteMessages(sessionID string) error {
+	if _, err := s.db.Exec(`DELETE FROM messages WHERE session_id = ?`, sessionID); err != nil {
+		return fmt.Errorf("delete messages: %w", err)
+	}
+	return nil
 }

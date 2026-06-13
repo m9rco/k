@@ -4,6 +4,8 @@ import { useApp } from "@/store/context";
 import { MessageBubble } from "./message-bubble";
 import { ReasoningBlock } from "./reasoning-block";
 import { ToolCard } from "./tool-card";
+import { CapsuleBubble } from "./capsule-bubble";
+import { LoadingBubble } from "./loading-bubble";
 import { Composer } from "./composer";
 import { ContextBar } from "./context-bar";
 
@@ -33,7 +35,7 @@ function Welcome() {
 }
 
 export function ChatPanel() {
-  const { state, collapseReasoningItem } = useApp();
+  const { state, collapseReasoningItem, capsuleSelect } = useApp();
   const logRef = React.useRef<HTMLDivElement>(null);
 
   // Keep pinned to newest content when already near the bottom.
@@ -63,6 +65,17 @@ export function ChatPanel() {
                   onToggle={() => collapseReasoningItem(it.id)}
                 />
               );
+            if (it.kind === "capsule")
+              return (
+                <CapsuleBubble
+                  key={it.id}
+                  question={it.question}
+                  options={it.options}
+                  answered={it.answered}
+                  onSubmit={(value) => capsuleSelect(it.id, value)}
+                />
+              );
+            if (it.kind === "loading") return <LoadingBubble key={it.id} />;
             return <ToolCard key={it.id} tool={it.tool} />;
           })}
         </AnimatePresence>

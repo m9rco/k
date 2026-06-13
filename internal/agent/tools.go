@@ -28,7 +28,23 @@ type ToolDeps struct {
 	// Lossless toggles program-side PNG lossless optimization of image products
 	// (default true; set per request from the frontend compression switch).
 	Lossless bool
+	// Clarify, when set, is invoked by the clarify_intent tool to surface a
+	// structured clarifying question (capsule) to the user. Injected by the
+	// orchestrator so tools.go stays free of the transport layer (design D1).
+	Clarify CapsuleEmitter
 }
+
+// ClarifyOption is one selectable answer to a clarify_intent question. Label is
+// shown on the chip; Value is what gets fed back to the agent on click;
+// EditableHint pre-fills an editable input the user can rewrite before sending.
+type ClarifyOption struct {
+	Label        string `json:"label" jsonschema:"description=Short label shown on the option chip"`
+	Value        string `json:"value" jsonschema:"description=The value fed back to the agent when the user picks this option"`
+	EditableHint string `json:"editable_hint,omitempty" jsonschema:"description=Optional text pre-filled into an editable input so the user can rewrite this option before sending"`
+}
+
+// CapsuleEmitter surfaces a structured clarifying question to the user.
+type CapsuleEmitter func(question string, options []ClarifyOption)
 
 // --- change_character / change_background / change_text -------------------
 
@@ -264,6 +280,45 @@ func (d ToolDeps) newCrawlTool() (tool.InvokableTool, error) {
 	)
 }
 
+// --- clarify_intent ---------------------------------------------------------
+
+type clarifyOptionArg struct {
+	Label        string `json:"label" jsonschema:"description=Short label shown on the option chip"`
+	Value        string `json:"value" jsonschema:"description=Value fed back to the agent when the user picks this option"`
+	EditableHint string `json:"editable_hint,omitempty" jsonschema:"description=Optional text pre-filled into an editable input so the user can rewrite before sending"`
+}
+
+type clarifyArgs struct {
+	Question string             `json:"question" jsonschema:"description=A short question asking the user for the missing information"`
+	Options  []clarifyOptionArg `json:"options" jsonschema:"description=2 to 4 concrete options the user can pick or edit"`
+}
+
+type clarifyResult struct {
+	Status string `json:"status"`
+}
+
+func (d ToolDeps) newClarifyTool() (tool.InvokableTool, error) {
+	return utils.InferTool(
+		"clarify_intent",
+		"Ask the user a single structured clarifying question when the request hits a "+
+			"supported capability but is missing information required to safely call an "+
+			"execution tool (e.g. which image, what to change it to, target size/platform). "+
+			"Provide 2-4 concrete options the user can click or edit. Do NOT guess or call "+
+			"execution tools in the same turn; this ends the turn and waits for the user's reply.",
+		func(_ context.Context, a clarifyArgs) (clarifyResult, error) {
+			if d.Clarify != nil {
+				opts := make([]ClarifyOption, 0, len(a.Options))
+				for _, o := range a.Options {
+					opts = append(opts, ClarifyOption{Label: o.Label, Value: o.Value, EditableHint: o.EditableHint})
+				}
+				d.Clarify(a.Question, opts)
+			}
+			return clarifyResult{Status: "asked"}, nil
+		},
+		utils.WithMarshalOutput(friendlyMarshal("")),
+	)
+}
+
 // friendlyMarshal returns a MarshalOutput that emits a fixed user-facing Chinese
 // sentence regardless of the raw result struct. Used for ToolReturnDirectly async
 // tools so the chat shows a clean confirmation instead of raw {task_id,...} JSON.
@@ -285,7 +340,11 @@ func (d ToolDeps) Tools() ([]tool.BaseTool, error) {
 	if err != nil {
 		return nil, fmt.Errorf("list sizes tool: %w", err)
 	}
-	tools := []tool.BaseTool{edit, cropTool, listSizes}
+	clarify, err := d.newClarifyTool()
+	if err != nil {
+		return nil, fmt.Errorf("clarify tool: %w", err)
+	}
+	tools := []tool.BaseTool{edit, cropTool, listSizes, clarify}
 	// image_to_video is only exposed when a video provider is configured, so the
 	// agent doesn't advertise a capability that will always fail.
 	if d.Video != nil && d.Video.Configured() {
@@ -316,5 +375,8 @@ func AsyncTaskTools() map[string]struct{} {
 		"edit_image":        {},
 		"image_to_video":    {},
 		"crawl_game_assets": {},
+		// clarify_intent ends the turn after asking; its result must not be fed
+		// back to the model (there's nothing more to do until the user replies).
+		"clarify_intent": {},
 	}
 }

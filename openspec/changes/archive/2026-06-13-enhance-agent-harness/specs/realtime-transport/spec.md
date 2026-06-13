@@ -1,25 +1,6 @@
-# realtime-transport Specification
+# realtime-transport — Delta
 
-## Purpose
-TBD - created by archiving change add-asset-studio-mvp. Update Purpose after archive.
-## Requirements
-### Requirement: 对话使用 WebSocket
-系统 SHALL 通过 WebSocket 承载交互式对话通道，支持双向、低延迟的消息与中间步骤推送。
-
-#### Scenario: 对话双向通信
-- **WHEN** 用户在对话区发送消息
-- **THEN** 系统经 WebSocket 接收并将 Agent 的增量响应与工具调用步骤回推到同一连接
-
-### Requirement: 任务进度使用 SSE
-系统 SHALL 通过 HTTP streaming（SSE）承载生图/生视频等长耗时任务的进度推送。
-
-#### Scenario: 任务进度流
-- **WHEN** 一个长耗时生成任务启动
-- **THEN** 系统通过 SSE 持续推送该任务的状态变更直至完成或失败
-
-#### Scenario: 断线重连
-- **WHEN** SSE 连接中断后重新建立
-- **THEN** 客户端可恢复获取任务最新状态而不丢失最终结果
+## ADDED Requirements
 
 ### Requirement: 轮生命周期事件
 系统 SHALL 通过 WebSocket 下发对话"轮开始"与"轮结束"事件，使前端能在不依赖首个回答/思考增量的前提下管理 loading 态。轮开始事件 SHALL 在系统接收用户消息后、调用模型前发出；轮结束事件 SHALL 在该轮处理终止（完成、出错或产出反问）时发出，并携带本轮收尾元信息（是否调用工具、是否产出 capsule）。
@@ -47,4 +28,3 @@ TBD - created by archiving change add-asset-studio-mvp. Update Purpose after arc
 #### Scenario: 未知事件类型不致错
 - **WHEN** 客户端收到其不识别的事件类型
 - **THEN** 客户端忽略该事件且不报错（向后兼容加法式协议演进）
-

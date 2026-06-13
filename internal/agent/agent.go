@@ -13,6 +13,7 @@ import (
 	"log"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/cloudwego/eino/callbacks"
 	"github.com/cloudwego/eino/components/tool"
@@ -26,6 +27,7 @@ import (
 	"gameasset/internal/crawl"
 	"gameasset/internal/crop"
 	"gameasset/internal/generation"
+	"gameasset/internal/store"
 	"gameasset/internal/transport"
 	"gameasset/internal/video"
 )
@@ -47,6 +49,8 @@ type Orchestrator struct {
 	crop       *crop.Service
 	video      *video.Service
 	crawl      *crawl.Service
+	store      *store.Store
+	newID      func(string) string
 	budget     int
 	keepRecent int
 	hub        *transport.Hub
@@ -58,7 +62,7 @@ type Orchestrator struct {
 // NewOrchestrator builds the orchestrator from config and backing services.
 // The conversation model is selected from config (primary unless the test
 // model is enabled); users cannot switch it (requirement: model hardcoded).
-func NewOrchestrator(cfg *config.Config, gen *generation.Service, cr *crop.Service, vid *video.Service, cw *crawl.Service, hub *transport.Hub) *Orchestrator {
+func NewOrchestrator(cfg *config.Config, gen *generation.Service, cr *crop.Service, vid *video.Service, cw *crawl.Service, hub *transport.Hub, st *store.Store, newID func(string) string) *Orchestrator {
 	mc := cfg.ChatPrimary
 	if cfg.UseTestModel {
 		mc = cfg.ChatTest
@@ -72,30 +76,67 @@ func NewOrchestrator(cfg *config.Config, gen *generation.Service, cr *crop.Servi
 		budget:     cfg.ContextTokenBudget,
 		keepRecent: 6,
 		hub:        hub,
+		store:      st,
+		newID:      newID,
 		windows:    make(map[string]*Window),
 	}
 }
 
 // window returns (creating if needed) the conversation window for a session,
-// seeded with the system prompt that encodes the intent whitelist.
+// seeded with the system prompt that encodes the intent whitelist. On first
+// build it restores prior conversation history from the store so a reconnecting
+// client (or a server restart) resumes the same context; the restored window is
+// immediately subject to budget compression like any other.
 func (o *Orchestrator) window(sessionID string) *Window {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	w, ok := o.windows[sessionID]
 	if !ok {
 		w = NewWindow(SystemPrompt(), o.budget, o.keepRecent, nil)
+		o.restoreLocked(sessionID, w)
 		o.windows[sessionID] = w
 	}
 	return w
 }
 
+// restoreLocked replays persisted messages into a fresh window. Best-effort: a
+// store error just yields an empty (system-only) window rather than failing the
+// turn. Must be called with o.mu held.
+func (o *Orchestrator) restoreLocked(sessionID string, w *Window) {
+	if o.store == nil {
+		return
+	}
+	msgs, err := o.store.ListMessages(sessionID)
+	if err != nil {
+		log.Printf("agent: restore history session=%s failed: %v", sessionID, err)
+		return
+	}
+	for _, m := range msgs {
+		switch m.Role {
+		case "user":
+			w.Append(schema.UserMessage(m.Content))
+		case "assistant":
+			w.Append(schema.AssistantMessage(m.Content, nil))
+		}
+	}
+	if len(msgs) > 0 {
+		log.Printf("agent: restored %d messages for session=%s", len(msgs), sessionID)
+	}
+}
+
 // ResetContext discards a session's accumulated conversation history, restoring
 // a fresh window seeded only with the system prompt. Workspace assets are
-// untouched (this only clears the LLM context window).
+// untouched (this only clears the LLM context window). Persisted history is also
+// cleared so the next reconnect does not resurrect the old context.
 func (o *Orchestrator) ResetContext(sessionID string) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	o.windows[sessionID] = NewWindow(SystemPrompt(), o.budget, o.keepRecent, nil)
+	if o.store != nil {
+		if err := o.store.DeleteMessages(sessionID); err != nil {
+			log.Printf("agent: clear history session=%s failed: %v", sessionID, err)
+		}
+	}
 }
 
 // Handle processes one user message for a session: it appends the message to
@@ -111,9 +152,27 @@ func (o *Orchestrator) Handle(ctx context.Context, sessionID, userText string, l
 
 	ctx = withSession(ctx, sessionID)
 
-	deps := ToolDeps{Generation: o.gen, Crop: o.crop, Video: o.video, Crawl: o.crawl, SessionID: sessionID, Lossless: lossless}
+	// Emit turn_start immediately (before the model is called) so the frontend
+	// can enter a loading state without waiting for the first model increment,
+	// which can lag by seconds on generation-intent turns.
+	o.emit(sessionID, transport.Event{Type: transport.EventTurnStart, SessionID: sessionID})
+
+	// capsuleAsked is flipped when the model calls clarify_intent, so turn_end
+	// can tell the frontend a structured question is awaiting the user's reply.
+	capsuleAsked := false
+	clarify := func(question string, options []ClarifyOption) {
+		capsuleAsked = true
+		o.emit(sessionID, transport.Event{
+			Type:      transport.EventCapsule,
+			SessionID: sessionID,
+			Data:      map[string]any{"question": question, "options": options},
+		})
+	}
+
+	deps := ToolDeps{Generation: o.gen, Crop: o.crop, Video: o.video, Crawl: o.crawl, SessionID: sessionID, Lossless: lossless, Clarify: clarify}
 	tools, err := deps.Tools()
 	if err != nil {
+		o.emitTurnEnd(sessionID, 0, false)
 		return "", fmt.Errorf("build tools: %w", err)
 	}
 
@@ -136,6 +195,7 @@ func (o *Orchestrator) Handle(ctx context.Context, sessionID, userText string, l
 		ToolReturnDirectly: AsyncTaskTools(),
 	})
 	if err != nil {
+		o.emitTurnEnd(sessionID, 0, false)
 		return "", fmt.Errorf("build react agent: %w", err)
 	}
 
@@ -145,6 +205,7 @@ func (o *Orchestrator) Handle(ctx context.Context, sessionID, userText string, l
 
 	stream, err := ra.Stream(ctx, w.Messages(), agentOption(toolCB))
 	if err != nil {
+		o.emitTurnEnd(sessionID, 0, false)
 		return "", fmt.Errorf("agent stream: %w", err)
 	}
 	defer stream.Close()
@@ -196,14 +257,56 @@ func (o *Orchestrator) Handle(ctx context.Context, sessionID, userText string, l
 	// that should produce an asset but emitted 0 tool calls means the model only
 	// replied with text (e.g. a small model that "confirms" without acting) —
 	// this is the signal to inspect the model/prompt, not the workspace pipeline.
-	log.Printf("agent: session=%s turn done toolCalls=%d replyLen=%d", sessionID, toolCalls, len(reply))
+	log.Printf("agent: session=%s turn done toolCalls=%d replyLen=%d capsule=%t", sessionID, toolCalls, len(reply), capsuleAsked)
 	w.Append(schema.AssistantMessage(reply, nil))
 	o.emit(sessionID, transport.Event{
 		Type:      transport.EventMessage,
 		SessionID: sessionID,
 		Data:      map[string]any{"text": reply, "done": true},
 	})
+	// Persist this turn so the conversation survives a server restart / reconnect.
+	// Only text is stored (large tool payloads stay out of the DB, mirroring D3).
+	o.persist(sessionID, "user", userText)
+	o.persist(sessionID, "assistant", reply)
+	o.emitTurnEnd(sessionID, toolCalls, capsuleAsked)
 	return reply, nil
+}
+
+// persist writes one conversation message to the store (best-effort: a failure
+// is logged but does not fail the turn). Empty content is skipped.
+func (o *Orchestrator) persist(sessionID, role, content string) {
+	if o.store == nil || strings.TrimSpace(content) == "" {
+		return
+	}
+	id := "msg"
+	if o.newID != nil {
+		id = o.newID("msg")
+	}
+	if err := o.store.InsertMessage(store.MessageRecord{
+		ID:        id,
+		SessionID: sessionID,
+		Role:      role,
+		Content:   content,
+		CreatedAt: time.Now().UTC(),
+	}); err != nil {
+		log.Printf("agent: persist message session=%s role=%s failed: %v", sessionID, role, err)
+	}
+}
+
+// emitTurnEnd sends a turn_end event carrying turn metadata (tool usage, whether
+// a clarify capsule was produced) and the latest context window state, so the
+// frontend can close its loading state and refresh the context indicator.
+func (o *Orchestrator) emitTurnEnd(sessionID string, toolCalls int, hasCapsule bool) {
+	st := o.State(sessionID)
+	o.emit(sessionID, transport.Event{
+		Type:      transport.EventTurnEnd,
+		SessionID: sessionID,
+		Data: map[string]any{
+			"toolUsed":   toolCalls > 0,
+			"hasCapsule": hasCapsule,
+			"context":    st,
+		},
+	})
 }
 
 // emit sends an event to the session's WS connections when a hub is present.

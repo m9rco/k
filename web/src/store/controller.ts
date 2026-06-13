@@ -181,7 +181,24 @@ export function useAppController() {
     reasoner.current = { id: "", target: "", shown: 0 };
   }, [setChat]);
 
+  // ============ turn lifecycle ============
+  // A loading placeholder bubble is shown the instant a turn starts (locally on
+  // send, and reaffirmed on the turn_start event) so the UI never sits blank
+  // while the model spins up. It is removed as soon as real content arrives or
+  // the turn ends.
+  const showLoading = React.useCallback(() => {
+    setState((s) => {
+      if (s.chat.some((it) => it.kind === "loading")) return { ...s, thinking: true };
+      return { ...s, thinking: true, chat: [...s.chat, { kind: "loading", id: uid("load") }] };
+    });
+  }, []);
+
+  const clearLoading = React.useCallback(() => {
+    setChat((c) => c.filter((it) => it.kind !== "loading"));
+  }, [setChat]);
+
   const onAssistantDelta = React.useCallback((text: string, done: boolean) => {
+    clearLoading();
     collapseReasoning();
     if (!typer.current.id) {
       const id = uid("a");
@@ -195,10 +212,11 @@ export function useAppController() {
       typer.current.target += text;
     }
     pump();
-  }, [collapseReasoning, pump, setChat]);
+  }, [clearLoading, collapseReasoning, pump, setChat]);
 
   const onReasoning = React.useCallback((text: string) => {
     if (!text) return;
+    clearLoading();
     flushTyper();
     if (!reasoner.current.id) {
       const id = uid("r");
@@ -207,10 +225,11 @@ export function useAppController() {
     }
     reasoner.current.target += text;
     pump();
-  }, [flushTyper, pump, setChat]);
+  }, [clearLoading, flushTyper, pump, setChat]);
 
   // ============ tool cards ============
   const onToolCall = React.useCallback((data: Record<string, unknown>) => {
+    clearLoading();
     flushTyper();
     collapseReasoning();
     let args: Record<string, unknown> | undefined;
@@ -249,6 +268,34 @@ export function useAppController() {
     setChat((c) => c.map((it) => (it.kind === "tool" && it.tool.status === "running" ? { ...it, tool: { ...it.tool, status: "done" } } : it)));
   }, [setChat]);
 
+  const onTurnEnd = React.useCallback((sid: string, data: Record<string, unknown>) => {
+    clearLoading();
+    setState((s) => ({ ...s, thinking: false }));
+    flushTyper();
+    finishPendingTools();
+    // Prefer the context snapshot carried on turn_end; fall back to a fetch.
+    const ctx = data.context as AppState["context"] | undefined;
+    if (ctx && typeof ctx.estimatedTokens === "number") {
+      setState((s) => ({ ...s, context: ctx }));
+    } else {
+      void refreshContext(sid);
+    }
+  }, [clearLoading, flushTyper, finishPendingTools, refreshContext]);
+
+  const onCapsule = React.useCallback((data: Record<string, unknown>) => {
+    clearLoading();
+    setState((s) => ({ ...s, thinking: false }));
+    flushTyper();
+    const question = (data.question as string) || "请选择";
+    const rawOpts = Array.isArray(data.options) ? (data.options as Record<string, unknown>[]) : [];
+    const options = rawOpts.map((o) => ({
+      label: (o.label as string) || (o.value as string) || "",
+      value: (o.value as string) || (o.label as string) || "",
+      editableHint: (o.editable_hint as string) || (o.editableHint as string) || undefined,
+    }));
+    setChat((c) => [...c, { kind: "capsule", id: uid("cap"), question, options, answered: false }]);
+  }, [clearLoading, flushTyper, setChat]);
+
   // ============ WebSocket ============
   const connectWS = React.useCallback((sid: string) => {
     const proto = location.protocol === "https:" ? "wss" : "ws";
@@ -265,6 +312,15 @@ export function useAppController() {
       try { msg = JSON.parse(ev.data); } catch { return; }
       const d = msg.data || {};
       switch (msg.type) {
+        case "turn_start":
+          showLoading();
+          break;
+        case "turn_end":
+          onTurnEnd(sid, d);
+          break;
+        case "capsule":
+          onCapsule(d);
+          break;
         case "message":
           onAssistantDelta((d.text as string) || "", !!d.done);
           if (d.done) { finishPendingTools(); void refreshContext(sid); }
@@ -282,11 +338,13 @@ export function useAppController() {
           if (typeof d.task_id === "string") ensureTaskPlaceholder(sid, d.task_id, (d.kind as TaskKind) || "generate");
           break;
         case "error":
+          clearLoading();
+          setState((s) => ({ ...s, thinking: false }));
           toast((d.message as string) || "发生未知错误");
           break;
       }
     };
-  }, [onAssistantDelta, onReasoning, onToolCall, onToolResult, ensureTaskPlaceholder, finishPendingTools, refreshContext, toast]);
+  }, [onAssistantDelta, onReasoning, onToolCall, onToolResult, ensureTaskPlaceholder, finishPendingTools, refreshContext, toast, showLoading, onTurnEnd, onCapsule, clearLoading]);
 
   // ============ actions ============
   const sendMessage = React.useCallback((text: string, ref?: string | string[]) => {
@@ -298,6 +356,7 @@ export function useAppController() {
       return;
     }
     setChat((c) => [...c, { kind: "user", id: uid("u"), text: value }]);
+    showLoading();
     const payload: Record<string, unknown> = { type: "user_message", text: value, lossless: stateRef.current.lossless };
     if (Array.isArray(ref)) {
       if (ref.length === 1) payload.ref = ref[0];
@@ -306,7 +365,26 @@ export function useAppController() {
       payload.ref = ref;
     }
     ws.send(JSON.stringify(payload));
-  }, [setChat, toast]);
+  }, [setChat, toast, showLoading]);
+
+  // capsuleSelect answers a clarify capsule: it marks the bubble answered, shows
+  // a user echo of the chosen/edited text, and sends it back over the WS so the
+  // agent continues the conversation. value is the (possibly edited) text.
+  const capsuleSelect = React.useCallback((capsuleId: string, value: string) => {
+    const text = value.trim();
+    if (!text) return;
+    const ws = wsRef.current;
+    if (!ws || ws.readyState !== WebSocket.OPEN) {
+      toast("连接尚未就绪，请稍候");
+      return;
+    }
+    setChat((c) =>
+      c.map((it) => (it.kind === "capsule" && it.id === capsuleId ? { ...it, answered: true } : it)),
+    );
+    setChat((c) => [...c, { kind: "user", id: uid("u"), text }]);
+    showLoading();
+    ws.send(JSON.stringify({ type: "capsule_select", text, lossless: stateRef.current.lossless }));
+  }, [setChat, toast, showLoading]);
 
   // ============ boot ============
   React.useEffect(() => {
@@ -505,6 +583,7 @@ export function useAppController() {
     state,
     setState,
     sendMessage,
+    capsuleSelect,
     refreshWorkspace,
     refreshContext,
     subscribeTask,

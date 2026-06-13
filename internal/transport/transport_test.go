@@ -3,6 +3,7 @@ package transport
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -201,4 +202,50 @@ var hubRef *Hub
 
 func hubReply(_ context.Context, sessionID string, msg Inbound) {
 	hubRef.Send(sessionID, Event{Type: EventMessage, Data: map[string]string{"echo": msg.Text}})
+}
+
+func TestInboundCapsuleSelectParsing(t *testing.T) {
+	cases := []struct {
+		name     string
+		raw      string
+		wantType string
+		wantText string
+		wantSel  []string
+	}{
+		{
+			name:     "edited free text",
+			raw:      `{"type":"capsule_select","text":"把背景换成黄昏的海边"}`,
+			wantType: "capsule_select",
+			wantText: "把背景换成黄昏的海边",
+		},
+		{
+			name:     "option value selection",
+			raw:      `{"type":"capsule_select","selection":["change_background"]}`,
+			wantType: "capsule_select",
+			wantSel:  []string{"change_background"},
+		},
+		{
+			name:     "selection with ref",
+			raw:      `{"type":"capsule_select","selection":["a"],"ref":"asset_1"}`,
+			wantType: "capsule_select",
+			wantSel:  []string{"a"},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var msg Inbound
+			if err := json.Unmarshal([]byte(tc.raw), &msg); err != nil {
+				t.Fatalf("unmarshal: %v", err)
+			}
+			if msg.Type != tc.wantType {
+				t.Errorf("type = %q, want %q", msg.Type, tc.wantType)
+			}
+			if msg.Text != tc.wantText {
+				t.Errorf("text = %q, want %q", msg.Text, tc.wantText)
+			}
+			if len(msg.Selection) != len(tc.wantSel) {
+				t.Errorf("selection = %v, want %v", msg.Selection, tc.wantSel)
+			}
+		})
+	}
 }

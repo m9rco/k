@@ -1,28 +1,6 @@
-# conversation-orchestration Specification
+# conversation-orchestration — Delta
 
-## Purpose
-TBD - created by archiving change add-asset-studio-mvp. Update Purpose after archive.
-## Requirements
-### Requirement: 意图识别与白名单分发
-系统 SHALL 仅就预设意图（换背景/换角色/换文案/切尺寸/生视频/物料爬取/下载打包）调用对应工具，其余请求礼貌拒绝并列出能力清单；工具调用的完成事件 SHALL 结构化携带其所产生长任务的标识，使前端能够即时定位并订阅该任务的进度，而不必等待本轮对话结束。
-
-#### Scenario: 命中白名单意图
-- **WHEN** 用户请求命中预设意图
-- **THEN** 系统调用对应工具并以事件形式反馈调用生命周期
-
-#### Scenario: 工具完成事件携带任务标识
-- **WHEN** 某工具调用成功并产生了一个异步长任务（生图/二次调整/生视频/爬取）
-- **THEN** 该工具的完成事件在结果数据中携带该任务的 id 及任务类型（如 generate/video/crawl）
-- **AND** 前端据此即时插入占位并订阅该任务的进度流
-
-#### Scenario: 非长任务工具不携带任务标识
-- **WHEN** 工具调用不产生异步长任务（如列举尺寸、纯裁剪即时返回）
-- **THEN** 其完成事件不携带长任务 id
-- **AND** 前端不会为其插入占位骨架
-
-#### Scenario: 白名单外请求被拒绝
-- **WHEN** 用户请求不在预设意图内
-- **THEN** 系统不调用任何工具并礼貌说明能力范围
+## MODIFIED Requirements
 
 ### Requirement: Context 滑动窗口管理
 系统 SHALL 对会话消息维护一个 token 预算受限的滑动窗口：超出预算时保留 system 提示与最近若干轮原文，对更早轮次做摘要压缩为单条 summary 消息，以防止 context 膨胀导致模型输出失真。token 估算 SHALL 对 CJK 字符与 ASCII 字节分别估算以降低中文场景的偏差。系统 SHALL 能在每轮结束时向前端下发当前窗口状态（估算 token、预算、是否已压缩）。
@@ -44,13 +22,6 @@ TBD - created by archiving change add-asset-studio-mvp. Update Purpose after arc
 #### Scenario: 窗口状态下发
 - **WHEN** 一轮对话结束
 - **THEN** 系统向前端提供当前窗口的估算 token、预算与是否已压缩的状态
-
-### Requirement: 模型服务端硬编码
-系统 SHALL 在服务端硬编码会话理解模型配置（主：claude-sonnet-4-6；测试：DeepSeek chat 经 OpenAI 兼容端点），用户不可选择或切换。
-
-#### Scenario: 用户不可切换模型
-- **WHEN** 用户尝试指定使用某个模型
-- **THEN** 系统忽略该指定并使用服务端配置的模型
 
 ### Requirement: 流式对话输出
 系统 SHALL 以**真·流式**方式消费模型供应商的流式响应，并将 agent 的回复增量与思考增量分别实时推送给前端，而非先获取完整结果再切块模拟。当模型返回思考内容（reasoning/thinking）时，系统 SHALL 将其作为独立于回答正文的增量类型推送；对于支持显式开启思考的会话供应商（如 Anthropic extended thinking），系统 SHALL 在请求中开启思考能力，使思考增量得以产生并下发，从而保证前端的思考块有内容可逐字渲染；当供应商流式解析失败时，系统 SHALL 降级为读取完整响应后补发，保证前端不空屏。此外，系统 SHALL 在收到用户消息后、调用模型之前立即发出一个"轮开始"信号，并在该轮结束（含错误或产出反问）时发出"轮结束"信号，使前端的 loading 态与模型首个增量解耦。
@@ -84,69 +55,7 @@ TBD - created by archiving change add-asset-studio-mvp. Update Purpose after arc
 - **THEN** 系统发出"轮结束"信号并携带本轮是否调用工具、是否产出 capsule 的元信息
 - **AND** 前端据此结束 loading 态
 
-### Requirement: 裁剪工具按唯一 id 寻址
-Agent 的裁剪工具（`crop_to_sizes`）SHALL 以尺寸的**全局唯一 id 列表**作为目标规格入参（而非尺寸名称），以便在 23+ 渠道、上百条尺寸、存在跨渠道同名/同尺寸的目录中精确解析每个目标规格。当请求的 id 不存在或对应尺寸不可由裁剪产出时，工具 SHALL 返回明确错误。
-
-#### Scenario: 按 id 裁剪
-- **WHEN** Agent 调用裁剪工具并传入一组尺寸 id（可跨渠道）
-- **THEN** 系统按 id 精确解析各目标规格并产出对应裁剪图
-- **AND** 各产物作为新的工作区资产回填
-
-#### Scenario: 无效或不可裁剪 id 报错
-- **WHEN** Agent 传入不存在的尺寸 id，或对应尺寸标记为不可裁剪产出
-- **THEN** 工具不产出该尺寸的图片
-- **AND** 返回可读错误，说明哪个 id 无效或不可裁剪
-
-### Requirement: 尺寸目录列举工具
-Agent 的尺寸列举工具（`list_platform_sizes`）SHALL 返回 **渠道 → 素材类型 → 尺寸（含唯一 id 与约束元数据）** 的三层结构，并 SHALL 支持可选的渠道过滤参数，使 Agent 能按需获取单个渠道的尺寸而不必将整个目录灌入模型 context。
-
-#### Scenario: 列举全部渠道目录
-- **WHEN** Agent 不带过滤参数调用列举工具
-- **THEN** 系统返回三层目录结构，每个尺寸含 id、宽高、方向及可用的约束元数据
-
-#### Scenario: 按渠道过滤列举
-- **WHEN** Agent 带某个渠道标识调用列举工具
-- **THEN** 系统仅返回该渠道下的素材类型与尺寸
-- **AND** 避免将其余渠道的上百条尺寸纳入上下文
-
-### Requirement: 上下文清理
-系统 SHALL 允许用户主动重置当前会话的 context 滑动窗口：清除累积的对话历史（保留 system 提示），使用户可以从干净的上下文开始新话题。重置 SHALL 仅作用于当前会话，不影响其工作区资产。
-
-#### Scenario: 重置上下文
-- **WHEN** 用户触发上下文清理
-- **THEN** 系统清除该会话累积的对话历史，仅保留 system 提示
-- **AND** 后续对话从干净的上下文开始
-
-#### Scenario: 清理不影响工作区
-- **WHEN** 用户清理上下文
-- **THEN** 工作区中已产出的资产保持不变
-
-### Requirement: 提示词优化端点
-系统 SHALL 提供一个提示词优化端点 `POST /api/session/{id}/prompt/optimize`，使用服务端硬编码的会话理解模型，将用户口语化的输入改写为结构化、可直接用于生图的提示词文本。该端点 SHALL 仅返回改写后的文本，SHALL NOT 调用任何工具、SHALL NOT 触发素材产出、SHALL NOT 写入或污染会话的滑动窗口 context。改写指令 SHALL 把用户文本作为待改写的数据处理，不将其当作可执行指令（prompt-injection 防护）。
-
-#### Scenario: 口语化输入改写为提示词
-- **WHEN** 客户端以 `{ "text": "<口语化描述>" }` 调用该端点
-- **THEN** 系统用会话理解模型将其改写为结构化生图提示词
-- **AND** 仅返回 `{ "optimized": "<提示词文本>" }`，不触发生图或任何工具调用
-
-#### Scenario: 不污染会话上下文
-- **WHEN** 用户调用提示词优化端点
-- **THEN** 该次改写不写入会话滑动窗口
-- **AND** 后续正常对话的 context 不受其影响
-
-#### Scenario: 空输入直接返回
-- **WHEN** 请求文本为空或仅含空白
-- **THEN** 系统不调用模型并返回空/原文，不报错
-
-#### Scenario: 模型不可用时报错
-- **WHEN** 会话理解模型不可用或超时
-- **THEN** 系统返回明确错误状态
-- **AND** 不产生任何素材、不改动会话状态
-
-#### Scenario: 注入防护
-- **WHEN** 用户输入中包含试图改变系统行为的指令性文本（如"忽略以上指令"）
-- **THEN** 系统将其视为待改写的素材描述数据处理，仅产出生图提示词
-- **AND** 不执行该文本所述的任何操作
+## ADDED Requirements
 
 ### Requirement: 意图澄清与结构化反问
 当用户请求命中能力白名单但**缺少安全调用工具所必需的信息**（例如未指明要操作的图、未说明改成什么、未给出目标尺寸/平台）时，系统 SHALL 通过澄清工具发起一次结构化反问，而不是猜测调用工具或仅以文字泛泛确认。反问 SHALL 包含一句问题与 2-4 个具体选项，每个选项 SHALL 同时支持"点击直接选择"与"作为可编辑文本由用户改写后提交"。系统 SHALL 能接住用户对反问的选择或改写输入，并据此续接同一会话的后续处理。
@@ -190,4 +99,3 @@ Agent 的尺寸列举工具（`list_platform_sizes`）SHALL 返回 **渠道 → 
 #### Scenario: 既有约束保留
 - **WHEN** 构建 system prompt
 - **THEN** 同轮工具调用、白名单礼貌拒绝、未配置告警、引用 id 使用、prompt 注入防护、简体中文回复等既有约束均在对应层中保留
-

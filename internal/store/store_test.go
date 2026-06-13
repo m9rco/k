@@ -208,3 +208,46 @@ func TestDeleteSessionAssetsAndUnfinishedTasks(t *testing.T) {
 		t.Error("completed task should be kept")
 	}
 }
+
+func TestMessagesInsertAndListBySession(t *testing.T) {
+	s := newTestStore(t)
+	now := time.Now().UTC().Truncate(time.Second)
+	_ = s.UpsertSession(SessionRecord{ID: "s", Fingerprint: "fp", CreatedAt: now, LastSeenAt: now})
+	_ = s.UpsertSession(SessionRecord{ID: "other", Fingerprint: "fp", CreatedAt: now, LastSeenAt: now})
+
+	// Insert in chronological order; ListBySession must return oldest-first.
+	_ = s.InsertMessage(MessageRecord{ID: "m1", SessionID: "s", Role: "user", Content: "把背景换成淡紫色", CreatedAt: now})
+	_ = s.InsertMessage(MessageRecord{ID: "m2", SessionID: "s", Role: "assistant", Content: "好的，正在处理。", ToolRefs: "edit_image:asset_x", CreatedAt: now.Add(time.Second)})
+	_ = s.InsertMessage(MessageRecord{ID: "z1", SessionID: "other", Role: "user", Content: "别的会话", CreatedAt: now})
+
+	msgs, err := s.ListMessages("s")
+	if err != nil {
+		t.Fatalf("ListMessages: %v", err)
+	}
+	if len(msgs) != 2 {
+		t.Fatalf("expected 2 messages for session, got %d", len(msgs))
+	}
+	if msgs[0].ID != "m1" || msgs[1].ID != "m2" {
+		t.Errorf("messages not oldest-first: %s, %s", msgs[0].ID, msgs[1].ID)
+	}
+	if msgs[0].Role != "user" || msgs[0].Content != "把背景换成淡紫色" {
+		t.Errorf("unexpected first message: %+v", msgs[0])
+	}
+	if msgs[1].ToolRefs != "edit_image:asset_x" {
+		t.Errorf("tool refs not persisted: %q", msgs[1].ToolRefs)
+	}
+	// Session isolation.
+	other, _ := s.ListMessages("other")
+	if len(other) != 1 || other[0].ID != "z1" {
+		t.Errorf("session isolation broken: %+v", other)
+	}
+
+	// A session with no history returns an empty slice, not an error.
+	empty, err := s.ListMessages("nobody")
+	if err != nil {
+		t.Fatalf("ListMessages empty: %v", err)
+	}
+	if len(empty) != 0 {
+		t.Errorf("expected no messages, got %d", len(empty))
+	}
+}

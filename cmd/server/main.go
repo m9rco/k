@@ -141,7 +141,7 @@ func run() error {
 	dlSvc.RegisterRoutes(mux)
 
 	// Conversation orchestration: Eino ReAct agent over the whitelist of tools.
-	orch := agent.NewOrchestrator(cfg, genSvc, cropSvc, vidSvc, crawlSvc, hub)
+	orch := agent.NewOrchestrator(cfg, genSvc, cropSvc, vidSvc, crawlSvc, hub, st, id.New)
 	hub.SetHandler(func(ctx context.Context, sessionID string, msg transport.Inbound) {
 		switch msg.Type {
 		case "user_message":
@@ -159,6 +159,27 @@ func run() error {
 				text = "[asset " + msg.Ref + "] " + text
 			}
 			// Lossless compression defaults to on; an explicit false disables it.
+			lossless := msg.Lossless == nil || *msg.Lossless
+			if _, err := orch.Handle(ctx, sessionID, text, lossless); err != nil {
+				hub.Send(sessionID, transport.Event{
+					Type: transport.EventError,
+					Data: map[string]string{"message": err.Error()},
+				})
+			}
+		case "capsule_select":
+			// A reply to a clarify capsule: prefer the (possibly edited) free text,
+			// else fall back to the chosen option value(s). Feed it back into the
+			// agent as the next user turn so the conversation continues seamlessly.
+			text := strings.TrimSpace(msg.Text)
+			if text == "" && len(msg.Selection) > 0 {
+				text = strings.Join(msg.Selection, ", ")
+			}
+			if text == "" {
+				return
+			}
+			if msg.Ref != "" {
+				text = "[asset " + msg.Ref + "] " + text
+			}
 			lossless := msg.Lossless == nil || *msg.Lossless
 			if _, err := orch.Handle(ctx, sessionID, text, lossless); err != nil {
 				hub.Send(sessionID, transport.Event{

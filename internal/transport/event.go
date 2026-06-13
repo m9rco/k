@@ -23,6 +23,16 @@ const (
 	EventCapsule    EventType = "capsule"     // server asks user to pick (e.g. sizes)
 	EventError      EventType = "error"       // recoverable error notice (toast)
 
+	// EventTurnStart is emitted the instant a user message is accepted, before
+	// the model is called, so the frontend can enter a loading state without
+	// waiting for the first model increment (which can lag by seconds).
+	EventTurnStart EventType = "turn_start"
+	// EventTurnEnd is emitted when a turn finishes (success, error, or a clarify
+	// capsule was produced). Its payload carries turn-end metadata (toolUsed,
+	// hasCapsule) and the latest context window state so the frontend can close
+	// the loading state and refresh the context indicator.
+	EventTurnEnd EventType = "turn_end"
+
 	// EventTaskCreated is broadcast over the conversation (WS) channel the moment
 	// a long task is created, so the workspace can show an immediate placeholder
 	// and subscribe to its SSE progress without waiting for the agent turn to end.
