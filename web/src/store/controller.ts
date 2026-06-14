@@ -556,6 +556,35 @@ export function useAppController() {
     setState((s) => ({ ...s, lossless: v }));
   }, []);
 
+  // loadModels fetches the per-scene catalog + current selection for the picker.
+  const loadModels = React.useCallback(async () => {
+    const sid = stateRef.current.sessionId;
+    if (!sid) return;
+    try {
+      const m = await api.getModels(sid);
+      setState((s) => ({ ...s, models: { catalog: m.catalog || {}, selected: m.selected || {} } }));
+    } catch (e) {
+      toast("加载模型列表失败：" + (e as Error).message);
+    }
+  }, [toast]);
+
+  // switchModel sets the session's model for a scene; the chat scene triggers a
+  // self-introduction that streams in over the normal chat channel. The selection
+  // is updated optimistically.
+  const switchModel = React.useCallback(async (scene: string, model: string) => {
+    const sid = stateRef.current.sessionId;
+    if (!sid) return;
+    try {
+      await api.switchModel(sid, scene, model);
+      setState((s) => ({
+        ...s,
+        models: s.models ? { ...s.models, selected: { ...s.models.selected, [scene]: model } } : s.models,
+      }));
+    } catch (e) {
+      toast("切换模型失败：" + (e as Error).message);
+    }
+  }, [toast]);
+
   const removeAsset = React.useCallback(async (assetId: string) => {
     const sid = stateRef.current.sessionId;
     try {
@@ -698,6 +727,8 @@ export function useAppController() {
     selectAll,
     clearSelection,
     setLossless,
+    loadModels,
+    switchModel,
     removeAsset,
     removeSelected,
     removeTask,

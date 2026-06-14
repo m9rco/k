@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 
+	"gameasset/internal/config"
 	"gameasset/internal/crawl"
 	"gameasset/internal/crop"
 	"gameasset/internal/generation"
@@ -32,6 +33,12 @@ type ToolDeps struct {
 	// Lossless toggles program-side PNG lossless optimization of image products
 	// (default true; set per request from the frontend compression switch).
 	Lossless bool
+	// ImageOverride / TextToImageOverride / VideoOverride carry the session's
+	// per-scene model selection. Nil means "use the service's default provider".
+	// They are resolved per turn from the usermodel manager.
+	ImageOverride       *config.ImageProviderConfig
+	TextToImageOverride *config.ImageProviderConfig
+	VideoOverride       *config.ImageProviderConfig
 	// Clarify, when set, is invoked by the clarify_intent tool to surface a
 	// structured clarifying question (capsule) to the user. Injected by the
 	// orchestrator so tools.go stays free of the transport layer (design D1).
@@ -94,6 +101,7 @@ func (d ToolDeps) newEditTool() (tool.InvokableTool, error) {
 				SourceAssetID:     a.SourceAssetID,
 				ReferenceAssetIDs: a.ReferenceAssetIDs,
 				Lossless:          d.Lossless,
+				ProviderOverride:  d.ImageOverride,
 				Slots: generation.Slots{
 					Kind:             kind,
 					CharacterDesc:    a.CharacterDesc,
@@ -138,9 +146,10 @@ func (d ToolDeps) newIconTool() (tool.InvokableTool, error) {
 				return editResult{}, fmt.Errorf("generate_icon requires source_asset_id")
 			}
 			taskID, err := d.Generation.Start(ctx, generation.GenerateParams{
-				SessionID:     d.SessionID,
-				SourceAssetID: a.SourceAssetID,
-				Lossless:      d.Lossless,
+				SessionID:        d.SessionID,
+				SourceAssetID:    a.SourceAssetID,
+				Lossless:         d.Lossless,
+				ProviderOverride: d.ImageOverride,
 				Slots: generation.Slots{
 					Kind:       generation.EditIcon,
 					IconDesc:   a.Desc,
@@ -178,8 +187,9 @@ func (d ToolDeps) newTextToImageTool() (tool.InvokableTool, error) {
 		func(ctx context.Context, a textToImageArgs) (editResult, error) {
 			log.Printf("generate_image_from_text: invoked desc=%q size=%dx%d", a.Desc, a.Width, a.Height)
 			taskID, err := d.TextToImage.Start(ctx, generation.GenerateParams{
-				SessionID: d.SessionID,
-				Lossless:  d.Lossless,
+				SessionID:        d.SessionID,
+				Lossless:         d.Lossless,
+				ProviderOverride: d.TextToImageOverride,
 				Slots: generation.Slots{
 					Kind:            generation.EditTextToImage,
 					TextToImageDesc: a.Desc,
@@ -327,9 +337,10 @@ func (d ToolDeps) newVideoTool() (tool.InvokableTool, error) {
 				return videoResult{}, fmt.Errorf("图生视频暂未配置，暂不可用")
 			}
 			taskID, err := d.Video.Start(ctx, video.Params{
-				SessionID:     d.SessionID,
-				SourceAssetID: a.SourceAssetID,
-				Motion:        a.Motion,
+				SessionID:        d.SessionID,
+				SourceAssetID:    a.SourceAssetID,
+				Motion:           a.Motion,
+				ProviderOverride: d.VideoOverride,
 			})
 			if err != nil {
 				return videoResult{}, err

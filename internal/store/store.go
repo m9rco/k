@@ -428,3 +428,49 @@ func (s *Store) DeleteMessages(sessionID string) error {
 	}
 	return nil
 }
+
+// --- Preferences (per-session key/value: model selections, etc.) ---
+
+// prefID derives a stable primary key from (session, key) so SetPreference is a
+// clean upsert (one row per session+key).
+func prefID(sessionID, key string) string { return sessionID + ":" + key }
+
+// SetPreference upserts a per-session preference value. An empty value clears
+// the entry (so callers can "unset" back to the server default).
+func (s *Store) SetPreference(sessionID, key, value string) error {
+	if value == "" {
+		_, err := s.db.Exec(`DELETE FROM preferences WHERE session_id = ? AND key = ?`, sessionID, key)
+		if err != nil {
+			return fmt.Errorf("clear preference: %w", err)
+		}
+		return nil
+	}
+	_, err := s.db.Exec(`
+		INSERT INTO preferences (id, session_id, key, value, created_at)
+		VALUES (?, ?, ?, ?, ?)
+		ON CONFLICT(id) DO UPDATE SET value = excluded.value`,
+		prefID(sessionID, key), sessionID, key, value, time.Now())
+	if err != nil {
+		return fmt.Errorf("set preference: %w", err)
+	}
+	return nil
+}
+
+// GetPreferences returns all preference key/value pairs for a session. An absent
+// session yields an empty (non-nil) map.
+func (s *Store) GetPreferences(sessionID string) (map[string]string, error) {
+	rows, err := s.db.Query(`SELECT key, value FROM preferences WHERE session_id = ?`, sessionID)
+	if err != nil {
+		return nil, fmt.Errorf("get preferences: %w", err)
+	}
+	defer rows.Close()
+	out := make(map[string]string)
+	for rows.Next() {
+		var k, v string
+		if err := rows.Scan(&k, &v); err != nil {
+			return nil, fmt.Errorf("scan preference: %w", err)
+		}
+		out[k] = v
+	}
+	return out, rows.Err()
+}

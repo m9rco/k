@@ -125,6 +125,27 @@ export function optimizePrompt(sid: string, text: string) {
   }).then((r) => r.optimized);
 }
 
+// ModelEntry is defined in lib/types; re-exported here for callers of the API.
+export type { ModelEntry } from "@/lib/types";
+
+// ModelsResponse: catalog grouped by scene + the session's current selection.
+export interface ModelsResponse {
+  catalog: Record<string, import("@/lib/types").ModelEntry[]>;
+  selected: Record<string, string>;
+}
+
+export function getModels(sid: string) {
+  return api<ModelsResponse>(`/api/session/${sid}/models`);
+}
+
+export function switchModel(sid: string, scene: string, model: string) {
+  return api<{ status: string }>(`/api/session/${sid}/models`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ scene, model }),
+  });
+}
+
 export function downloadSingleUrl(sid: string, assetId: string) {
   return `/api/session/${sid}/assets/${assetId}/download`;
 }

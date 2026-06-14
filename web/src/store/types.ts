@@ -1,4 +1,4 @@
-import type { Asset, Task, ToolCardData } from "@/lib/types";
+import type { Asset, Task, ToolCardData, ModelEntry } from "@/lib/types";
 
 // Chat log is an ordered list of items: user/assistant bubbles, reasoning
 // blocks, and tool cards. Each carries a stable id for keyed rendering.
@@ -46,6 +46,9 @@ export interface AppState {
   // turn_end, or reordered/interrupt-sent by the user (Cursor-style).
   queue: QueuedMessage[];
   context: { estimatedTokens: number; budget: number; compressed: boolean } | null;
+  // models holds the per-scene catalog + current selection; loaded lazily when
+  // the model picker opens. null until first fetched.
+  models: { catalog: Record<string, ModelEntry[]>; selected: Record<string, string> } | null;
 }
 
 export const initialState: AppState = {
@@ -59,6 +62,7 @@ export const initialState: AppState = {
   thinking: false,
   queue: [],
   context: null,
+  models: null,
 };
 
 let seq = 0;

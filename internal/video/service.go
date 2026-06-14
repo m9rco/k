@@ -16,6 +16,7 @@ import (
 	"sync"
 	"time"
 
+	"gameasset/internal/config"
 	"gameasset/internal/store"
 	"gameasset/internal/transport"
 )
@@ -60,6 +61,10 @@ type Params struct {
 	SourceAssetID string
 	// Motion is the user's action description (sanitized before prompt assembly).
 	Motion string
+	// ProviderOverride, when set, makes this task use a specific provider/model
+	// (the caller's per-session selection) instead of the Service default. Fixed
+	// at Start so switching models mid-flight does not affect an in-progress task.
+	ProviderOverride *config.ImageProviderConfig
 }
 
 // Service runs image-to-video tasks.
@@ -198,7 +203,13 @@ func (s *Service) run(ctx context.Context, taskID string, p Params) {
 	s.progress(taskID, p.SessionID, 40)
 
 	prompt := buildMotionPrompt(p.Motion)
-	out, err := s.prov.Generate(ctx, Request{Prompt: prompt, ImageURL: imgURL})
+	// Pick the provider: a per-session override fixes a specific provider/model
+	// for this task; otherwise use the Service default. Fixed here at run time.
+	prov := s.prov
+	if p.ProviderOverride != nil {
+		prov = NewProvider(*p.ProviderOverride)
+	}
+	out, err := prov.Generate(ctx, Request{Prompt: prompt, ImageURL: imgURL})
 	if err != nil {
 		s.fail(taskID, p.SessionID, err.Error())
 		return

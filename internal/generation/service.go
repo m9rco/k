@@ -15,6 +15,7 @@ import (
 	_ "image/jpeg" // .
 	_ "image/png"  // .
 
+	"gameasset/internal/config"
 	"gameasset/internal/crop"
 	"gameasset/internal/imageopt"
 	"gameasset/internal/store"
@@ -103,6 +104,11 @@ type GenerateParams struct {
 	// means let the provider decide.
 	Width  int
 	Height int
+	// ProviderOverride, when set, makes this task use a specific provider/model
+	// (the caller's per-session selection) instead of the Service default. The
+	// task fixes its provider at Start, so switching models mid-flight does not
+	// affect an in-progress task.
+	ProviderOverride *config.ImageProviderConfig
 }
 
 // primaryAndExtras resolves the effective reference list: the primary asset id
@@ -295,7 +301,14 @@ func (s *Service) run(ctx context.Context, taskID string, p GenerateParams) {
 
 	genStart := time.Now()
 	log.Printf("gen.run: task=%s calling provider.Generate (prompt %d chars, refs=%d)", taskID, len(prompt), len(extraImages))
-	out, err := s.gen.Generate(ctx, Request{
+	// Pick the generator: a per-session model override fixes a specific provider
+	// for this task; otherwise use the Service default. Resolved here at run time
+	// so the choice is fixed for the task's lifetime.
+	gen := s.gen
+	if p.ProviderOverride != nil {
+		gen = NewProvider(*p.ProviderOverride)
+	}
+	out, err := gen.Generate(ctx, Request{
 		Prompt:          prompt,
 		SourceImage:     srcBytes,
 		SourceMime:      srcMime,

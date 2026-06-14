@@ -231,6 +231,33 @@ func run() error {
 		writeJSON(w, map[string]string{"optimized": optimized})
 	})
 
+	// Per-session model selection: list the available catalog (grouped by scene)
+	// plus the session's current choices, and switch a scene's model. Switching the
+	// chat model triggers a brief self-introduction by the new model.
+	mux.HandleFunc("GET /api/session/{id}/models", func(w http.ResponseWriter, r *http.Request) {
+		catalog, selected, err := orch.AvailableModels(r.PathValue("id"))
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		writeJSON(w, map[string]any{"catalog": catalog, "selected": selected})
+	})
+	mux.HandleFunc("POST /api/session/{id}/models", func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Scene string `json:"scene"`
+			Model string `json:"model"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "invalid request body", http.StatusBadRequest)
+			return
+		}
+		if err := orch.SwitchModel(r.PathValue("id"), config.ModelScene(req.Scene), req.Model); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		writeJSON(w, map[string]string{"status": "ok"})
+	})
+
 	// Embedded frontend (serves index.html and static assets).
 	webFS, err := web.FS()
 	if err != nil {

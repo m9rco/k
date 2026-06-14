@@ -29,6 +29,7 @@ import (
 	"gameasset/internal/generation"
 	"gameasset/internal/store"
 	"gameasset/internal/transport"
+	"gameasset/internal/usermodel"
 	"gameasset/internal/video"
 )
 
@@ -45,6 +46,8 @@ func withSession(ctx context.Context, sessionID string) context.Context {
 // only reference ids (design D3).
 type Orchestrator struct {
 	model      *chatModel
+	cfg        *config.Config
+	models     *usermodel.Manager
 	gen        *generation.Service
 	textToImg  *generation.Service
 	crop       *crop.Service
@@ -66,9 +69,9 @@ type Orchestrator struct {
 	turnMu map[string]*sync.Mutex
 }
 
-// NewOrchestrator builds the orchestrator from config and backing services.
-// The conversation model is selected from config (primary unless the test
-// model is enabled); users cannot switch it (requirement: model hardcoded).
+// NewOrchestrator builds the orchestrator from config and backing services. The
+// default conversation model comes from config; each session may override it
+// (and the per-scene generation models) via the usermodel manager.
 func NewOrchestrator(cfg *config.Config, gen *generation.Service, cr *crop.Service, vid *video.Service, cw *crawl.Service, hub *transport.Hub, st *store.Store, newID func(string) string) *Orchestrator {
 	mc := cfg.ChatPrimary
 	if cfg.UseTestModel {
@@ -76,6 +79,8 @@ func NewOrchestrator(cfg *config.Config, gen *generation.Service, cr *crop.Servi
 	}
 	return &Orchestrator{
 		model:      newChatModel(mc),
+		cfg:        cfg,
+		models:     usermodel.NewManager(cfg, st),
 		gen:        gen,
 		crop:       cr,
 		video:      vid,
@@ -95,6 +100,108 @@ func NewOrchestrator(cfg *config.Config, gen *generation.Service, cr *crop.Servi
 // left unset, the generate_image_from_text tool stays out of the whitelist and
 // the agent politely declines pure text-to-image requests.
 func (o *Orchestrator) SetTextToImage(svc *generation.Service) { o.textToImg = svc }
+
+// AvailableModels returns the server-authoritative, credential-filtered model
+// catalog grouped by scene, plus the session's current selection per scene.
+func (o *Orchestrator) AvailableModels(sessionID string) (map[config.ModelScene][]config.CatalogEntry, map[config.ModelScene]string, error) {
+	overrides, err := o.models.Overrides(sessionID)
+	if err != nil {
+		return nil, nil, err
+	}
+	return o.cfg.AvailableModelsByScene(), overrides, nil
+}
+
+// SwitchModel records a session's model selection for a scene (validated against
+// the available catalog). When the chat model is switched it kicks off a brief
+// self-introduction by the new model so the user immediately perceives the
+// change; switching a generation model is silent. The intro runs on its own
+// goroutine, serialized behind the session turn lock, so it never interleaves
+// with an in-flight turn and can be interrupted by the user's next message.
+func (o *Orchestrator) SwitchModel(sessionID string, scene config.ModelScene, modelID string) error {
+	if err := o.models.Set(sessionID, scene, modelID); err != nil {
+		return err
+	}
+	if scene == config.SceneChat {
+		go o.selfIntroduce(sessionID)
+	}
+	return nil
+}
+
+// selfIntroduce streams a short self-introduction from the session's currently
+// selected chat model over the live channel as a normal turn (turn_start →
+// message increments → turn_end). It reuses the per-session turn lock so it does
+// not overlap a real turn.
+func (o *Orchestrator) selfIntroduce(sessionID string) {
+	lock := o.sessionTurnLock(sessionID)
+	lock.Lock()
+	defer lock.Unlock()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	o.mu.Lock()
+	o.cancels[sessionID] = cancel
+	o.mu.Unlock()
+	defer func() {
+		o.mu.Lock()
+		if o.cancels[sessionID] != nil {
+			o.cancels[sessionID] = nil
+		}
+		o.mu.Unlock()
+		cancel()
+	}()
+
+	mc, _ := o.models.ChatModel(sessionID)
+	model := newChatModel(mc)
+	intro := []*schema.Message{
+		schema.SystemMessage("你是这个游戏宣发素材生成助手刚切换到的模型。用一到两句简体中文向用户做个简短自我介绍:说明你是哪个模型,并一句话点出你能帮忙做的事(生图/裁剪/生视频/文生图等宣发素材操作)。语气轻松专业,不要罗列、不要用 markdown。"),
+		schema.UserMessage("请做个简短的自我介绍。"),
+	}
+
+	o.emit(sessionID, transport.Event{Type: transport.EventTurnStart, SessionID: sessionID})
+
+	stream, err := model.Stream(ctx, intro)
+	if err != nil {
+		o.emitTurnEnd(sessionID, turnEndInfo{replyEmpty: true})
+		return
+	}
+	defer stream.Close()
+
+	var sb strings.Builder
+	for {
+		chunk, err := stream.Recv()
+		if err != nil {
+			break
+		}
+		if chunk == nil || chunk.Content == "" {
+			continue
+		}
+		sb.WriteString(chunk.Content)
+		o.emit(sessionID, transport.Event{
+			Type:      transport.EventMessage,
+			SessionID: sessionID,
+			Data:      map[string]any{"text": chunk.Content, "done": false},
+		})
+	}
+
+	reply := sb.String()
+	if ctx.Err() != nil {
+		o.emitTurnEnd(sessionID, turnEndInfo{replyEmpty: strings.TrimSpace(reply) == "", cancelled: true})
+		return
+	}
+	replyEmpty := strings.TrimSpace(reply) == ""
+	if !replyEmpty {
+		// Record the intro as a normal assistant turn so the conversation context
+		// stays coherent for subsequent turns.
+		o.window(sessionID).Append(schema.AssistantMessage(reply, nil))
+		o.persist(sessionID, "assistant", reply)
+		o.emit(sessionID, transport.Event{
+			Type:      transport.EventMessage,
+			SessionID: sessionID,
+			Data:      map[string]any{"text": reply, "done": true},
+		})
+	}
+	o.emitTurnEnd(sessionID, turnEndInfo{replyEmpty: replyEmpty})
+}
 
 // sessionTurnLock returns the per-session turn mutex (creating on first use), so
 // concurrent Handle calls for the same session serialize rather than interleave.
@@ -233,14 +340,34 @@ func (o *Orchestrator) Handle(ctx context.Context, sessionID, userText string, l
 	}
 
 	deps := ToolDeps{Generation: o.gen, TextToImage: o.textToImg, Crop: o.crop, Video: o.video, Crawl: o.crawl, SessionID: sessionID, Lossless: lossless, Clarify: clarify}
+	// Per-session generation model overrides (image / text-to-image / video).
+	// Zero value => the tool uses the service default provider.
+	if pc, ok := o.models.ImageModel(sessionID, config.SceneImage); ok {
+		deps.ImageOverride = &pc
+	}
+	if pc, ok := o.models.ImageModel(sessionID, config.SceneTextToImage); ok {
+		deps.TextToImageOverride = &pc
+	}
+	if pc, ok := o.models.ImageModel(sessionID, config.SceneVideo); ok {
+		deps.VideoOverride = &pc
+	}
 	tools, err := deps.Tools()
 	if err != nil {
 		o.emitTurnEnd(sessionID, turnEndInfo{replyEmpty: true})
 		return "", fmt.Errorf("build tools: %w", err)
 	}
 
+	// Resolve the chat model for THIS turn from the session's selection (falling
+	// back to the server default). Constructing a chatModel is cheap (config +
+	// http client), and building it per turn means an in-flight turn keeps its own
+	// model instance while the next turn picks up a freshly switched one.
+	turnModel := o.model
+	if mc, overridden := o.models.ChatModel(sessionID); overridden {
+		turnModel = newChatModel(mc)
+	}
+
 	ra, err := react.NewAgent(ctx, &react.AgentConfig{
-		ToolCallingModel: o.model,
+		ToolCallingModel: turnModel,
 		ToolsConfig:      compose.ToolsNodeConfig{Tools: tools},
 		MaxStep:          12,
 		// The default checker only inspects the FIRST non-empty stream chunk for

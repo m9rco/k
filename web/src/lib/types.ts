@@ -84,3 +84,12 @@ export interface ToolCardData {
   summary?: string;
   error?: string;
 }
+
+// ModelEntry is one selectable model in the per-session model catalog.
+export interface ModelEntry {
+  id: string;
+  displayName: string;
+  scene: string;
+  vendor: string;
+  iconKey: string;
+}
