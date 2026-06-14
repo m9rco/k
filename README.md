@@ -79,6 +79,27 @@ go vet ./...
 
 各能力以 spec 的 Scenario 为验收基准（见 `openspec/changes/add-asset-studio-mvp/specs/`）。
 
+## 开发辅助 · CodeGraph 索引
+
+本仓库使用 [CodeGraph](https://github.com/colbymchenry/codegraph) 为 AI 编码代理（Claude Code 等）预建代码知识图谱（符号关系 / 调用图 / 结构），让代理查图而非反复扫文件。索引落在 `.codegraph/codegraph.db`，**纯本地、不联网、无需密钥**，且按机器生成——该 `.db` 已被 `.codegraph/.gitignore` 排除，不入库。
+
+```bash
+# 1. 安装 CLI（macOS / Linux）
+curl -fsSL https://raw.githubusercontent.com/colbymchenry/codegraph/main/install.sh | sh
+
+# 2. 接入本机的 AI 代理（自动探测并配置）
+codegraph install
+
+# 3. 在本项目根目录建索引（生成 .codegraph/ 并构建图谱）
+codegraph init
+
+# 升级 / 卸载
+codegraph upgrade
+codegraph uninstall
+```
+
+克隆仓库后各自跑一次 `codegraph init` 即可；索引数据按机器本地生成，不共享、不提交。
+
 ## 已实现 / 后续
 
 **MVP 已实现**：session、对话编排（意图白名单 + 滑动窗口）、生图（颜色适配 + 注入防护 + 主备切换）、裁剪、工作区（占位/状态/部分重试）、下载/打包、实时传输、嵌入式前端。
