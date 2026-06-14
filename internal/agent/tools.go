@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"sync"
 	"time"
 
 	"gameasset/internal/config"
@@ -52,6 +53,58 @@ type ToolDeps struct {
 	// structured clarifying question (capsule) to the user. Injected by the
 	// orchestrator so tools.go stays free of the transport layer (design D1).
 	Clarify CapsuleEmitter
+	// dedup guards against the model emitting the SAME async-task tool call twice
+	// in one turn (parallel tool_calls), which would otherwise start two
+	// duplicate tasks and concatenate two identical acknowledgments into one
+	// bubble. Scoped per turn (one ToolDeps is built per Handle), nil-safe.
+	dedup *turnCallGuard
+}
+
+// turnCallGuard records which (tool, args) signatures have already executed in
+// the current turn so a duplicate call can be short-circuited. Concurrency-safe
+// because the ReAct framework may dispatch parallel tool calls on separate
+// goroutines.
+type turnCallGuard struct {
+	mu   sync.Mutex
+	seen map[string]struct{}
+}
+
+func newTurnCallGuard() *turnCallGuard {
+	return &turnCallGuard{seen: make(map[string]struct{})}
+}
+
+// firstSeen atomically records sig and reports whether this is its first
+// occurrence this turn. A nil guard always reports true (no dedup).
+func (g *turnCallGuard) firstSeen(sig string) bool {
+	if g == nil {
+		return true
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if _, ok := g.seen[sig]; ok {
+		return false
+	}
+	g.seen[sig] = struct{}{}
+	return true
+}
+
+// statusDuplicate marks a result produced by a duplicate same-turn tool call
+// that was suppressed (no task started). The friendly marshalers map it to an
+// empty acknowledgment so no second bubble appears.
+const statusDuplicate = "duplicate"
+
+// argSig builds a stable signature for a tool's args struct so two identical
+// same-turn calls collapse to one. It marshals to JSON (field order is stable
+// per struct). Calls that differ in any arg (including await_result) get
+// distinct signatures and both run — only byte-identical args are treated as a
+// duplicate, which is exactly the reported failure (the model emitting the same
+// call twice).
+func argSig(a any) string {
+	b, err := json.Marshal(a)
+	if err != nil {
+		return fmt.Sprintf("%#v", a)
+	}
+	return string(b)
 }
 
 // ClarifyOption is one selectable answer to a clarify_intent question. Label is
@@ -106,9 +159,15 @@ func asyncMarshal(standaloneFriendly string) utils.MarshalOutput {
 		b, _ := json.Marshal(v)
 		var probe struct {
 			AssetID string `json:"asset_id"`
+			Status  string `json:"status"`
 		}
-		if json.Unmarshal(b, &probe) == nil && probe.AssetID != "" {
-			return string(b), nil // await path: give full JSON back to model
+		if json.Unmarshal(b, &probe) == nil {
+			if probe.Status == statusDuplicate {
+				return "", nil // duplicate same-turn call: no second bubble
+			}
+			if probe.AssetID != "" {
+				return string(b), nil // await path: give full JSON back to model
+			}
 		}
 		return standaloneFriendly, nil
 	}
@@ -153,6 +212,10 @@ func (d ToolDeps) newEditTool() (tool.InvokableTool, error) {
 			"Set await_result=true only when you must chain this result into the next tool call.",
 		func(ctx context.Context, a editArgs) (editResult, error) {
 			log.Printf("edit_image: invoked intent=%q source=%q refs=%v await=%v", a.Intent, a.SourceAssetID, a.ReferenceAssetIDs, a.AwaitResult)
+			if !d.dedup.firstSeen("edit_image|" + argSig(a)) {
+				log.Printf("edit_image: duplicate same-turn call suppressed intent=%q source=%q", a.Intent, a.SourceAssetID)
+				return editResult{Status: statusDuplicate}, nil
+			}
 			kind := generation.EditKind(a.Intent)
 			switch kind {
 			case generation.EditCharacter, generation.EditBackground, generation.EditText:
@@ -217,6 +280,10 @@ func (d ToolDeps) newIconTool() (tool.InvokableTool, error) {
 			if a.SourceAssetID == "" {
 				return editResult{}, fmt.Errorf("generate_icon requires source_asset_id")
 			}
+			if !d.dedup.firstSeen("generate_icon|" + argSig(a)) {
+				log.Printf("generate_icon: duplicate same-turn call suppressed source=%q", a.SourceAssetID)
+				return editResult{Status: statusDuplicate}, nil
+			}
 			taskID, err := d.Generation.Start(ctx, generation.GenerateParams{
 				SessionID:        d.SessionID,
 				SourceAssetID:    a.SourceAssetID,
@@ -259,6 +326,10 @@ func (d ToolDeps) newTextToImageTool() (tool.InvokableTool, error) {
 			"Set await_result=true only when chaining into the next tool.",
 		func(ctx context.Context, a textToImageArgs) (editResult, error) {
 			log.Printf("generate_image_from_text: invoked desc=%q size=%dx%d await=%v", a.Desc, a.Width, a.Height, a.AwaitResult)
+			if !d.dedup.firstSeen("generate_image_from_text|" + argSig(a)) {
+				log.Printf("generate_image_from_text: duplicate same-turn call suppressed desc=%q", a.Desc)
+				return editResult{Status: statusDuplicate}, nil
+			}
 			taskID, err := d.TextToImage.Start(ctx, generation.GenerateParams{
 				SessionID:        d.SessionID,
 				Lossless:         d.Lossless,
@@ -421,6 +492,13 @@ func (d ToolDeps) newVideoTool() (tool.InvokableTool, error) {
 			if d.Video == nil || !d.Video.Configured() {
 				return videoResult{}, fmt.Errorf("图生视频暂未配置，暂不可用")
 			}
+			// Suppress a duplicate same-turn call (model sometimes emits two
+			// parallel image_to_video calls), which would start two tasks and
+			// concatenate two identical acks into one bubble.
+			if !d.dedup.firstSeen(fmt.Sprintf("image_to_video|%s|%s", a.SourceAssetID, a.Motion)) {
+				log.Printf("image_to_video: duplicate same-turn call suppressed source=%q", a.SourceAssetID)
+				return videoResult{Status: statusDuplicate}, nil
+			}
 			taskID, err := d.Video.Start(ctx, video.Params{
 				SessionID:        d.SessionID,
 				SourceAssetID:    a.SourceAssetID,
@@ -442,16 +520,7 @@ func (d ToolDeps) newVideoTool() (tool.InvokableTool, error) {
 			}
 			return videoResult{TaskID: taskID, Status: "queued"}, nil
 		},
-		utils.WithMarshalOutput(func(_ context.Context, v any) (string, error) {
-			b, _ := json.Marshal(v)
-			var probe struct {
-				AssetID string `json:"asset_id"`
-			}
-			if json.Unmarshal(b, &probe) == nil && probe.AssetID != "" {
-				return string(b), nil
-			}
-			return "好的，正在把这张图生成视频，完成后会出现在左侧工作区。", nil
-		}),
+		utils.WithMarshalOutput(asyncMarshal("好的，正在把这张图生成视频，完成后会出现在左侧工作区。")),
 	)
 }
 
@@ -638,8 +707,19 @@ func (d ToolDeps) newClarifyTool() (tool.InvokableTool, error) {
 // friendlyMarshal returns a MarshalOutput that emits a fixed user-facing Chinese
 // sentence regardless of the raw result struct. Used for ToolReturnDirectly async
 // tools so the chat shows a clean confirmation instead of raw {task_id,...} JSON.
+// A duplicate-status result (suppressed same-turn re-call) yields an empty string
+// so no second confirmation bubble appears.
 func friendlyMarshal(msg string) utils.MarshalOutput {
-	return func(_ context.Context, _ any) (string, error) { return msg, nil }
+	return func(_ context.Context, v any) (string, error) {
+		b, _ := json.Marshal(v)
+		var probe struct {
+			Status string `json:"status"`
+		}
+		if json.Unmarshal(b, &probe) == nil && probe.Status == statusDuplicate {
+			return "", nil
+		}
+		return msg, nil
+	}
 }
 
 // Tools builds the full whitelist of agent tools for this session.

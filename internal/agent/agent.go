@@ -366,7 +366,7 @@ func (o *Orchestrator) Handle(ctx context.Context, sessionID, userText string, l
 		})
 	}
 
-	deps := ToolDeps{Generation: o.gen, TextToImage: o.textToImg, Crop: o.crop, Video: o.video, Crawl: o.crawl, WebSearch: o.webSearch, Store: o.store, SessionID: sessionID, Lossless: lossless, Clarify: clarify}
+	deps := ToolDeps{Generation: o.gen, TextToImage: o.textToImg, Crop: o.crop, Video: o.video, Crawl: o.crawl, WebSearch: o.webSearch, Store: o.store, SessionID: sessionID, Lossless: lossless, Clarify: clarify, dedup: newTurnCallGuard()}
 	// Per-session generation model overrides (image / text-to-image / video).
 	// Zero value => the tool uses the service default provider.
 	if pc, ok := o.models.ImageModel(sessionID, config.SceneImage); ok {
