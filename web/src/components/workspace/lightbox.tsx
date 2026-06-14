@@ -2,6 +2,7 @@ import * as React from "react";
 import { Download, Crop, Scissors } from "lucide-react";
 import type { Asset } from "@/lib/types";
 import { useApp } from "@/store/context";
+import { MAX_SELECTED } from "@/store/controller";
 import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 import * as VisuallyHidden from "@radix-ui/react-visually-hidden";
@@ -36,7 +37,7 @@ export function Lightbox({
     if (!txt) return;
     const others = [...app.state.selected].filter((id) => id !== asset.id);
     onOpenChange(false);
-    app.sendMessage(txt, others.length ? [asset.id, ...others].slice(0, 6) : asset.id);
+    app.sendMessage(txt, others.length ? [asset.id, ...others].slice(0, MAX_SELECTED) : asset.id);
   };
 
   const genVideo = () => {

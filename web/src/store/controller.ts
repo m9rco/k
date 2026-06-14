@@ -5,6 +5,11 @@ import { describeToolCall } from "@/lib/timeline";
 import { type AppState, type ChatItem, initialState, uid } from "./types";
 import { useToast } from "@/components/toast-host";
 
+// MAX_SELECTED bounds how many assets can be selected as references at once,
+// mirroring the backend's MaxReferenceImages. Selection beyond this is rejected
+// (rather than silently truncated at send time) so the UI count never lies.
+export const MAX_SELECTED = 6;
+
 // orderedAssetIds returns the session's asset ids in timeline order (by real
 // creation time, earliest first). Sent as `assetOrder` so the backend builds the
 // "图N/视频N → id" map the agent uses to resolve user references. Timeline order
@@ -538,15 +543,26 @@ export function useAppController() {
   const toggleSelect = React.useCallback((id: string) => {
     setState((s) => {
       const sel = new Set(s.selected);
-      if (sel.has(id)) sel.delete(id);
-      else sel.add(id);
+      if (sel.has(id)) {
+        sel.delete(id);
+      } else {
+        if (sel.size >= MAX_SELECTED) {
+          toast(`最多选择 ${MAX_SELECTED} 张作为参考`, "warn");
+          return s;
+        }
+        sel.add(id);
+      }
       return { ...s, selected: sel };
     });
-  }, []);
+  }, [toast]);
 
   const selectAll = React.useCallback(() => {
-    setState((s) => ({ ...s, selected: new Set(s.assets.keys()) }));
-  }, []);
+    setState((s) => {
+      const ids = orderedAssetIds(s).filter((id) => s.assets.has(id)).slice(0, MAX_SELECTED);
+      if (s.assets.size > MAX_SELECTED) toast(`最多选择 ${MAX_SELECTED} 张，已选前 ${MAX_SELECTED} 张`, "warn");
+      return { ...s, selected: new Set(ids) };
+    });
+  }, [toast]);
 
   const clearSelection = React.useCallback(() => {
     setState((s) => ({ ...s, selected: new Set() }));
@@ -699,15 +715,21 @@ export function useAppController() {
     const list = [...files].filter((f) => f && f.type.startsWith("image/"));
     if (!list.length) return;
     const results = await Promise.allSettled(list.map((f) => api.uploadFile(sid, f)));
+    const newIds = results.flatMap((r) => (r.status === "fulfilled" ? [r.value.id] : []));
     setState((s) => {
       const assets = new Map(s.assets);
       for (const r of results) if (r.status === "fulfilled") assets.set(r.value.id, r.value);
-      return { ...s, assets };
+      // Newly uploaded images are auto-selected as references, replacing the
+      // prior selection, capped at MAX_SELECTED (earliest-uploaded kept).
+      const selected = new Set(newIds.slice(0, MAX_SELECTED));
+      return { ...s, assets, selected };
     });
     const ok = results.filter((r) => r.status === "fulfilled").length;
     const fail = results.length - ok;
-    if (fail === 0) toast(ok === 1 ? "已上传，现在可以让我换背景/角色/文案" : `已上传 ${ok} 张图`, "ok");
-    else if (ok === 0) toast(`上传失败 ${fail} 张`, "error");
+    if (fail === 0) {
+      const capped = ok > MAX_SELECTED ? `，已选中前 ${MAX_SELECTED} 张作为参考` : "";
+      toast(ok === 1 ? "已上传并选中，现在可以让我换背景/角色/文案" : `已上传 ${ok} 张图${capped}`, "ok");
+    } else if (ok === 0) toast(`上传失败 ${fail} 张`, "error");
     else toast(`已上传 ${ok} 张，失败 ${fail} 张`, "warn");
   }, [toast]);
 

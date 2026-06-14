@@ -5,6 +5,7 @@ import { Button } from "@/components/ui/button";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { Capybara } from "@/components/capybara/capybara";
 import { useApp } from "@/store/context";
+import { MAX_SELECTED } from "@/store/controller";
 import * as api from "@/lib/api";
 import { cn } from "@/lib/utils";
 
@@ -94,7 +95,7 @@ export function Composer({ onboarding = false }: { onboarding?: boolean }) {
 
   const submit = (e: React.FormEvent) => {
     e.preventDefault();
-    const refs = [...state.selected].slice(0, 6);
+    const refs = [...state.selected].slice(0, MAX_SELECTED);
     app.sendMessage(text, refs.length ? refs : undefined);
     setText("");
   };
@@ -248,7 +249,7 @@ export function Composer({ onboarding = false }: { onboarding?: boolean }) {
                 size="icon"
                 title="打断当前回合并立即发送"
                 onClick={() => {
-                  const refs = [...state.selected].slice(0, 6);
+                  const refs = [...state.selected].slice(0, MAX_SELECTED);
                   app.interruptSend({ text, ref: refs.length ? refs : undefined });
                   setText("");
                 }}
