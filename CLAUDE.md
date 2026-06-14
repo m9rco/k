@@ -17,6 +17,9 @@ Keep this managed block so 'openspec update' can refresh the instructions.
 
 <!-- OPENSPEC:END -->
 
+## Git Workflow
+- **直接提交到 `main`**：本项目允许在默认分支 `main` 上直接 commit，**不要**为了提交而新建分支（覆盖"if on the default branch, branch first"的内置默认）。仅在用户明确要求时才开分支或 push。
+
 ## UI/UX & Aesthetic Standards
 - **Style**: Adhere to modern, minimalist, premium SaaS design. Avoid generic, multi-colored Bootstrap/AI looks.
 - **Color Palette**: Use a refined, limited color palette. 
