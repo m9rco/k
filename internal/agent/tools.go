@@ -19,9 +19,13 @@ import (
 // (design D1: thin wrapper around Eino).
 type ToolDeps struct {
 	Generation *generation.Service
-	Crop       *crop.Service
-	Video      *video.Service
-	Crawl      *crawl.Service
+	// TextToImage is a generation.Service wired with the text-to-image provider
+	// (wan/qwen). It may be nil when text-to-image is not configured, in which
+	// case the generate_image_from_text tool is left out of the whitelist.
+	TextToImage *generation.Service
+	Crop        *crop.Service
+	Video       *video.Service
+	Crawl       *crawl.Service
 	// SessionID scopes every tool call to the caller's session so produced
 	// tasks and assets stay isolated per session.
 	SessionID string
@@ -152,6 +156,45 @@ func (d ToolDeps) newIconTool() (tool.InvokableTool, error) {
 			return editResult{TaskID: taskID, Status: "queued", Note: "Icon generation started; watch task progress."}, nil
 		},
 		utils.WithMarshalOutput(friendlyMarshal("好的，正在为这张图生成图标，完成后会出现在左侧工作区。")),
+	)
+}
+
+// --- generate_image_from_text ----------------------------------------------
+
+type textToImageArgs struct {
+	// Desc is the scene/content description for the brand-new image.
+	Desc string `json:"desc" jsonschema:"description=纯文本画面描述：要生成的图片内容/风格/主体。无需任何源图。"`
+	// Width/Height are optional target dimensions (provider snaps to its enum).
+	Width  int `json:"width,omitempty" jsonschema:"description=Optional target width in px (0 = provider default)。"`
+	Height int `json:"height,omitempty" jsonschema:"description=Optional target height in px (0 = provider default)。"`
+}
+
+func (d ToolDeps) newTextToImageTool() (tool.InvokableTool, error) {
+	return utils.InferTool(
+		"generate_image_from_text",
+		"Generate a brand-new image PURELY from a text description (文生图), with NO source or reference image. "+
+			"Use when the user says 画一张/生成一张/来一张……且没有提供任何底图或参照图。"+
+			"Returns a task id; progress streams over SSE and the result lands in the workspace.",
+		func(ctx context.Context, a textToImageArgs) (editResult, error) {
+			log.Printf("generate_image_from_text: invoked desc=%q size=%dx%d", a.Desc, a.Width, a.Height)
+			taskID, err := d.TextToImage.Start(ctx, generation.GenerateParams{
+				SessionID: d.SessionID,
+				Lossless:  d.Lossless,
+				Slots: generation.Slots{
+					Kind:            generation.EditTextToImage,
+					TextToImageDesc: a.Desc,
+				},
+				Width:  a.Width,
+				Height: a.Height,
+			})
+			if err != nil {
+				log.Printf("generate_image_from_text: Start error: %v", err)
+				return editResult{}, err
+			}
+			log.Printf("generate_image_from_text: started task=%s", taskID)
+			return editResult{TaskID: taskID, Status: "queued", Note: "Text-to-image started; watch task progress."}, nil
+		},
+		utils.WithMarshalOutput(friendlyMarshal("好的，正在按你的描述生成图片，产物会很快出现在左侧工作区。")),
 	)
 }
 
@@ -403,6 +446,15 @@ func (d ToolDeps) Tools() ([]tool.BaseTool, error) {
 		return nil, fmt.Errorf("icon tool: %w", err)
 	}
 	tools := []tool.BaseTool{edit, cropTool, listSizes, clarify, icon}
+	// generate_image_from_text is only exposed when a text-to-image provider is
+	// configured, so the agent doesn't advertise a capability that will fail.
+	if d.TextToImage != nil {
+		t2i, err := d.newTextToImageTool()
+		if err != nil {
+			return nil, fmt.Errorf("text-to-image tool: %w", err)
+		}
+		tools = append(tools, t2i)
+	}
 	// image_to_video is only exposed when a video provider is configured, so the
 	// agent doesn't advertise a capability that will always fail.
 	if d.Video != nil && d.Video.Configured() {
@@ -430,10 +482,11 @@ func (d ToolDeps) Tools() ([]tool.BaseTool, error) {
 // and re-invoke the tool forever (a生图 loop). Wired as react ToolReturnDirectly.
 func AsyncTaskTools() map[string]struct{} {
 	return map[string]struct{}{
-		"edit_image":        {},
-		"generate_icon":     {},
-		"image_to_video":    {},
-		"crawl_game_assets": {},
+		"edit_image":               {},
+		"generate_icon":            {},
+		"generate_image_from_text": {},
+		"image_to_video":           {},
+		"crawl_game_assets":        {},
 		// clarify_intent ends the turn after asking; its result must not be fed
 		// back to the model (there's nothing more to do until the user replies).
 		"clarify_intent": {},

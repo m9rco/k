@@ -46,6 +46,7 @@ func withSession(ctx context.Context, sessionID string) context.Context {
 type Orchestrator struct {
 	model      *chatModel
 	gen        *generation.Service
+	textToImg  *generation.Service
 	crop       *crop.Service
 	video      *video.Service
 	crawl      *crawl.Service
@@ -89,6 +90,11 @@ func NewOrchestrator(cfg *config.Config, gen *generation.Service, cr *crop.Servi
 		turnMu:     make(map[string]*sync.Mutex),
 	}
 }
+
+// SetTextToImage installs the text-to-image generation service (wan/qwen). When
+// left unset, the generate_image_from_text tool stays out of the whitelist and
+// the agent politely declines pure text-to-image requests.
+func (o *Orchestrator) SetTextToImage(svc *generation.Service) { o.textToImg = svc }
 
 // sessionTurnLock returns the per-session turn mutex (creating on first use), so
 // concurrent Handle calls for the same session serialize rather than interleave.
@@ -226,7 +232,7 @@ func (o *Orchestrator) Handle(ctx context.Context, sessionID, userText string, l
 		})
 	}
 
-	deps := ToolDeps{Generation: o.gen, Crop: o.crop, Video: o.video, Crawl: o.crawl, SessionID: sessionID, Lossless: lossless, Clarify: clarify}
+	deps := ToolDeps{Generation: o.gen, TextToImage: o.textToImg, Crop: o.crop, Video: o.video, Crawl: o.crawl, SessionID: sessionID, Lossless: lossless, Clarify: clarify}
 	tools, err := deps.Tools()
 	if err != nil {
 		o.emitTurnEnd(sessionID, turnEndInfo{replyEmpty: true})

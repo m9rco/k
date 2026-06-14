@@ -33,6 +33,21 @@ func NewHTTPProvider(cfg config.ImageProviderConfig) Provider {
 	return &httpProvider{cfg: cfg, client: &http.Client{Timeout: 120 * time.Second}}
 }
 
+// NewProvider selects a concrete video adapter by cfg.Provider (the adapter
+// selection key from provider-configuration). Unknown/empty values fall back to
+// the default happyhorse adapter so existing deployments are unaffected.
+//
+//   - "happyhorse" (default): DashScope-style video-synthesis async task.
+//   - "veo": Google Veo image-to-video async task (see veo.go).
+func NewProvider(cfg config.ImageProviderConfig) Provider {
+	switch strings.ToLower(strings.TrimSpace(cfg.Provider)) {
+	case "veo":
+		return NewVeoProvider(cfg)
+	default:
+		return NewHTTPProvider(cfg)
+	}
+}
+
 func (p *httpProvider) Name() string { return p.cfg.Name }
 
 // Configured requires both an API key and a model id to be present.

@@ -115,6 +115,7 @@ func clearProviderEnv(t *testing.T) {
 		"CHAT_TEST_PROVIDER", "CHAT_TEST_BASE_URL", "CHAT_TEST_API_KEY", "CHAT_TEST_MODEL",
 		"IMAGE_PRIMARY_PROVIDER", "IMAGE_PRIMARY_BASE_URL", "IMAGE_PRIMARY_API_KEY", "IMAGE_PRIMARY_MODEL",
 		"IMAGE_BACKUP_PROVIDER", "IMAGE_BACKUP_BASE_URL", "IMAGE_BACKUP_API_KEY", "IMAGE_BACKUP_MODEL",
+		"TEXT_TO_IMAGE_PROVIDER", "TEXT_TO_IMAGE_BASE_URL", "TEXT_TO_IMAGE_API_KEY", "TEXT_TO_IMAGE_MODEL",
 		"VIDEO_PROVIDER", "VIDEO_BASE_URL", "VIDEO_API_KEY", "VIDEO_MODEL",
 		"HAPPYHORSE_BASE_URL", "HAPPYHORSE_API_KEY", "HAPPYHORSE_MODEL",
 		"CRAWL_PROVIDER", "CRAWL_BASE_URL", "CRAWL_API_KEY", "CRAWL_ENDPOINT",
@@ -304,6 +305,24 @@ func TestCrawlEndpointAlias(t *testing.T) {
 	}
 	if cfg.CrawlEndpoint != "https://legacy/search" {
 		t.Errorf("CrawlEndpoint = %q, want legacy alias", cfg.CrawlEndpoint)
+	}
+}
+
+// TestTextToImageDefaults: text-to-image defaults to the dashscope provider and
+// inherits the common api key.
+func TestTextToImageDefaults(t *testing.T) {
+	clearProviderEnv(t)
+	t.Setenv("COMMON_API_KEY", "sk-common")
+
+	cfg, err := Load("does-not-exist.json")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.TextToImage.Provider != "dashscope" {
+		t.Errorf("TextToImage.Provider = %q, want dashscope", cfg.TextToImage.Provider)
+	}
+	if cfg.TextToImage.APIKey != "sk-common" {
+		t.Errorf("TextToImage.APIKey = %q, want common", cfg.TextToImage.APIKey)
 	}
 }
 

@@ -71,6 +71,7 @@ func streamOpenAI(body io.Reader, sw frameSink) error {
 			Delta struct {
 				Content          string `json:"content"`
 				ReasoningContent string `json:"reasoning_content"`
+				Reasoning        string `json:"reasoning"`
 				ToolCalls        []struct {
 					Index    int    `json:"index"`
 					ID       string `json:"id"`
@@ -103,8 +104,8 @@ func streamOpenAI(body io.Reader, sw frameSink) error {
 			continue
 		}
 		d := chunk.Choices[0].Delta
-		if d.ReasoningContent != "" {
-			sw.Send(reasoningFrame(d.ReasoningContent), nil)
+		if rc := firstNonEmptyStr(d.ReasoningContent, d.Reasoning); rc != "" {
+			sw.Send(reasoningFrame(rc), nil)
 		}
 		if d.Content != "" {
 			sw.Send(schema.AssistantMessage(d.Content, nil), nil)

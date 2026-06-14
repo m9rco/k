@@ -50,13 +50,6 @@ TBD - created by archiving change add-asset-studio-mvp. Update Purpose after arc
 - **WHEN** 一轮对话结束
 - **THEN** 系统向前端提供当前窗口的估算 token、预算与是否已压缩的状态
 
-### Requirement: 模型服务端硬编码
-系统 SHALL 在服务端硬编码会话理解模型配置（主：claude-sonnet-4-6；测试：DeepSeek chat 经 OpenAI 兼容端点），用户不可选择或切换。
-
-#### Scenario: 用户不可切换模型
-- **WHEN** 用户尝试指定使用某个模型
-- **THEN** 系统忽略该指定并使用服务端配置的模型
-
 ### Requirement: 流式对话输出
 系统 SHALL 以**真·流式**方式消费模型供应商的流式响应，并将 agent 的回复增量与思考增量分别实时推送给前端，而非先获取完整结果再切块模拟。当模型返回思考内容（reasoning/thinking）时，系统 SHALL 将其作为独立于回答正文的增量类型推送；对于支持显式开启思考的会话供应商（如 Anthropic extended thinking），系统 SHALL 在请求中开启思考能力，使思考增量得以产生并下发，从而保证前端的思考块有内容可逐字渲染；当供应商流式解析失败而降级为读取完整响应后补发时，系统 SHALL 同样将思考内容**按增量分片**补发（而非整段一次性下发），保持打字机式呈现一致。此外，系统 SHALL 在收到用户消息后、调用模型之前立即发出一个"轮开始"信号，并在该轮结束（含错误、产出反问或被中断）时发出"轮结束"信号，使前端的 loading 态与模型首个增量解耦。当一轮既无回复正文、又无工具调用、又无反问产出时，系统 SHALL 在轮结束信号中标明该轮无正文，使前端可避免渲染空白回复气泡。
 
@@ -224,4 +217,20 @@ Agent 的尺寸列举工具（`list_platform_sizes`）SHALL 返回 **渠道 → 
 #### Scenario: 取消旧轮后有序开始新轮
 - **WHEN** 用户在一轮进行中要求打断并立即处理新消息
 - **THEN** 系统先取消旧轮再开始新轮，两轮不交叠写入会话上下文
+
+### Requirement: 模型服务端配置驱动
+系统 SHALL 在服务端通过配置(环境变量)决定会话理解模型,用户不可选择或切换。会话理解模型 SHALL 支持经配置在多个供应商/模型间切换(如 `claude-sonnet-4-6`、`claude-haiku-4-5-20251001` 走 Anthropic 协议分支;`gpt-5.4`、`doubao-seed-2-0-mini-260428`、DeepSeek 走 OpenAI 兼容分支),由配置的 `provider`/`model`/`base_url`/`api_key` 解析,默认值保持向后兼容。系统 SHALL 在 OpenAI 兼容分支上兼容不同供应商的思考(reasoning)字段命名差异;当某模型不返回思考内容时,系统 SHALL 正常产出回答而不报错。无论选用哪个受支持的模型,用户 SHALL NOT 能在请求中指定或改写所用模型。
+
+#### Scenario: 用户不可切换模型
+- **WHEN** 用户尝试指定使用某个模型
+- **THEN** 系统忽略该指定并使用服务端配置的模型
+
+#### Scenario: 经配置切换会话模型
+- **WHEN** 运维将主会话模型配置为另一受支持模型(如 `CHAT_PRIMARY_MODEL=gpt-5.4` 并设对应 provider)
+- **THEN** 系统经对应协议分支调用该模型完成会话理解
+- **AND** 流式回复与思考增量、工具调用循环行为保持一致
+
+#### Scenario: 供应商思考字段差异兼容
+- **WHEN** 选用的 OpenAI 兼容模型以不同字段名返回思考内容,或不返回思考内容
+- **THEN** 系统正确解析其思考增量(若有)并下发,否则仅下发回答正文而不报错
 

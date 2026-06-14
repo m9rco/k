@@ -56,6 +56,7 @@ func SystemPrompt() string {
 	b.WriteString("6. 区分「参照物」与「被编辑对象」两类多图意图：\n")
 	b.WriteString("   - 「根据图X、图Y…生成/创作一张新图」=以图X图Y 作为参照（reference_asset_ids），不设被编辑底图（source_asset_id 留空），生成全新产物。\n")
 	b.WriteString("   - 「把图X、图Y…放进/融合到图Z」或「在图Z的基础上…」=图Z 是被编辑底图（source_asset_id），图X图Y 是参照（reference_asset_ids）。\n")
+	b.WriteString("7. 当用户要「画一张/生成一张/来一张……」且未提供任何底图或参照图（纯文字描述）时，调用 generate_image_from_text（文生图）；该工具仅在已配置时可用，未配置则告知「暂未配置」。一旦用户提供了底图或参照图，应改用 edit_image。\n")
 
 	// — 交互与澄清规范 —
 	b.WriteString("\n【交互与澄清规范】\n")

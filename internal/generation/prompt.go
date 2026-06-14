@@ -17,6 +17,9 @@ const (
 	// image model, not a pure crop). Output is converged to the target icon size
 	// after generation (see service.run).
 	EditIcon EditKind = "generate_icon"
+	// EditTextToImage generates a brand-new image purely from a text description
+	// (no source image). Used by the text-to-image capability (wan/qwen).
+	EditTextToImage EditKind = "text_to_image"
 )
 
 // DefaultIconSize is the icon edge length used when the user gives no size.
@@ -37,6 +40,9 @@ type Slots struct {
 	// Zero means use DefaultIconSize.
 	IconWidth  int
 	IconHeight int
+	// TextToImageDesc is the user's scene description for text_to_image (no
+	// source image). Sanitized before templating like every other slot.
+	TextToImageDesc string
 	// ReuseComposition requests preserving the reference image's composition.
 	ReuseComposition bool
 }
@@ -123,6 +129,17 @@ func BuildPrompt(slots Slots, palette []PaletteColor) (string, error) {
 			b.WriteString(hint)
 			b.WriteString(".")
 		}
+	case EditTextToImage:
+		// Text-to-image: a brand-new image from a sanitized scene description. No
+		// source image, so no palette/harmony clause is appended below.
+		desc := Sanitize(slots.TextToImageDesc)
+		if desc == "" {
+			return "", fmt.Errorf("text-to-image description required")
+		}
+		b.WriteString("Create a high-quality marketing illustration based on this description: ")
+		b.WriteString(desc)
+		b.WriteString(". Coherent composition, balanced lighting, polished and production-ready.")
+		return b.String(), nil
 	default:
 		return "", fmt.Errorf("unsupported edit kind %q", slots.Kind)
 	}

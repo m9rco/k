@@ -259,7 +259,11 @@ func (m *chatModel) generateOpenAI(ctx context.Context, input []*schema.Message)
 			Message struct {
 				Content          string `json:"content"`
 				ReasoningContent string `json:"reasoning_content"`
-				ToolCalls        []struct {
+				// Reasoning is an alias some OpenAI-compatible vendors (e.g. certain
+				// doubao/volcengine gateways) use instead of reasoning_content. We
+				// accept either; whichever is present surfaces as the thinking block.
+				Reasoning string `json:"reasoning"`
+				ToolCalls []struct {
 					ID       string `json:"id"`
 					Function struct {
 						Name      string `json:"name"`
@@ -277,7 +281,7 @@ func (m *chatModel) generateOpenAI(ctx context.Context, input []*schema.Message)
 	}
 	c := resp.Choices[0].Message
 	out := schema.AssistantMessage(c.Content, nil)
-	out.ReasoningContent = c.ReasoningContent
+	out.ReasoningContent = firstNonEmptyStr(c.ReasoningContent, c.Reasoning)
 	for _, tc := range c.ToolCalls {
 		out.ToolCalls = append(out.ToolCalls, schema.ToolCall{
 			ID: tc.ID,
@@ -536,6 +540,16 @@ func truncate(s string, n int) string {
 		return s
 	}
 	return s[:n] + "…"
+}
+
+// firstNonEmptyStr returns the first non-empty string among the args.
+func firstNonEmptyStr(vs ...string) string {
+	for _, v := range vs {
+		if v != "" {
+			return v
+		}
+	}
+	return ""
 }
 
 // toolParamsJSONSchema converts an Eino ToolInfo's params into a JSON-schema

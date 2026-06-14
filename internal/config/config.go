@@ -137,6 +137,11 @@ type Config struct {
 	ImagePrimary ImageProviderConfig
 	ImageBackup  ImageProviderConfig
 
+	// TextToImage is the pure text-to-image provider (wan/qwen). When its APIKey
+	// is unset the text-to-image capability stays disabled and its agent tool is
+	// left out of the whitelist.
+	TextToImage ImageProviderConfig
+
 	// Video is the image-to-video provider (happyhorse R2V). It may be unset, in
 	// which case the video capability degrades to "not configured".
 	Video ImageProviderConfig
@@ -297,6 +302,8 @@ func Load(platformsPath string) (*Config, error) {
 		endpointAliases{apiKey: []string{"DEEPSEEK_API_KEY"}})
 	imagePrimary := common.resolveEndpoint("IMAGE_PRIMARY", "openai", "gpt-image-2", endpointAliases{})
 	imageBackup := common.resolveEndpoint("IMAGE_BACKUP", "openai", "gpt-image-2", endpointAliases{})
+	// Text-to-image (wan/qwen via DashScope async). Default provider "dashscope".
+	textToImage := common.resolveEndpoint("TEXT_TO_IMAGE", "dashscope", "", endpointAliases{})
 	// Video canonicalizes on VIDEO_*; the older HAPPYHORSE_* names remain as
 	// aliases (below VIDEO_* / COMMON_*) so existing deployments don't regress.
 	video := common.resolveEndpoint("VIDEO", "openai", "", endpointAliases{
@@ -342,6 +349,15 @@ func Load(platformsPath string) (*Config, error) {
 			BaseURL:  imageBackup.baseURL,
 			APIKey:   imageBackup.apiKey,
 			Model:    imageBackup.model,
+		},
+
+		// Text-to-image (wan/qwen). APIKey empty => capability stays disabled.
+		TextToImage: ImageProviderConfig{
+			Name:     env("TEXT_TO_IMAGE_NAME", "text2image"),
+			Provider: textToImage.provider,
+			BaseURL:  textToImage.baseURL,
+			APIKey:   textToImage.apiKey,
+			Model:    textToImage.model,
 		},
 
 		// Image-to-video (happyhorse R2V). APIKey/Model empty means the video

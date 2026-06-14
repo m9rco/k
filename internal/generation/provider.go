@@ -4,6 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
+
+	"gameasset/internal/config"
 )
 
 // Request is a single image-generation call.
@@ -51,6 +54,27 @@ type FailoverGenerator struct {
 // NewFailoverGenerator constructs a failover generator. Backup may be nil.
 func NewFailoverGenerator(primary, backup Provider) *FailoverGenerator {
 	return &FailoverGenerator{Primary: primary, Backup: backup}
+}
+
+// NewProvider selects a concrete image adapter by cfg.Provider (the adapter
+// selection key from provider-configuration). Unknown/empty values fall back to
+// the default OpenAI-compatible adapter so existing deployments are unaffected.
+//
+//   - "openai" (default): /v1/images/{generations,edits}, b64_json response.
+//   - "gemini": Google Gemini image models via :generateContent + inline_data.
+//   - "dashscope": Alibaba wan/qwen async text-to-image (image-synthesis).
+//
+// Both implement Provider, so the failover/service layers are agnostic to which
+// vendor produced the image.
+func NewProvider(cfg config.ImageProviderConfig) Provider {
+	switch strings.ToLower(strings.TrimSpace(cfg.Provider)) {
+	case "gemini":
+		return NewGeminiProvider(cfg)
+	case "dashscope":
+		return NewDashScopeProvider(cfg)
+	default:
+		return NewHTTPProvider(cfg)
+	}
 }
 
 // Generate runs the request against primary then backup. The returned Output's

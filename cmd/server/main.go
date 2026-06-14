@@ -82,10 +82,11 @@ func run() error {
 	cropSvc := crop.NewService(cfg.Channels, cfg.AssetDir, st, func() string { return id.New("crop") })
 	cropSvc.RegisterRoutes(mux)
 
-	// Image generation (gpt-image-1 primary + backup failover, async via SSE).
+	// Image generation (primary + backup failover, async via SSE). Each backend's
+	// concrete adapter is selected by its configured Provider key (openai/gemini).
 	gen := generation.NewFailoverGenerator(
-		generation.NewHTTPProvider(cfg.ImagePrimary),
-		generation.NewHTTPProvider(cfg.ImageBackup),
+		generation.NewProvider(cfg.ImagePrimary),
+		generation.NewProvider(cfg.ImageBackup),
 	)
 	genSvc := generation.NewService(gen, st, broker, cfg.AssetDir, id.New)
 
@@ -94,7 +95,7 @@ func run() error {
 	// first. Without COS configured the uploader stays nil, Service.Configured()
 	// is false, the tool is left out of the whitelist, and the agent politely
 	// reports "暂未配置" instead of attempting a call that cannot work.
-	vidSvc := video.NewService(video.NewHTTPProvider(cfg.Video), st, broker, cfg.AssetDir, id.New)
+	vidSvc := video.NewService(video.NewProvider(cfg.Video), st, broker, cfg.AssetDir, id.New)
 	cosUploader, err := cos.New(cfg.COS)
 	if err != nil {
 		return fmt.Errorf("init cos uploader: %w", err)
@@ -142,6 +143,18 @@ func run() error {
 
 	// Conversation orchestration: Eino ReAct agent over the whitelist of tools.
 	orch := agent.NewOrchestrator(cfg, genSvc, cropSvc, vidSvc, crawlSvc, hub, st, id.New)
+	// Text-to-image (wan/qwen): a second generation service wired with the
+	// text-to-image provider. Only enabled when its API key is configured, so the
+	// generate_image_from_text tool stays out of the whitelist otherwise.
+	if cfg.TextToImage.APIKey != "" {
+		t2iGen := generation.NewFailoverGenerator(generation.NewProvider(cfg.TextToImage), nil)
+		t2iSvc := generation.NewService(t2iGen, st, broker, cfg.AssetDir, id.New)
+		t2iSvc.SetAnnouncer(announcer)
+		orch.SetTextToImage(t2iSvc)
+		log.Printf("text-to-image: provider=%s model=%s enabled", cfg.TextToImage.Provider, cfg.TextToImage.Model)
+	} else {
+		log.Printf("text-to-image: not configured, capability disabled")
+	}
 	hub.SetHandler(func(ctx context.Context, sessionID string, msg transport.Inbound) {
 		switch msg.Type {
 		case "user_message":

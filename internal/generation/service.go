@@ -98,6 +98,11 @@ type GenerateParams struct {
 	// Lossless enables program-side PNG lossless optimization of the product
 	// before persistence. Defaults to true at the call sites.
 	Lossless bool
+	// Width/Height are explicit target dimensions for source-less generation
+	// (text-to-image). Ignored when a source image drives size inheritance. 0
+	// means let the provider decide.
+	Width  int
+	Height int
 }
 
 // primaryAndExtras resolves the effective reference list: the primary asset id
@@ -281,6 +286,11 @@ func (s *Service) run(ctx context.Context, taskID string, p GenerateParams) {
 			iconH = DefaultIconSize
 		}
 		wantW, wantH = iconW, iconH
+	}
+	// Source-less generation (text-to-image) has no source dimensions to inherit;
+	// use the explicit target size from the request when provided.
+	if wantW == 0 && wantH == 0 {
+		wantW, wantH = p.Width, p.Height
 	}
 
 	genStart := time.Now()
