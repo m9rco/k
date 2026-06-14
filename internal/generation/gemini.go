@@ -38,8 +38,16 @@ type GeminiProvider struct {
 
 // NewGeminiProvider builds a Gemini image provider from config. baseURL defaults
 // to the Google Generative Language base when empty.
+//
+// The Gemini adapter appends "/v1beta/models/...", so the base must NOT already
+// carry an API-version segment. Gemini commonly inherits the shared
+// COMMON_BASE_URL (e.g. "https://yunwu.ai/v1") that is meant for the OpenAI-style
+// backends; left as-is that would yield ".../v1/v1beta/..." → 404. Strip a
+// trailing "/v1" or "/v1beta" so either form of base resolves correctly.
 func NewGeminiProvider(cfg config.ImageProviderConfig) *GeminiProvider {
 	base := strings.TrimRight(cfg.BaseURL, "/")
+	base = strings.TrimSuffix(base, "/v1beta")
+	base = strings.TrimSuffix(base, "/v1")
 	if base == "" {
 		base = "https://generativelanguage.googleapis.com"
 	}

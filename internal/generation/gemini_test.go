@@ -15,6 +15,30 @@ import (
 // pngPixel is a 1x1 PNG used as a stand-in image payload.
 var geminiPNG = []byte{0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a}
 
+// TestGeminiBaseURLStripsAPIVersion guards against the ".../v1/v1beta/..." path
+// doubling: Gemini often inherits the shared OpenAI-style base ("…/v1"), but it
+// appends its own "/v1beta" segment. The provider must strip a trailing /v1 or
+// /v1beta so the request path carries exactly one api-version segment.
+func TestGeminiBaseURLStripsAPIVersion(t *testing.T) {
+	cases := map[string]string{
+		"https://yunwu.ai/v1":     "https://yunwu.ai",
+		"https://yunwu.ai/v1/":    "https://yunwu.ai",
+		"https://yunwu.ai/v1beta": "https://yunwu.ai",
+		"https://yunwu.ai":        "https://yunwu.ai",
+		"https://host/api/v1":     "https://host/api",
+	}
+	for in, want := range cases {
+		p := NewGeminiProvider(config.ImageProviderConfig{BaseURL: in, Model: "m"})
+		if p.baseURL != want {
+			t.Errorf("base %q -> %q, want %q", in, p.baseURL, want)
+		}
+	}
+	// Empty base falls back to the native Google endpoint.
+	if p := NewGeminiProvider(config.ImageProviderConfig{}); p.baseURL != "https://generativelanguage.googleapis.com" {
+		t.Errorf("empty base = %q, want google default", p.baseURL)
+	}
+}
+
 func TestGeminiProviderGenerateSuccess(t *testing.T) {
 	want := base64.StdEncoding.EncodeToString(geminiPNG)
 	var gotPath string
