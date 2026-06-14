@@ -31,11 +31,14 @@ function Anthropic({ className }: IconProps) {
   );
 }
 
-// --- Google: monochrome "G" mark ---
+// --- Google: monochrome "G" mark (open ring + inward crossbar) ---
 function Google({ className }: IconProps) {
   return (
-    <svg viewBox="0 0 24 24" className={className} fill="currentColor" aria-hidden>
-      <path d="M12 2a10 10 0 1 0 6.6 17.5c1.9-1.8 2.9-4.4 2.9-7.5 0-.7-.06-1.3-.18-1.9H12v3.7h5.4c-.24 1.3-.96 2.4-2.04 3.15v2.6h3.3A9.96 9.96 0 0 0 12 22 10 10 0 0 1 12 2zm0 3.7c1.5 0 2.85.52 3.9 1.53l2.6-2.6A9.6 9.6 0 0 0 12 2 10 10 0 0 0 3 7.5l3.05 2.37A5.96 5.96 0 0 1 12 5.7z" />
+    <svg viewBox="0 0 24 24" className={className} aria-hidden fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round">
+      {/* C-shaped ring, open on the right */}
+      <path d="M17.5 6.7A8 8 0 1 0 20 12" />
+      {/* crossbar going inward from the ring's right opening */}
+      <path d="M20 12h-5.2" />
     </svg>
   );
 }
