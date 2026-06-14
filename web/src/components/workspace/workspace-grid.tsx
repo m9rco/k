@@ -32,6 +32,7 @@ export function WorkspaceGrid({
   onPreview,
   onCrop,
   onVideo,
+  onVideoOps,
 }: {
   // assets in creation order (earliest first), matching the numbering labels.
   assets: Asset[];
@@ -39,6 +40,7 @@ export function WorkspaceGrid({
   onPreview: (a: Asset) => void;
   onCrop: (a: Asset) => void;
   onVideo: (a: Asset) => void;
+  onVideoOps: (a: Asset, op?: "trim" | "frame") => void;
 }) {
   const app = useApp();
   const { state } = app;
@@ -64,6 +66,7 @@ export function WorkspaceGrid({
               onPreview={onPreview}
               onCrop={onCrop}
               onVideo={onVideo}
+              onVideoOps={onVideoOps}
             />
           ))}
         </AnimatePresence>

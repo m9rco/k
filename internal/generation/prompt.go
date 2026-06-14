@@ -13,7 +13,14 @@ const (
 	EditCharacter  EditKind = "change_character"
 	EditBackground EditKind = "change_background"
 	EditText       EditKind = "change_text"
+	// EditIcon generates an icon related to the source image (re-creation via the
+	// image model, not a pure crop). Output is converged to the target icon size
+	// after generation (see service.run).
+	EditIcon EditKind = "generate_icon"
 )
+
+// DefaultIconSize is the icon edge length used when the user gives no size.
+const DefaultIconSize = 150
 
 // Slots holds user-provided inputs in a structured form. User free text never
 // becomes the prompt directly: each slot is sanitized and inserted into a
@@ -24,6 +31,12 @@ type Slots struct {
 	CharacterDesc  string
 	BackgroundDesc string
 	TextContent    string
+	// IconDesc is the optional user hint for generate_icon (e.g. "扁平风格").
+	IconDesc string
+	// IconWidth/IconHeight are the desired icon dimensions for generate_icon.
+	// Zero means use DefaultIconSize.
+	IconWidth  int
+	IconHeight int
 	// ReuseComposition requests preserving the reference image's composition.
 	ReuseComposition bool
 }
@@ -99,6 +112,17 @@ func BuildPrompt(slots Slots, palette []PaletteColor) (string, error) {
 		b.WriteString("Replace the on-image text/copy with: \"")
 		b.WriteString(txt)
 		b.WriteString("\". Match the existing typographic style and placement.")
+	case EditIcon:
+		// Icon generation derives a standalone app/game icon from the source. The
+		// optional user hint is a sanitized descriptive fragment only.
+		b.WriteString("Design a clean, standalone app/game icon derived from the main subject of the reference image. ")
+		b.WriteString("Center the subject with balanced padding, bold and instantly recognizable at small sizes, ")
+		b.WriteString("simple background (solid or transparent), no text unless essential.")
+		if hint := Sanitize(slots.IconDesc); hint != "" {
+			b.WriteString(" Style hint: ")
+			b.WriteString(hint)
+			b.WriteString(".")
+		}
 	default:
 		return "", fmt.Errorf("unsupported edit kind %q", slots.Kind)
 	}

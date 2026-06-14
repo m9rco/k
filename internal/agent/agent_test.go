@@ -121,10 +121,10 @@ func TestToolsBuildWhitelist(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// edit_image, crop_to_sizes, list_platform_sizes, clarify_intent (video and
-	// crawl are gated behind configured providers, absent here).
-	if len(tools) != 4 {
-		t.Fatalf("expected 4 whitelist tools, got %d", len(tools))
+	// edit_image, crop_to_sizes, list_platform_sizes, clarify_intent, generate_icon
+	// (video and crawl are gated behind configured providers, absent here).
+	if len(tools) != 5 {
+		t.Fatalf("expected 5 whitelist tools, got %d", len(tools))
 	}
 	names := map[string]bool{}
 	for _, tl := range tools {
@@ -136,6 +136,9 @@ func TestToolsBuildWhitelist(t *testing.T) {
 	}
 	if !names["clarify_intent"] {
 		t.Error("clarify_intent tool not registered")
+	}
+	if !names["generate_icon"] {
+		t.Error("generate_icon tool not registered")
 	}
 }
 

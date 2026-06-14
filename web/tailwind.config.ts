@@ -18,6 +18,8 @@ export default {
         "fg-mute": "hsl(var(--fg-mute) / <alpha-value>)",
         accent: "hsl(var(--accent) / <alpha-value>)",
         "accent-fg": "hsl(var(--accent-fg) / <alpha-value>)",
+        "accent-2": "hsl(var(--accent-2) / <alpha-value>)",
+        "accent-2-fg": "hsl(var(--accent-2-fg) / <alpha-value>)",
         ok: "hsl(var(--ok) / <alpha-value>)",
         danger: "hsl(var(--danger) / <alpha-value>)",
         warn: "hsl(var(--warn) / <alpha-value>)",

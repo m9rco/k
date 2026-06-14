@@ -109,11 +109,63 @@ func (d ToolDeps) newEditTool() (tool.InvokableTool, error) {
 	)
 }
 
+// --- generate_icon ----------------------------------------------------------
+
+type iconArgs struct {
+	// SourceAssetID is the existing image the icon is derived from. Required.
+	SourceAssetID string `json:"source_asset_id" jsonschema:"description=ID of the workspace image to derive an icon FROM (从这张图提炼图标)。"`
+	// Desc is an optional style hint for the icon (e.g. 扁平描边 / 圆角拟物).
+	Desc string `json:"desc,omitempty" jsonschema:"description=Optional style hint for the icon, e.g. 扁平 / 描边 / 圆角拟物。Leave empty to let the model choose."`
+	// Width/Height set the target icon size. Both default to 150 when omitted.
+	Width  int `json:"width,omitempty" jsonschema:"description=Target icon width in px (default 150 when omitted)。"`
+	Height int `json:"height,omitempty" jsonschema:"description=Target icon height in px (default 150 when omitted)。"`
+}
+
+func (d ToolDeps) newIconTool() (tool.InvokableTool, error) {
+	return utils.InferTool(
+		"generate_icon",
+		"Generate a standalone app/game ICON derived from the main subject of a workspace image. "+
+			"This calls the image-generation model (not a pure crop), then converges the product to the "+
+			"exact requested icon size (default 150x150). Returns a task id; progress streams over SSE and "+
+			"the icon lands in the workspace. Use when the user asks 给这张图做个图标/生成 icon.",
+		func(ctx context.Context, a iconArgs) (editResult, error) {
+			log.Printf("generate_icon: invoked source=%q desc=%q size=%dx%d", a.SourceAssetID, a.Desc, a.Width, a.Height)
+			if a.SourceAssetID == "" {
+				return editResult{}, fmt.Errorf("generate_icon requires source_asset_id")
+			}
+			taskID, err := d.Generation.Start(ctx, generation.GenerateParams{
+				SessionID:     d.SessionID,
+				SourceAssetID: a.SourceAssetID,
+				Lossless:      d.Lossless,
+				Slots: generation.Slots{
+					Kind:       generation.EditIcon,
+					IconDesc:   a.Desc,
+					IconWidth:  a.Width,
+					IconHeight: a.Height,
+				},
+			})
+			if err != nil {
+				log.Printf("generate_icon: Start error: %v", err)
+				return editResult{}, err
+			}
+			log.Printf("generate_icon: started task=%s", taskID)
+			return editResult{TaskID: taskID, Status: "queued", Note: "Icon generation started; watch task progress."}, nil
+		},
+		utils.WithMarshalOutput(friendlyMarshal("好的，正在为这张图生成图标，完成后会出现在左侧工作区。")),
+	)
+}
+
 // --- crop_to_sizes ---------------------------------------------------------
 
 type cropArgs struct {
 	SourceAssetID string   `json:"source_asset_id" jsonschema:"description=ID of the workspace asset to crop"`
 	SizeIDs       []string `json:"size_ids" jsonschema:"description=Unique size ids to produce (e.g. taptap.icon.512). List valid ids via list_platform_sizes."`
+	// Mode selects the crop strategy. cover (default) fills then center-crops;
+	// contain fits the whole image with padding (no cropping); anchor crops
+	// toward a nine-grid position. rect (manual region) is not exposed here.
+	Mode string `json:"mode,omitempty" jsonschema:"description=Crop strategy: cover (default fill+center-crop) | contain (fit whole image with padding no crop) | anchor (crop toward a position),enum=cover,enum=contain,enum=anchor"`
+	// Anchor names the crop position when mode=anchor.
+	Anchor string `json:"anchor,omitempty" jsonschema:"description=Crop position when mode=anchor: one of top-left,top,top-right,left,center,right,bottom-left,bottom,bottom-right"`
 }
 
 type cropResultItem struct {
@@ -128,10 +180,12 @@ func (d ToolDeps) newCropTool() (tool.InvokableTool, error) {
 	return utils.InferTool(
 		"crop_to_sizes",
 		"Crop/resize an existing asset to one or more platform size presets, addressed by their unique size id. "+
-			"Pure image processing, no AI. Each produced size becomes a new workspace asset. "+
+			"Pure image processing, no AI. Supports crop modes: cover (default), contain (fit whole image, pad, no crop), "+
+			"anchor (crop toward a nine-grid position). Each produced size becomes a new workspace asset. "+
 			"Unknown ids and non-producible sizes (e.g. video specs) are rejected with an error.",
 		func(_ context.Context, a cropArgs) ([]cropResultItem, error) {
-			results, err := d.Crop.CropToSizes(d.SessionID, a.SourceAssetID, a.SizeIDs, d.Lossless)
+			opts := crop.Options{Mode: crop.Mode(a.Mode), Anchor: crop.Anchor(a.Anchor)}
+			results, err := d.Crop.CropToSizes(d.SessionID, a.SourceAssetID, a.SizeIDs, d.Lossless, opts)
 			if err != nil {
 				return nil, err
 			}
@@ -344,7 +398,11 @@ func (d ToolDeps) Tools() ([]tool.BaseTool, error) {
 	if err != nil {
 		return nil, fmt.Errorf("clarify tool: %w", err)
 	}
-	tools := []tool.BaseTool{edit, cropTool, listSizes, clarify}
+	icon, err := d.newIconTool()
+	if err != nil {
+		return nil, fmt.Errorf("icon tool: %w", err)
+	}
+	tools := []tool.BaseTool{edit, cropTool, listSizes, clarify, icon}
 	// image_to_video is only exposed when a video provider is configured, so the
 	// agent doesn't advertise a capability that will always fail.
 	if d.Video != nil && d.Video.Configured() {
@@ -373,6 +431,7 @@ func (d ToolDeps) Tools() ([]tool.BaseTool, error) {
 func AsyncTaskTools() map[string]struct{} {
 	return map[string]struct{}{
 		"edit_image":        {},
+		"generate_icon":     {},
 		"image_to_video":    {},
 		"crawl_game_assets": {},
 		// clarify_intent ends the turn after asking; its result must not be fed

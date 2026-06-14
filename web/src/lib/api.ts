@@ -63,6 +63,13 @@ export async function uploadFile(sid: string, file: File): Promise<Asset> {
   return api<Asset>(`/api/session/${sid}/upload`, { method: "POST", body: fd });
 }
 
+// uploadBlob wraps a generated Blob (e.g. a ffmpeg.wasm video clip or extracted
+// frame) into a named File and uploads it through the same endpoint, so the
+// product lands in the workspace alongside other assets.
+export function uploadBlob(sid: string, blob: Blob, name: string): Promise<Asset> {
+  return uploadFile(sid, new File([blob], name, { type: blob.type }));
+}
+
 export function deleteAsset(sid: string, assetId: string) {
   return api(`/api/session/${sid}/assets/${assetId}`, { method: "DELETE" });
 }
@@ -87,11 +94,26 @@ export function listPlatforms() {
   return api<{ channels: Channel[] }>(`/api/platforms`).then((r) => r.channels || []);
 }
 
-export function crop(sid: string, sourceAssetId: string, sizeIds: string[], lossless: boolean) {
+// CropRect is a normalized crop region (each field ∈ [0,1]) for mode="rect".
+export interface CropRect { x: number; y: number; w: number; h: number }
+
+// CropOptions mirrors the backend crop strategy (cover default | contain |
+// anchor | rect). Omitted fields fall back to cover on the server.
+export interface CropOptions {
+  mode?: "cover" | "contain" | "anchor" | "rect";
+  anchor?: string;
+  rect?: CropRect;
+}
+
+export function crop(sid: string, sourceAssetId: string, sizeIds: string[], lossless: boolean, opts?: CropOptions) {
+  const body: Record<string, unknown> = { sourceAssetId, sizeIds, lossless };
+  if (opts?.mode && opts.mode !== "cover") body.mode = opts.mode;
+  if (opts?.mode === "anchor" && opts.anchor) body.anchor = opts.anchor;
+  if (opts?.mode === "rect" && opts.rect) body.rect = opts.rect;
   return api<{ results: Asset[] }>(`/api/session/${sid}/crop`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ sourceAssetId, sizeIds, lossless }),
+    body: JSON.stringify(body),
   });
 }
 

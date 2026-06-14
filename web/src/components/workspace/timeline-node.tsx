@@ -36,6 +36,7 @@ export function TimelineNodeRow({
   onPreview,
   onCrop,
   onVideo,
+  onVideoOps,
 }: {
   node: TimelineNode;
   labels: Map<string, string>;
@@ -43,6 +44,7 @@ export function TimelineNodeRow({
   onPreview: (a: Asset) => void;
   onCrop: (a: Asset) => void;
   onVideo: (a: Asset) => void;
+  onVideoOps: (a: Asset, op?: "trim" | "frame") => void;
 }) {
   const { Icon } = KIND_META[node.kind];
   const title = nodeTitle(node);
@@ -74,7 +76,7 @@ export function TimelineNodeRow({
         {rel && <span className="ml-auto shrink-0 text-fg-mute">{rel}</span>}
       </div>
       {/* Body */}
-      <NodeBody node={node} labels={labels} onPreview={onPreview} onCrop={onCrop} onVideo={onVideo} />
+      <NodeBody node={node} labels={labels} onPreview={onPreview} onCrop={onCrop} onVideo={onVideo} onVideoOps={onVideoOps} />
     </motion.li>
   );
 }
@@ -85,12 +87,14 @@ function NodeBody({
   onPreview,
   onCrop,
   onVideo,
+  onVideoOps,
 }: {
   node: TimelineNode;
   labels: Map<string, string>;
   onPreview: (a: Asset) => void;
   onCrop: (a: Asset) => void;
   onVideo: (a: Asset) => void;
+  onVideoOps: (a: Asset, op?: "trim" | "frame") => void;
 }) {
   if (node.state === "done") {
     return (
@@ -103,6 +107,7 @@ function NodeBody({
             onPreview={onPreview}
             onCrop={onCrop}
             onVideo={onVideo}
+            onVideoOps={onVideoOps}
           />
         ))}
       </div>

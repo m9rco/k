@@ -19,6 +19,13 @@ function orderedAssetIds(s: AppState): string[] {
   return assets.map((a) => a.id);
 }
 
+// SYNC_ASSET_TOOLS are tools that produce workspace assets synchronously within
+// the agent turn (no async task / no task_done event). Their tool_result is the
+// only signal that new assets exist, so the controller refreshes the workspace
+// on result. Async tools (edit_image / generate_icon / image_to_video / crawl)
+// are NOT listed here — they carry a task_id and refresh on task_done.
+const SYNC_ASSET_TOOLS = new Set<string>(["crop_to_sizes"]);
+
 // useAppController owns all app state and the real-time side effects (WS
 // conversation + per-task SSE), mirroring the legacy app.js behavior.
 export function useAppController() {
@@ -281,6 +288,11 @@ export function useAppController() {
     if (ok && typeof data.task_id === "string") {
       ensureTaskPlaceholder(sid, data.task_id, ((data.kind as TaskKind) || "generate"), lastToolNoteRef.current);
       lastToolNoteRef.current = undefined;
+    } else if (ok && name && SYNC_ASSET_TOOLS.has(name)) {
+      // Synchronous asset-producing tools (e.g. crop_to_sizes) insert assets
+      // directly and never emit a task_done event, so the workspace would only
+      // pick them up on a manual refresh. Pull immediately so 对话内切图即时回填。
+      void refreshWorkspace(sid);
     }
     setChat((c) => {
       // complete the most recent running card matching the name (or any).
@@ -293,7 +305,7 @@ export function useAppController() {
           : it,
       );
     });
-  }, [ensureTaskPlaceholder, setChat]);
+  }, [ensureTaskPlaceholder, setChat, refreshWorkspace]);
 
   const finishPendingTools = React.useCallback(() => {
     setChat((c) => c.map((it) => (it.kind === "tool" && it.tool.status === "running" ? { ...it, tool: { ...it.tool, status: "done" } } : it)));

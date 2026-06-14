@@ -8,6 +8,7 @@ import { Timeline } from "./timeline";
 import { WorkspaceGrid } from "./workspace-grid";
 import { Lightbox } from "./lightbox";
 import { SizePicker } from "./size-picker";
+import { VideoOps } from "./video-ops";
 import { buildTimeline, assetLabels } from "@/lib/timeline";
 import { cn } from "@/lib/utils";
 import * as api from "@/lib/api";
@@ -20,6 +21,8 @@ export function WorkspacePanel() {
   const { state } = app;
   const [preview, setPreview] = React.useState<Asset | null>(null);
   const [cropFor, setCropFor] = React.useState<string[] | null>(null);
+  const [videoOps, setVideoOps] = React.useState<{ asset: Asset; op: "trim" | "frame" } | null>(null);
+  const openVideoOps = React.useCallback((a: Asset, op: "trim" | "frame" = "trim") => setVideoOps({ asset: a, op }), []);
 
   // View mode: grid (show-all, default) or timeline (production line). Persisted
   // in sessionStorage so a reload keeps the user's choice.
@@ -71,7 +74,7 @@ export function WorkspacePanel() {
     <div className="flex h-full min-h-0 flex-col">
       <div className="flex items-center gap-2 border-b border-line px-5 py-3">
         <BrandMark className="size-5 text-accent" />
-        <h2 className="text-sm font-semibold">资产工作区</h2>
+        <h2 className="text-sm font-semibold">工作区</h2>
         {/* View toggle: grid (all) ↔ timeline (production line) */}
         <div className="ml-3 flex items-center rounded-md border border-line p-0.5">
           <button
@@ -144,6 +147,7 @@ export function WorkspacePanel() {
             onPreview={setPreview}
             onCrop={(x) => setCropFor([x.id])}
             onVideo={(x) => { setPreview(x); }}
+            onVideoOps={openVideoOps}
           />
         ) : (
           <WorkspaceGrid
@@ -152,12 +156,14 @@ export function WorkspacePanel() {
             onPreview={setPreview}
             onCrop={(x) => setCropFor([x.id])}
             onVideo={(x) => { setPreview(x); }}
+            onVideoOps={openVideoOps}
           />
         )}
       </div>
 
-      <Lightbox asset={preview} onOpenChange={(o) => !o && setPreview(null)} onCrop={(a) => { setPreview(null); setCropFor([a.id]); }} />
+      <Lightbox asset={preview} onOpenChange={(o) => !o && setPreview(null)} onCrop={(a) => { setPreview(null); setCropFor([a.id]); }} onVideoOps={(a, op) => { setPreview(null); openVideoOps(a, op); }} />
       <SizePicker assetIds={cropFor} onOpenChange={(o) => !o && setCropFor(null)} />
+      <VideoOps asset={videoOps?.asset ?? null} initialOp={videoOps?.op} onOpenChange={(o) => !o && setVideoOps(null)} />
     </div>
   );
 }

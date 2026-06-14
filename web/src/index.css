@@ -14,6 +14,11 @@
   --fg-mute: 220 8% 48%;
   --accent: 205 55% 60%;
   --accent-fg: 222 30% 10%;
+  /* Second accent — only for media-type 角标 (video). Kept in the same muted
+     family as --accent (no neon), shifted to a teal hue so 图/视频 编号 are
+     distinguishable at a glance without breaking the single-primary palette. */
+  --accent-2: 170 42% 52%;
+  --accent-2-fg: 175 35% 8%;
   --ok: 158 42% 52%;
   --danger: 6 60% 60%;
   --warn: 38 60% 58%;

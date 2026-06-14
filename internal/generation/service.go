@@ -15,6 +15,7 @@ import (
 	_ "image/jpeg" // .
 	_ "image/png"  // .
 
+	"gameasset/internal/crop"
 	"gameasset/internal/imageopt"
 	"gameasset/internal/store"
 	"gameasset/internal/transport"
@@ -267,7 +268,21 @@ func (s *Service) run(ctx context.Context, taskID string, p GenerateParams) {
 	}
 	s.progress(taskID, p.SessionID, 45)
 
-	// 二次调整：产物尺寸继承源图原尺寸（provider 端会 snap 到支持的尺寸 enum）。
+	// Desired output dimensions: 普通二次调整继承源图原尺寸；generate_icon 则使用目标
+	// icon 尺寸（provider 端会 snap 到支持的尺寸 enum，最终再由 crop 收敛到精确尺寸）。
+	wantW, wantH := srcW, srcH
+	iconW, iconH := 0, 0
+	if p.Slots.Kind == EditIcon {
+		iconW, iconH = p.Slots.IconWidth, p.Slots.IconHeight
+		if iconW <= 0 {
+			iconW = DefaultIconSize
+		}
+		if iconH <= 0 {
+			iconH = DefaultIconSize
+		}
+		wantW, wantH = iconW, iconH
+	}
+
 	genStart := time.Now()
 	log.Printf("gen.run: task=%s calling provider.Generate (prompt %d chars, refs=%d)", taskID, len(prompt), len(extraImages))
 	out, err := s.gen.Generate(ctx, Request{
@@ -275,8 +290,8 @@ func (s *Service) run(ctx context.Context, taskID string, p GenerateParams) {
 		SourceImage:     srcBytes,
 		SourceMime:      srcMime,
 		ReferenceImages: extraImages,
-		Width:           srcW,
-		Height:          srcH,
+		Width:           wantW,
+		Height:          wantH,
 	})
 	if err != nil {
 		log.Printf("gen.run: task=%s provider.Generate FAILED after %s: %v", taskID, time.Since(genStart), err)
@@ -293,6 +308,17 @@ func (s *Service) run(ctx context.Context, taskID string, p GenerateParams) {
 		return
 	}
 	s.progress(taskID, p.SessionID, 80)
+
+	// generate_icon: provider 会把尺寸 snap 到支持的 enum，产物尺寸往往大于目标
+	// icon 尺寸。用 contain 收敛到精确尺寸——保留完整主体、不裁切，多余区域留白
+	// （透明），保证最终落库即是请求的 icon 尺寸。
+	if p.Slots.Kind == EditIcon && iconW > 0 && iconH > 0 {
+		if conv, err := crop.CropBytesWithOptions(out.Data, iconW, iconH, crop.Options{Mode: crop.ModeContain}); err != nil {
+			log.Printf("gen.run: task=%s icon converge to %dx%d FAILED: %v (keeping provider output)", taskID, iconW, iconH, err)
+		} else {
+			out.Data = conv.Data
+		}
+	}
 
 	// Persist the product.
 	assetID := s.newID("asset")

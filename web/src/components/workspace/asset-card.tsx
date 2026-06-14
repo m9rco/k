@@ -22,12 +22,14 @@ export function AssetCard({
   onPreview,
   onCrop,
   onVideo,
+  onVideoOps,
 }: {
   asset: Asset;
   label?: string;
   onPreview: (a: Asset) => void;
   onCrop: (a: Asset) => void;
   onVideo: (a: Asset) => void;
+  onVideoOps: (a: Asset, op?: "trim" | "frame") => void;
 }) {
   const app = useApp();
   const selected = app.state.selected.has(asset.id);
@@ -89,7 +91,13 @@ export function AssetCard({
 
           <div className="absolute left-1.5 top-1.5 flex items-center gap-1">
             {label && (
-              <span className="rounded-md bg-accent/85 px-1.5 py-0.5 text-[10px] font-medium text-accent-fg backdrop-blur-sm">
+              <span
+                className={
+                  isVideo
+                    ? "rounded-md bg-accent-2/85 px-1.5 py-0.5 text-[10px] font-medium text-accent-2-fg backdrop-blur-sm"
+                    : "rounded-md bg-accent/85 px-1.5 py-0.5 text-[10px] font-medium text-accent-fg backdrop-blur-sm"
+                }
+              >
                 {label}
               </span>
             )}
@@ -134,6 +142,8 @@ export function AssetCard({
         {!isVideo && <ContextMenuItem onSelect={() => onCrop(asset)}>切尺寸</ContextMenuItem>}
         {!isVideo && <ContextMenuItem onSelect={() => onPreview(asset)}>二次调整</ContextMenuItem>}
         {!isVideo && <ContextMenuItem onSelect={() => onVideo(asset)}>生成视频</ContextMenuItem>}
+        {isVideo && <ContextMenuItem onSelect={() => onVideoOps(asset, "trim")}>裁剪片段</ContextMenuItem>}
+        {isVideo && <ContextMenuItem onSelect={() => onVideoOps(asset, "frame")}>抽帧</ContextMenuItem>}
         <ContextMenuItem onSelect={() => downloadAsset(app.state.sessionId, asset.id)}>下载</ContextMenuItem>
         <ContextMenuSeparator />
         <ContextMenuItem destructive onSelect={() => app.removeAsset(asset.id)}>移除</ContextMenuItem>

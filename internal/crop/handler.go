@@ -27,6 +27,12 @@ type cropRequest struct {
 	SizeIDs []string `json:"sizeIds"`
 	// Lossless toggles PNG lossless optimization of products (default true when omitted).
 	Lossless *bool `json:"lossless,omitempty"`
+	// Mode selects the crop strategy: cover (default) | contain | anchor | rect.
+	Mode string `json:"mode,omitempty"`
+	// Anchor names the nine-grid crop position when Mode == anchor.
+	Anchor string `json:"anchor,omitempty"`
+	// Rect is the normalized crop region (x,y,w,h ∈ [0,1]) when Mode == rect.
+	Rect *Rect `json:"rect,omitempty"`
 }
 
 // handleCrop performs a direct, synchronous crop and returns the produced
@@ -45,7 +51,8 @@ func (s *Service) handleCrop(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	lossless := req.Lossless == nil || *req.Lossless
-	results, err := s.CropToSizes(sessionID, req.SourceAssetID, req.SizeIDs, lossless)
+	opts := Options{Mode: Mode(req.Mode), Anchor: Anchor(req.Anchor), Rect: req.Rect}
+	results, err := s.CropToSizes(sessionID, req.SourceAssetID, req.SizeIDs, lossless, opts)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return

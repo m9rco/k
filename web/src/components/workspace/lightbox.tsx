@@ -1,21 +1,23 @@
 import * as React from "react";
-import { Download, Crop } from "lucide-react";
+import { Download, Crop, Scissors } from "lucide-react";
 import type { Asset } from "@/lib/types";
 import { useApp } from "@/store/context";
 import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 import * as VisuallyHidden from "@radix-ui/react-visually-hidden";
 
-// Lightbox previews an asset. Images get re-adjust + generate-video inputs;
-// video assets just play (image-only tools hidden).
+// Lightbox previews an asset. Images get re-adjust + generate-video + icon
+// inputs; video assets get a play surface plus an entry to in-browser 视频处理.
 export function Lightbox({
   asset,
   onOpenChange,
   onCrop,
+  onVideoOps,
 }: {
   asset: Asset | null;
   onOpenChange: (open: boolean) => void;
   onCrop: (a: Asset) => void;
+  onVideoOps: (a: Asset, op?: "trim" | "frame") => void;
 }) {
   const app = useApp();
   const [adjust, setAdjust] = React.useState("");
@@ -70,6 +72,11 @@ export function Lightbox({
             {!isVideo && (
               <Button variant="outline" size="sm" onClick={() => onCrop(asset)}>
                 <Crop className="size-3.5" /> 切尺寸
+              </Button>
+            )}
+            {isVideo && (
+              <Button variant="outline" size="sm" onClick={() => onVideoOps(asset)}>
+                <Scissors className="size-3.5" /> 裁剪 / 抽帧
               </Button>
             )}
             <Button variant="outline" size="sm" onClick={download}>

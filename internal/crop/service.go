@@ -91,8 +91,9 @@ type CropMeta struct {
 // product as a "cropped" asset owned by the session. The source is loaded from
 // the store (enforcing session ownership). Sizes are looked up by their globally
 // unique id across the whole channel catalog. When lossless is true, each PNG
-// product is losslessly optimized before persistence.
-func (s *Service) CropToSizes(sessionID, sourceAssetID string, sizeIDs []string, lossless bool) ([]CropResult, error) {
+// product is losslessly optimized before persistence. The crop mode defaults to
+// cover when opts.Mode is empty.
+func (s *Service) CropToSizes(sessionID, sourceAssetID string, sizeIDs []string, lossless bool, opts Options) ([]CropResult, error) {
 	src, err := s.store.GetAsset(sessionID, sourceAssetID)
 	if err != nil {
 		return nil, err
@@ -117,7 +118,7 @@ func (s *Service) CropToSizes(sessionID, sourceAssetID string, sizeIDs []string,
 	var results []CropResult
 	for _, ref := range refs {
 		sz := ref.size
-		res, err := CropBytes(data, sz.Width, sz.Height)
+		res, err := CropBytesWithOptions(data, sz.Width, sz.Height, opts)
 		if err != nil {
 			return nil, fmt.Errorf("crop to %s: %w", sz.ID, err)
 		}
