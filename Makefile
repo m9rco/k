@@ -4,7 +4,10 @@
 # into web/static, which the Go binary embeds (web/web.go). So a full build is two
 # steps: build the frontend, then build the Go binary.
 
-.PHONY: web server build run test clean
+.PHONY: web server build run kill-port test clean
+
+# Port the server listens on; kill-port frees it before run.
+PORT ?= 8080
 
 # Build the React frontend into web/static (embedded by the Go binary).
 web:
@@ -17,8 +20,19 @@ server:
 # Full build: frontend then binary.
 build: web server
 
-# Run the server (build frontend + binary first).
-run: build
+# Free the listen port: kill whatever holds it (no-op when free).
+kill-port:
+	@pids=$$(lsof -ti tcp:$(PORT) -s tcp:LISTEN 2>/dev/null); \
+	if [ -n "$$pids" ]; then \
+		echo "killing process(es) on port $(PORT): $$pids"; \
+		kill $$pids 2>/dev/null || true; \
+		sleep 1; \
+	else \
+		echo "port $(PORT) is free"; \
+	fi
+
+# Run the server (build frontend + binary first, freeing the port if taken).
+run: build kill-port
 	./bin/server
 
 test:

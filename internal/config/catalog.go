@@ -19,6 +19,14 @@ var AllScenes = []ModelScene{SceneChat, SceneImage, SceneTextToImage, SceneVideo
 // CatalogEntry is one selectable model in the catalog. Provider is the adapter
 // selection key (openai/anthropic/gemini/dashscope/veo/happyhorse); IconKey maps
 // to a built-in vendor brand SVG on the frontend.
+//
+// ID is the stable logical key: it is what the frontend offers, what a session's
+// preference stores, and how an entry is looked up. Model is the provider-facing
+// "wire" name actually sent to the API. They differ when a gateway names a model
+// differently from our stable id (e.g. taiji exposes DeepSeek V4 Flash as
+// "DeepSeek-V4-Flash-Online-32k"); when Model is empty the ID doubles as the wire
+// name. Keeping ID stable means changing a wire name never invalidates stored
+// session selections.
 type CatalogEntry struct {
 	ID          string     `json:"id"`
 	DisplayName string     `json:"displayName"`
@@ -26,6 +34,16 @@ type CatalogEntry struct {
 	Vendor      string     `json:"vendor"`
 	IconKey     string     `json:"iconKey"`
 	Provider    string     `json:"-"` // resolution detail, not exposed to the client
+	Model       string     `json:"-"` // provider wire name; falls back to ID when empty
+}
+
+// WireModel returns the provider-facing model name to send to the API: the
+// explicit Model override when set, else the stable ID.
+func (e CatalogEntry) WireModel() string {
+	if e.Model != "" {
+		return e.Model
+	}
+	return e.ID
 }
 
 // modelCatalog is the static, server-authoritative list of known models. The
@@ -33,6 +51,7 @@ type CatalogEntry struct {
 // configured. Adding a model here (plus its credentials) makes it selectable.
 var modelCatalog = []CatalogEntry{
 	// 逻辑推理 (chat)
+	// {ID: "deepseek-v4-flash", DisplayName: "DeepSeek V4 Flash", Scene: SceneChat, Vendor: "DeepSeek", IconKey: "deepseek", Provider: "openai", Model: "DeepSeek-V4-Flash-Online-32k"},
 	{ID: "deepseek-v4-flash", DisplayName: "DeepSeek V4 Flash", Scene: SceneChat, Vendor: "DeepSeek", IconKey: "deepseek", Provider: "openai"},
 	{ID: "gpt-5.4", DisplayName: "GPT-5.4", Scene: SceneChat, Vendor: "OpenAI", IconKey: "openai", Provider: "openai"},
 	{ID: "doubao-seed-2-0-mini-260428", DisplayName: "Doubao Seed 2.0 mini", Scene: SceneChat, Vendor: "Doubao", IconKey: "doubao", Provider: "openai"},
@@ -73,24 +92,43 @@ func (c *Config) sceneCredential(scene ModelScene) (baseURL, apiKey string) {
 	return "", ""
 }
 
-// SceneDefaultModel returns the server-preselected (default) model id for a
-// scene — the one used when a session has made no selection. It is the model id
-// resolved from the server's configuration for that scene (e.g. the default
-// image-to-video provider is happyhorse). Returns "" when the scene has no
-// configured default. Chat reflects the active default (test model when enabled).
+// catalogIDForModel reverse-maps a configured model string to its stable catalog
+// ID for the scene. The server's per-scene config (e.g. CHAT_PRIMARY_MODEL) holds
+// the provider wire name, which may differ from the catalog ID; the frontend
+// labels its default by catalog ID, so we match the configured value against
+// each entry's wire name OR its id and return the id. Falls back to the raw
+// value when no catalog entry matches, so an off-catalog default still surfaces.
+func catalogIDForModel(scene ModelScene, model string) string {
+	if model == "" {
+		return ""
+	}
+	for _, e := range modelCatalog {
+		if e.Scene == scene && (e.WireModel() == model || e.ID == model) {
+			return e.ID
+		}
+	}
+	return model
+}
+
+// SceneDefaultModel returns the server-preselected (default) catalog ID for a
+// scene — the one used when a session has made no selection. The configured value
+// (a provider wire name) is reverse-mapped to its catalog ID so the client, which
+// works in catalog-id space, can label and match it. Returns "" when the scene
+// has no configured default. Chat reflects the active default (test model when
+// enabled).
 func (c *Config) SceneDefaultModel(scene ModelScene) string {
 	switch scene {
 	case SceneChat:
 		if c.UseTestModel {
-			return c.ChatTest.Model
+			return catalogIDForModel(SceneChat, c.ChatTest.Model)
 		}
-		return c.ChatPrimary.Model
+		return catalogIDForModel(SceneChat, c.ChatPrimary.Model)
 	case SceneImage:
-		return c.ImagePrimary.Model
+		return catalogIDForModel(SceneImage, c.ImagePrimary.Model)
 	case SceneTextToImage:
-		return c.TextToImage.Model
+		return catalogIDForModel(SceneTextToImage, c.TextToImage.Model)
 	case SceneVideo:
-		return c.Video.Model
+		return catalogIDForModel(SceneVideo, c.Video.Model)
 	}
 	return ""
 }
@@ -160,7 +198,7 @@ func (c *Config) ResolveChatModel(modelID string) (ModelConfig, bool) {
 	base, key := c.sceneCredential(SceneChat)
 	return ModelConfig{
 		Provider: e.Provider,
-		Model:    e.ID,
+		Model:    e.WireModel(),
 		BaseURL:  base,
 		APIKey:   key,
 		Thinking: c.ChatPrimary.Thinking,
@@ -181,6 +219,6 @@ func (c *Config) ResolveImageModel(scene ModelScene, modelID string) (ImageProvi
 		Provider: e.Provider,
 		BaseURL:  base,
 		APIKey:   key,
-		Model:    e.ID,
+		Model:    e.WireModel(),
 	}, true
 }

@@ -3,6 +3,7 @@ package agent
 import (
 	"bufio"
 	"encoding/json"
+	"fmt"
 	"io"
 	"sort"
 	"strings"
@@ -26,6 +27,38 @@ func reasoningFrame(delta string) *schema.Message {
 	m := schema.AssistantMessage("", nil)
 	m.ReasoningContent = delta
 	return m
+}
+
+// sseError extracts a provider error embedded in an SSE `data:` payload. Some
+// gateways (e.g. taiji) answer with HTTP 200 + text/event-stream but deliver the
+// real failure as a single `data: {"error":{...}}` frame instead of a non-2xx
+// status. Without this, the chunk has no choices/events and the parser would
+// silently skip it, surfacing as an unexplained empty turn (chunks=0). Returns
+// a non-nil error when payload carries one, so the parser can fail loudly.
+func sseError(payload string) error {
+	// Cheap guard: only attempt the decode when the frame mentions an error key,
+	// so normal content frames skip the extra unmarshal.
+	if !strings.Contains(payload, `"error"`) {
+		return nil
+	}
+	var probe struct {
+		Error *struct {
+			Message string `json:"message"`
+			Type    string `json:"type"`
+			Code    any    `json:"code"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal([]byte(payload), &probe); err != nil || probe.Error == nil {
+		return nil
+	}
+	msg := probe.Error.Message
+	if msg == "" {
+		msg = fmt.Sprintf("%v", probe.Error.Code)
+	}
+	if probe.Error.Type != "" {
+		return fmt.Errorf("provider stream error (%s): %s", probe.Error.Type, msg)
+	}
+	return fmt.Errorf("provider stream error: %s", msg)
 }
 
 // flushToolCalls emits accumulated tool-call chunks as one assistant frame,
@@ -95,6 +128,9 @@ func streamOpenAI(body io.Reader, sw frameSink) error {
 		payload := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
 		if payload == "[DONE]" {
 			break
+		}
+		if perr := sseError(payload); perr != nil {
+			return perr // gateway delivered an error inside the 200 SSE body
 		}
 		var chunk oaChunk
 		if err := json.Unmarshal([]byte(payload), &chunk); err != nil {
@@ -167,6 +203,9 @@ func streamAnthropic(body io.Reader, sw frameSink) error {
 		payload := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
 		if payload == "" {
 			continue
+		}
+		if perr := sseError(payload); perr != nil {
+			return perr // gateway delivered an error inside the 200 SSE body
 		}
 		var ev aEvent
 		if err := json.Unmarshal([]byte(payload), &ev); err != nil {

@@ -202,9 +202,44 @@ func (m *chatModel) baseURL(def string) string {
 
 // ---- OpenAI-compatible (DeepSeek) ----
 
+// normalizeMessages collapses adjacent plain-text messages that share a role so
+// the request satisfies providers that require strict user/assistant pairing
+// (e.g. taiji rejects "m[i]: assistant, m[i+1]: assistant Not paired qa"). Such
+// runs arise from restored history: a stretch of turns that produced no model
+// reply persists consecutive user messages, and some turns leave consecutive
+// assistant messages. Only User/Assistant messages with NO tool_calls and NO
+// tool_call_id are merged (joined with a blank line); System and tool-call
+// messages pass through untouched so a live turn's assistant→tool_result
+// pairing is never disturbed.
+func normalizeMessages(input []*schema.Message) []*schema.Message {
+	out := make([]*schema.Message, 0, len(input))
+	mergeable := func(m *schema.Message) bool {
+		if m.Role != schema.User && m.Role != schema.Assistant {
+			return false
+		}
+		return len(m.ToolCalls) == 0 && m.ToolCallID == ""
+	}
+	for _, in := range input {
+		if n := len(out); n > 0 && mergeable(in) && mergeable(out[n-1]) && out[n-1].Role == in.Role {
+			prev := out[n-1]
+			merged := *prev // copy so we don't mutate the caller's window message
+			if merged.Content != "" && in.Content != "" {
+				merged.Content += "\n\n" + in.Content
+			} else {
+				merged.Content += in.Content
+			}
+			out[n-1] = &merged
+			continue
+		}
+		out = append(out, in)
+	}
+	return out
+}
+
 // openAIBody assembles the chat-completions request body shared by the
 // streaming and non-streaming paths.
 func (m *chatModel) openAIBody(input []*schema.Message) map[string]any {
+	input = normalizeMessages(input)
 	type oaTool struct {
 		Type     string         `json:"type"`
 		Function map[string]any `json:"function"`
@@ -299,6 +334,7 @@ func (m *chatModel) generateOpenAI(ctx context.Context, input []*schema.Message)
 // anthropicBody assembles the Messages API request body shared by the
 // streaming and non-streaming paths.
 func (m *chatModel) anthropicBody(input []*schema.Message) map[string]any {
+	input = normalizeMessages(input)
 	var system string
 	type block map[string]any
 	type aMsg struct {

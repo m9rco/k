@@ -404,14 +404,21 @@ func (o *Orchestrator) Handle(ctx context.Context, sessionID, userText string, l
 
 	var sb strings.Builder
 	toolCalls := 0
+	chunks := 0
 	for {
 		chunk, err := stream.Recv()
 		if err != nil {
+			if err != io.EOF {
+				// Surface the real upstream/transport error instead of silently
+				// ending the turn with an empty reply (root-cause diagnostics).
+				log.Printf("agent: session=%s stream recv error after %d chunks: %v", sessionID, chunks, err)
+			}
 			break // io.EOF or stream end
 		}
 		if chunk == nil {
 			continue
 		}
+		chunks++
 		if chunk.ReasoningContent != "" {
 			o.emit(sessionID, transport.Event{
 				Type:      transport.EventReasoning,
@@ -450,7 +457,7 @@ func (o *Orchestrator) Handle(ctx context.Context, sessionID, userText string, l
 	// that should produce an asset but emitted 0 tool calls means the model only
 	// replied with text (e.g. a small model that "confirms" without acting) —
 	// this is the signal to inspect the model/prompt, not the workspace pipeline.
-	log.Printf("agent: session=%s turn done toolCalls=%d replyLen=%d capsule=%t cancelled=%t", sessionID, toolCalls, len(reply), capsuleAsked, cancelled)
+	log.Printf("agent: session=%s turn done toolCalls=%d replyLen=%d chunks=%d capsule=%t cancelled=%t", sessionID, toolCalls, len(reply), chunks, capsuleAsked, cancelled)
 
 	if cancelled {
 		// Interrupted mid-turn: persist whatever was produced (keeps context

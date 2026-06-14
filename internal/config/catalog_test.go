@@ -72,6 +72,31 @@ func TestResolveChatModel(t *testing.T) {
 	}
 }
 
+// TestResolveChatModelUsesWireName verifies that a catalog entry whose provider
+// wire name differs from its stable id (deepseek-v4-flash -> the taiji name)
+// resolves to the WIRE name for the API, while the id stays the selection key.
+func TestResolveChatModelUsesWireName(t *testing.T) {
+	cfg := baseConfig()
+	mc, ok := cfg.ResolveChatModel("deepseek-v4-flash")
+	if !ok {
+		t.Fatal("expected resolve ok")
+	}
+	if mc.Model != "DeepSeek-V4-Flash-Online-32k" {
+		t.Errorf("Model = %q, want the provider wire name DeepSeek-V4-Flash-Online-32k", mc.Model)
+	}
+}
+
+// TestSceneDefaultMapsWireNameToCatalogID verifies the default-labeling path:
+// when the server config holds the provider wire name, SceneDefaultModel returns
+// the stable catalog id the frontend can match.
+func TestSceneDefaultMapsWireNameToCatalogID(t *testing.T) {
+	cfg := baseConfig()
+	cfg.ChatPrimary.Model = "DeepSeek-V4-Flash-Online-32k" // configured as wire name
+	if got := cfg.SceneDefaultModel(SceneChat); got != "deepseek-v4-flash" {
+		t.Errorf("SceneDefaultModel = %q, want catalog id deepseek-v4-flash", got)
+	}
+}
+
 func TestResolveImageModel(t *testing.T) {
 	cfg := baseConfig()
 	pc, ok := cfg.ResolveImageModel(SceneImage, "gemini-3-pro-image")
