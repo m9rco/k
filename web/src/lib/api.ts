@@ -128,10 +128,12 @@ export function optimizePrompt(sid: string, text: string) {
 // ModelEntry is defined in lib/types; re-exported here for callers of the API.
 export type { ModelEntry } from "@/lib/types";
 
-// ModelsResponse: catalog grouped by scene + the session's current selection.
+// ModelsResponse: catalog grouped by scene + the session's current selection +
+// the server-preselected default model id per scene.
 export interface ModelsResponse {
   catalog: Record<string, import("@/lib/types").ModelEntry[]>;
   selected: Record<string, string>;
+  defaults: Record<string, string>;
 }
 
 export function getModels(sid: string) {

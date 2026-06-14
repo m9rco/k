@@ -235,12 +235,12 @@ func run() error {
 	// plus the session's current choices, and switch a scene's model. Switching the
 	// chat model triggers a brief self-introduction by the new model.
 	mux.HandleFunc("GET /api/session/{id}/models", func(w http.ResponseWriter, r *http.Request) {
-		catalog, selected, err := orch.AvailableModels(r.PathValue("id"))
+		catalog, selected, defaults, err := orch.AvailableModels(r.PathValue("id"))
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-		writeJSON(w, map[string]any{"catalog": catalog, "selected": selected})
+		writeJSON(w, map[string]any{"catalog": catalog, "selected": selected, "defaults": defaults})
 	})
 	mux.HandleFunc("POST /api/session/{id}/models", func(w http.ResponseWriter, r *http.Request) {
 		var req struct {

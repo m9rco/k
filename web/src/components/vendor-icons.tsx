@@ -44,6 +44,7 @@ const VENDOR_ICONS: Record<string, React.ComponentType<IconProps>> = {
   qwen: (p) => <Letter ch="Q" {...p} />,
   wan: (p) => <Letter ch="W" {...p} />,
   veo: (p) => <Letter ch="V" {...p} />,
+  happyhorse: (p) => <Letter ch="马" {...p} />,
 };
 
 export function VendorIcon({ iconKey, className }: { iconKey: string; className?: string }) {

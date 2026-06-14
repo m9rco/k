@@ -46,9 +46,9 @@ export interface AppState {
   // turn_end, or reordered/interrupt-sent by the user (Cursor-style).
   queue: QueuedMessage[];
   context: { estimatedTokens: number; budget: number; compressed: boolean } | null;
-  // models holds the per-scene catalog + current selection; loaded lazily when
-  // the model picker opens. null until first fetched.
-  models: { catalog: Record<string, ModelEntry[]>; selected: Record<string, string> } | null;
+  // models holds the per-scene catalog + current selection + server defaults;
+  // loaded lazily when the model picker opens. null until first fetched.
+  models: { catalog: Record<string, ModelEntry[]>; selected: Record<string, string>; defaults: Record<string, string> } | null;
 }
 
 export const initialState: AppState = {

@@ -102,13 +102,15 @@ func NewOrchestrator(cfg *config.Config, gen *generation.Service, cr *crop.Servi
 func (o *Orchestrator) SetTextToImage(svc *generation.Service) { o.textToImg = svc }
 
 // AvailableModels returns the server-authoritative, credential-filtered model
-// catalog grouped by scene, plus the session's current selection per scene.
-func (o *Orchestrator) AvailableModels(sessionID string) (map[config.ModelScene][]config.CatalogEntry, map[config.ModelScene]string, error) {
+// catalog grouped by scene, the session's current selection per scene, and the
+// server-preselected default model id per scene (used when the session has made
+// no selection).
+func (o *Orchestrator) AvailableModels(sessionID string) (map[config.ModelScene][]config.CatalogEntry, map[config.ModelScene]string, map[config.ModelScene]string, error) {
 	overrides, err := o.models.Overrides(sessionID)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
-	return o.cfg.AvailableModelsByScene(), overrides, nil
+	return o.cfg.AvailableModelsByScene(), overrides, o.cfg.SceneDefaults(), nil
 }
 
 // SwitchModel records a session's model selection for a scene (validated against

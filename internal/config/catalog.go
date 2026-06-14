@@ -51,6 +51,7 @@ var modelCatalog = []CatalogEntry{
 	{ID: "qwen-image-2.0-2026-03-03", DisplayName: "Qwen Image 2.0", Scene: SceneTextToImage, Vendor: "Qwen", IconKey: "qwen", Provider: "dashscope"},
 
 	// 图生视频 (video)
+	{ID: "happyhorse-1.0-r2v", DisplayName: "HappyHorse 1.0 R2V", Scene: SceneVideo, Vendor: "HappyHorse", IconKey: "happyhorse", Provider: "happyhorse"},
 	{ID: "veo_3_1_fast_components_vip", DisplayName: "Veo 3.1 Fast", Scene: SceneVideo, Vendor: "Google", IconKey: "veo", Provider: "veo"},
 	{ID: "veo_3_1_components_vip", DisplayName: "Veo 3.1", Scene: SceneVideo, Vendor: "Google", IconKey: "veo", Provider: "veo"},
 }
@@ -72,7 +73,40 @@ func (c *Config) sceneCredential(scene ModelScene) (baseURL, apiKey string) {
 	return "", ""
 }
 
-// AvailableModels returns the catalog filtered to scenes whose credential is
+// SceneDefaultModel returns the server-preselected (default) model id for a
+// scene — the one used when a session has made no selection. It is the model id
+// resolved from the server's configuration for that scene (e.g. the default
+// image-to-video provider is happyhorse). Returns "" when the scene has no
+// configured default. Chat reflects the active default (test model when enabled).
+func (c *Config) SceneDefaultModel(scene ModelScene) string {
+	switch scene {
+	case SceneChat:
+		if c.UseTestModel {
+			return c.ChatTest.Model
+		}
+		return c.ChatPrimary.Model
+	case SceneImage:
+		return c.ImagePrimary.Model
+	case SceneTextToImage:
+		return c.TextToImage.Model
+	case SceneVideo:
+		return c.Video.Model
+	}
+	return ""
+}
+
+// SceneDefaults returns the default model id per scene, for the client to label
+// the "server preselected (default)" model in each scene group.
+func (c *Config) SceneDefaults() map[ModelScene]string {
+	out := make(map[ModelScene]string, len(AllScenes))
+	for _, scene := range AllScenes {
+		if id := c.SceneDefaultModel(scene); id != "" {
+			out[scene] = id
+		}
+	}
+	return out
+}
+
 // configured (non-empty api key). A scene with no api key yields no entries, so
 // the frontend never offers a model that would fail on use.
 func (c *Config) AvailableModels() []CatalogEntry {

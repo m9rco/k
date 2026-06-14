@@ -562,7 +562,7 @@ export function useAppController() {
     if (!sid) return;
     try {
       const m = await api.getModels(sid);
-      setState((s) => ({ ...s, models: { catalog: m.catalog || {}, selected: m.selected || {} } }));
+      setState((s) => ({ ...s, models: { catalog: m.catalog || {}, selected: m.selected || {}, defaults: m.defaults || {} } }));
     } catch (e) {
       toast("加载模型列表失败：" + (e as Error).message);
     }

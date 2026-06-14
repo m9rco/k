@@ -22,6 +22,7 @@ export function ModelPicker({ open, onOpenChange }: { open: boolean; onOpenChang
 
   const catalog = state.models?.catalog ?? {};
   const selected = state.models?.selected ?? {};
+  const defaults = state.models?.defaults ?? {};
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -44,7 +45,11 @@ export function ModelPicker({ open, onOpenChange }: { open: boolean; onOpenChang
                 ) : (
                   <div className="grid grid-cols-2 gap-2">
                     {models.map((m: ModelEntry) => {
-                      const active = selected[scene.key] === m.id;
+                      // The effective choice: the session's selection, or the
+                      // server default when the session has not chosen one.
+                      const isDefault = defaults[scene.key] === m.id;
+                      const effective = selected[scene.key] ?? defaults[scene.key];
+                      const active = effective === m.id;
                       return (
                         <button
                           key={m.id}
@@ -60,8 +65,13 @@ export function ModelPicker({ open, onOpenChange }: { open: boolean; onOpenChang
                           <span className={cn("grid size-7 shrink-0 place-items-center rounded-md", active ? "text-accent" : "text-fg-mute")}>
                             <VendorIcon iconKey={m.iconKey} className="size-5" />
                           </span>
-                          <span className="min-w-0">
-                            <span className="block truncate text-[13px] font-medium leading-tight">{m.displayName}</span>
+                          <span className="min-w-0 flex-1">
+                            <span className="flex items-center gap-1.5">
+                              <span className="truncate text-[13px] font-medium leading-tight">{m.displayName}</span>
+                              {isDefault && (
+                                <span className="shrink-0 rounded-full border border-line px-1.5 py-px text-[10px] leading-none text-fg-mute">默认</span>
+                              )}
+                            </span>
                             <span className="block truncate text-[11px] text-fg-mute">{m.vendor}</span>
                           </span>
                         </button>

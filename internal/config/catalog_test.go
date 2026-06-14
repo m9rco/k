@@ -7,7 +7,7 @@ func baseConfig() *Config {
 		ChatPrimary:  ModelConfig{BaseURL: "https://c/v1", APIKey: "sk-chat", Provider: "openai", Model: "deepseek-v4-flash"},
 		ImagePrimary: ImageProviderConfig{BaseURL: "https://i/v1", APIKey: "sk-img"},
 		TextToImage:  ImageProviderConfig{BaseURL: "https://t/v1", APIKey: ""}, // not configured
-		Video:        ImageProviderConfig{BaseURL: "https://v/v1", APIKey: "sk-vid"},
+		Video:        ImageProviderConfig{BaseURL: "https://v/v1", APIKey: "sk-vid", Model: "happyhorse-1.0-r2v"},
 	}
 }
 
@@ -86,5 +86,21 @@ func TestResolveImageModel(t *testing.T) {
 	}
 	if _, ok := cfg.ResolveImageModel(SceneTextToImage, "wan2.7-image-pro"); ok {
 		t.Error("unconfigured scene should not resolve")
+	}
+}
+
+func TestSceneDefaults(t *testing.T) {
+	cfg := baseConfig()
+	defs := cfg.SceneDefaults()
+	if defs[SceneChat] != "deepseek-v4-flash" {
+		t.Errorf("chat default = %q, want deepseek-v4-flash", defs[SceneChat])
+	}
+	// Video default is happyhorse — the server-preselected image-to-video model.
+	if defs[SceneVideo] != "happyhorse-1.0-r2v" {
+		t.Errorf("video default = %q, want happyhorse-1.0-r2v", defs[SceneVideo])
+	}
+	// happyhorse must exist in the catalog so the default is selectable/labelable.
+	if _, ok := catalogEntry(SceneVideo, "happyhorse-1.0-r2v"); !ok {
+		t.Error("happyhorse-1.0-r2v should be in the video catalog")
 	}
 }
