@@ -104,6 +104,209 @@ func TestLoadSharedYunwuKey(t *testing.T) {
 	}
 }
 
+// clearProviderEnv resets every dedicated/common/alias provider var so a test
+// starts from a known-empty baseline regardless of host environment.
+func clearProviderEnv(t *testing.T) {
+	t.Helper()
+	for _, k := range []string{
+		"COMMON_PROVIDER", "COMMON_BASE_URL", "COMMON_API_KEY",
+		"YUNWU_BASE_URL", "YUNWU_API_KEY", "DEEPSEEK_API_KEY",
+		"CHAT_PRIMARY_PROVIDER", "CHAT_PRIMARY_BASE_URL", "CHAT_PRIMARY_API_KEY", "CHAT_PRIMARY_MODEL",
+		"CHAT_TEST_PROVIDER", "CHAT_TEST_BASE_URL", "CHAT_TEST_API_KEY", "CHAT_TEST_MODEL",
+		"IMAGE_PRIMARY_PROVIDER", "IMAGE_PRIMARY_BASE_URL", "IMAGE_PRIMARY_API_KEY", "IMAGE_PRIMARY_MODEL",
+		"IMAGE_BACKUP_PROVIDER", "IMAGE_BACKUP_BASE_URL", "IMAGE_BACKUP_API_KEY", "IMAGE_BACKUP_MODEL",
+		"VIDEO_PROVIDER", "VIDEO_BASE_URL", "VIDEO_API_KEY", "VIDEO_MODEL",
+		"HAPPYHORSE_BASE_URL", "HAPPYHORSE_API_KEY", "HAPPYHORSE_MODEL",
+		"CRAWL_PROVIDER", "CRAWL_BASE_URL", "CRAWL_API_KEY", "CRAWL_ENDPOINT",
+	} {
+		t.Setenv(k, "")
+	}
+}
+
+// TestCommonFallbackFanOut: with only COMMON_* set, every model backend inherits
+// the shared credential and base URL.
+func TestCommonFallbackFanOut(t *testing.T) {
+	clearProviderEnv(t)
+	t.Setenv("COMMON_API_KEY", "sk-common")
+	t.Setenv("COMMON_BASE_URL", "https://common/v1")
+
+	cfg, err := Load("does-not-exist.json")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	for name, ep := range map[string]struct{ url, key string }{
+		"ChatPrimary":  {cfg.ChatPrimary.BaseURL, cfg.ChatPrimary.APIKey},
+		"ChatTest":     {cfg.ChatTest.BaseURL, cfg.ChatTest.APIKey},
+		"ImagePrimary": {cfg.ImagePrimary.BaseURL, cfg.ImagePrimary.APIKey},
+		"ImageBackup":  {cfg.ImageBackup.BaseURL, cfg.ImageBackup.APIKey},
+		"Video":        {cfg.Video.BaseURL, cfg.Video.APIKey},
+	} {
+		if ep.url != "https://common/v1" {
+			t.Errorf("%s.BaseURL = %q, want common", name, ep.url)
+		}
+		if ep.key != "sk-common" {
+			t.Errorf("%s.APIKey = %q, want common", name, ep.key)
+		}
+	}
+}
+
+// TestDedicatedOverridesCommon: a single backend's dedicated var wins; others
+// still inherit the common value.
+func TestDedicatedOverridesCommon(t *testing.T) {
+	clearProviderEnv(t)
+	t.Setenv("COMMON_API_KEY", "sk-common")
+	t.Setenv("IMAGE_PRIMARY_API_KEY", "sk-image")
+
+	cfg, err := Load("does-not-exist.json")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.ImagePrimary.APIKey != "sk-image" {
+		t.Errorf("ImagePrimary.APIKey = %q, want sk-image", cfg.ImagePrimary.APIKey)
+	}
+	if cfg.ImageBackup.APIKey != "sk-common" {
+		t.Errorf("ImageBackup.APIKey = %q, want sk-common", cfg.ImageBackup.APIKey)
+	}
+}
+
+// TestFieldLevelPartialOverride: overriding only BASE_URL leaves API_KEY on the
+// common fallback (fields resolve independently).
+func TestFieldLevelPartialOverride(t *testing.T) {
+	clearProviderEnv(t)
+	t.Setenv("COMMON_API_KEY", "sk-common")
+	t.Setenv("COMMON_BASE_URL", "https://common/v1")
+	t.Setenv("CHAT_PRIMARY_BASE_URL", "https://dedicated/v1")
+
+	cfg, err := Load("does-not-exist.json")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.ChatPrimary.BaseURL != "https://dedicated/v1" {
+		t.Errorf("BaseURL = %q, want dedicated", cfg.ChatPrimary.BaseURL)
+	}
+	if cfg.ChatPrimary.APIKey != "sk-common" {
+		t.Errorf("APIKey = %q, want common (field-level fallback)", cfg.ChatPrimary.APIKey)
+	}
+}
+
+// TestProviderPerModelOverride: provider is overridable per model and via common.
+func TestProviderPerModelOverride(t *testing.T) {
+	clearProviderEnv(t)
+	t.Setenv("CHAT_PRIMARY_PROVIDER", "anthropic")
+
+	cfg, err := Load("does-not-exist.json")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.ChatPrimary.Provider != "anthropic" {
+		t.Errorf("ChatPrimary.Provider = %q, want anthropic", cfg.ChatPrimary.Provider)
+	}
+	if cfg.ChatTest.Provider != "openai" {
+		t.Errorf("ChatTest.Provider = %q, want built-in openai", cfg.ChatTest.Provider)
+	}
+
+	t.Setenv("COMMON_PROVIDER", "anthropic")
+	t.Setenv("CHAT_PRIMARY_PROVIDER", "")
+	cfg, err = Load("does-not-exist.json")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.ImagePrimary.Provider != "anthropic" {
+		t.Errorf("ImagePrimary.Provider = %q, want common anthropic", cfg.ImagePrimary.Provider)
+	}
+}
+
+// TestCommonWinsOverYunwuAlias: COMMON_* takes precedence over the legacy alias.
+func TestCommonWinsOverYunwuAlias(t *testing.T) {
+	clearProviderEnv(t)
+	t.Setenv("YUNWU_API_KEY", "sk-yunwu")
+	t.Setenv("COMMON_API_KEY", "sk-common")
+
+	cfg, err := Load("does-not-exist.json")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.ChatPrimary.APIKey != "sk-common" {
+		t.Errorf("APIKey = %q, want common over yunwu alias", cfg.ChatPrimary.APIKey)
+	}
+}
+
+// TestHappyhorseAliasMapsToVideo: legacy HAPPYHORSE_* feed the video backend.
+func TestHappyhorseAliasMapsToVideo(t *testing.T) {
+	clearProviderEnv(t)
+	t.Setenv("HAPPYHORSE_API_KEY", "sk-hh")
+	t.Setenv("HAPPYHORSE_MODEL", "happyhorse-1.0-r2v")
+	t.Setenv("HAPPYHORSE_BASE_URL", "https://hh/api")
+
+	cfg, err := Load("does-not-exist.json")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Video.APIKey != "sk-hh" {
+		t.Errorf("Video.APIKey = %q, want sk-hh", cfg.Video.APIKey)
+	}
+	if cfg.Video.Model != "happyhorse-1.0-r2v" {
+		t.Errorf("Video.Model = %q, want happyhorse-1.0-r2v", cfg.Video.Model)
+	}
+	if cfg.Video.BaseURL != "https://hh/api" {
+		t.Errorf("Video.BaseURL = %q, want hh", cfg.Video.BaseURL)
+	}
+
+	// VIDEO_* canonical wins over the HAPPYHORSE_* alias.
+	t.Setenv("VIDEO_API_KEY", "sk-video")
+	cfg, err = Load("does-not-exist.json")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Video.APIKey != "sk-video" {
+		t.Errorf("Video.APIKey = %q, want VIDEO_* over alias", cfg.Video.APIKey)
+	}
+}
+
+// TestCrawlInheritsCommonKeyButNotURL: crawl api key inherits COMMON_API_KEY,
+// but the endpoint has no common fallback (unset => not configured).
+func TestCrawlInheritsCommonKeyButNotURL(t *testing.T) {
+	clearProviderEnv(t)
+	t.Setenv("COMMON_API_KEY", "sk-common")
+	t.Setenv("COMMON_BASE_URL", "https://common/v1")
+	t.Setenv("CRAWL_BASE_URL", "https://crawl/search")
+
+	cfg, err := Load("does-not-exist.json")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.CrawlAPIKey != "sk-common" {
+		t.Errorf("CrawlAPIKey = %q, want common", cfg.CrawlAPIKey)
+	}
+	if cfg.CrawlEndpoint != "https://crawl/search" {
+		t.Errorf("CrawlEndpoint = %q, want crawl base url", cfg.CrawlEndpoint)
+	}
+
+	// Without CRAWL_BASE_URL/ENDPOINT the endpoint stays empty despite COMMON_BASE_URL.
+	t.Setenv("CRAWL_BASE_URL", "")
+	cfg, err = Load("does-not-exist.json")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.CrawlEndpoint != "" {
+		t.Errorf("CrawlEndpoint = %q, want empty (no common URL fallback)", cfg.CrawlEndpoint)
+	}
+}
+
+// TestCrawlEndpointAlias: legacy CRAWL_ENDPOINT still feeds the endpoint.
+func TestCrawlEndpointAlias(t *testing.T) {
+	clearProviderEnv(t)
+	t.Setenv("CRAWL_ENDPOINT", "https://legacy/search")
+
+	cfg, err := Load("does-not-exist.json")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.CrawlEndpoint != "https://legacy/search" {
+		t.Errorf("CrawlEndpoint = %q, want legacy alias", cfg.CrawlEndpoint)
+	}
+}
+
 func TestLoadPlatformsFromFile(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "platforms.json")

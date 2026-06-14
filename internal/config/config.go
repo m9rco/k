@@ -34,10 +34,15 @@ type ModelConfig struct {
 // ImageProviderConfig describes one image-generation backend (gpt-image-1).
 type ImageProviderConfig struct {
 	// Name is a human-readable identifier recorded on produced assets.
-	Name    string
-	BaseURL string
-	APIKey  string
-	Model   string
+	Name string
+	// Provider identifies the backend kind. Reserved: image/video transports are
+	// currently OpenAI-compatible only and do not branch on it, but the field is
+	// resolved per-model (with common fallback) so a future provider swap needs
+	// no struct change. Mirrors ModelConfig.Provider.
+	Provider string
+	BaseURL  string
+	APIKey   string
+	Model    string
 }
 
 // COSConfig describes a Tencent Cloud COS bucket used to publish assets to a
@@ -215,62 +220,143 @@ func envBool(key string, def bool) bool {
 	}
 }
 
+// commonDefaults holds the shared, semantically-neutral fallback credentials
+// that any model backend inherits when it lacks a dedicated override. The
+// legacy YUNWU_* vars are honored as aliases (below COMMON_*, above built-in
+// defaults) so existing deployments keep working without renaming anything.
+type commonDefaults struct {
+	provider string
+	baseURL  string
+	apiKey   string
+}
+
+// loadCommon resolves the common fallback triple once per Load.
+func loadCommon() commonDefaults {
+	return commonDefaults{
+		provider: env("COMMON_PROVIDER", ""),
+		baseURL:  envFirst("https://yunwu.ai/v1", "COMMON_BASE_URL", "YUNWU_BASE_URL"),
+		apiKey:   envFirst("", "COMMON_API_KEY", "YUNWU_API_KEY"),
+	}
+}
+
+// endpoint is the resolved provider/base_url/api_key/model quadruple for one
+// model backend.
+type endpoint struct {
+	provider string
+	baseURL  string
+	apiKey   string
+	model    string
+}
+
+// resolveEndpoint resolves one backend's config with per-field three-tier
+// fallback: dedicated <PREFIX>_<FIELD> → common default → built-in default.
+// Fields resolve independently, so a backend may override only its BASE_URL
+// while still inheriting the common API_KEY. model has no common tier (model
+// ids are backend-specific); aliasKeys are extra dedicated vars consulted
+// before the common/default tiers (e.g. DEEPSEEK_API_KEY, HAPPYHORSE_*).
+func (c commonDefaults) resolveEndpoint(prefix, defProvider, defModel string, aliases endpointAliases) endpoint {
+	return endpoint{
+		provider: envFirst(orDefault(c.provider, defProvider), append([]string{prefix + "_PROVIDER"}, aliases.provider...)...),
+		baseURL:  envFirst(c.baseURL, append([]string{prefix + "_BASE_URL"}, aliases.baseURL...)...),
+		apiKey:   envFirst(c.apiKey, append([]string{prefix + "_API_KEY"}, aliases.apiKey...)...),
+		model:    envFirst(defModel, append([]string{prefix + "_MODEL"}, aliases.model...)...),
+	}
+}
+
+// endpointAliases lists legacy env-var names to consult, per field, between the
+// dedicated <PREFIX>_<FIELD> var and the common/default tiers.
+type endpointAliases struct {
+	provider []string
+	baseURL  []string
+	apiKey   []string
+	model    []string
+}
+
+// orDefault returns v when non-empty, else def.
+func orDefault(v, def string) string {
+	if v != "" {
+		return v
+	}
+	return def
+}
+
 // Load resolves configuration from the environment and the platform JSON file.
 //
 // platformsPath may be empty, in which case CONFIG_PLATFORMS or the default
 // "configs/platforms.json" is used. A missing platforms file is not fatal: a
 // built-in universal preset is used instead.
 func Load(platformsPath string) (*Config, error) {
-	// Shared proxy defaults: a single yunwu.ai credential and base URL can power
-	// every OpenAI-compatible backend (chat + image) during development. Each
-	// service may still override with its dedicated *_API_KEY / *_BASE_URL var.
-	yunwuKey := env("YUNWU_API_KEY", "")
-	yunwuBase := env("YUNWU_BASE_URL", "https://yunwu.ai/v1")
+	// Resolve the shared fallback credentials once. Each model backend below
+	// inherits these unless it sets its own dedicated *_PROVIDER/*_BASE_URL/
+	// *_API_KEY var, so swapping one model to a new provider needs only that
+	// model's overrides (design: per-model provider config).
+	common := loadCommon()
+
+	chatPrimary := common.resolveEndpoint("CHAT_PRIMARY", "openai", "deepseek-v4-flash", endpointAliases{})
+	chatTest := common.resolveEndpoint("CHAT_TEST", "openai", "claude-sonnet-4-5-20250929",
+		endpointAliases{apiKey: []string{"DEEPSEEK_API_KEY"}})
+	imagePrimary := common.resolveEndpoint("IMAGE_PRIMARY", "openai", "gpt-image-2", endpointAliases{})
+	imageBackup := common.resolveEndpoint("IMAGE_BACKUP", "openai", "gpt-image-2", endpointAliases{})
+	// Video canonicalizes on VIDEO_*; the older HAPPYHORSE_* names remain as
+	// aliases (below VIDEO_* / COMMON_*) so existing deployments don't regress.
+	video := common.resolveEndpoint("VIDEO", "openai", "", endpointAliases{
+		baseURL: []string{"HAPPYHORSE_BASE_URL"},
+		apiKey:  []string{"HAPPYHORSE_API_KEY"},
+		model:   []string{"HAPPYHORSE_MODEL"},
+	})
+	// Crawl endpoint has NO common fallback: the model API base URL is meaningless
+	// for crawling, so an unset endpoint means "not configured". Only the api key
+	// inherits the common credential. CRAWL_PROVIDER is reserved (unused) for now.
+	crawlEndpoint := envFirst("", "CRAWL_BASE_URL", "CRAWL_ENDPOINT")
+	crawlAPIKey := envFirst(common.apiKey, "CRAWL_API_KEY")
 
 	cfg := &Config{
 		Addr: env("ADDR", ":8080"),
 
 		ChatPrimary: ModelConfig{
-			Provider: env("CHAT_PRIMARY_PROVIDER", "openai"),
-			Model:    env("CHAT_PRIMARY_MODEL", "deepseek-v4-flash"),
-			BaseURL:  envFirst(yunwuBase, "CHAT_PRIMARY_BASE_URL"),
-			APIKey:   envFirst(yunwuKey, "CHAT_PRIMARY_API_KEY"),
+			Provider: chatPrimary.provider,
+			Model:    chatPrimary.model,
+			BaseURL:  chatPrimary.baseURL,
+			APIKey:   chatPrimary.apiKey,
 			Thinking: envBool("CHAT_PRIMARY_THINKING", false),
 		},
 		ChatTest: ModelConfig{
-			Provider: env("CHAT_TEST_PROVIDER", "openai"),
-			Model:    env("CHAT_TEST_MODEL", "claude-sonnet-4-5-20250929"),
-			BaseURL:  envFirst(yunwuBase, "CHAT_TEST_BASE_URL"),
-			APIKey:   envFirst(yunwuKey, "CHAT_TEST_API_KEY", "DEEPSEEK_API_KEY"),
+			Provider: chatTest.provider,
+			Model:    chatTest.model,
+			BaseURL:  chatTest.baseURL,
+			APIKey:   chatTest.apiKey,
 			Thinking: envBool("CHAT_TEST_THINKING", false),
 		},
 		UseTestModel: envBool("USE_TEST_MODEL", false),
 
 		ImagePrimary: ImageProviderConfig{
-			Name:    env("IMAGE_PRIMARY_NAME", "primary"),
-			BaseURL: envFirst(yunwuBase, "IMAGE_PRIMARY_BASE_URL"),
-			APIKey:  envFirst(yunwuKey, "IMAGE_PRIMARY_API_KEY"),
-			Model:   env("IMAGE_PRIMARY_MODEL", "gpt-image-2"),
+			Name:     env("IMAGE_PRIMARY_NAME", "primary"),
+			Provider: imagePrimary.provider,
+			BaseURL:  imagePrimary.baseURL,
+			APIKey:   imagePrimary.apiKey,
+			Model:    imagePrimary.model,
 		},
 		ImageBackup: ImageProviderConfig{
-			Name:    env("IMAGE_BACKUP_NAME", "backup"),
-			BaseURL: envFirst(yunwuBase, "IMAGE_BACKUP_BASE_URL"),
-			APIKey:  envFirst(yunwuKey, "IMAGE_BACKUP_API_KEY"),
-			Model:   env("IMAGE_BACKUP_MODEL", "gpt-image-2"),
+			Name:     env("IMAGE_BACKUP_NAME", "backup"),
+			Provider: imageBackup.provider,
+			BaseURL:  imageBackup.baseURL,
+			APIKey:   imageBackup.apiKey,
+			Model:    imageBackup.model,
 		},
 
-		// Image-to-video (happyhorse R2V). Reserved provider; APIKey/Model empty
-		// means the video capability reports "not configured" rather than failing.
+		// Image-to-video (happyhorse R2V). APIKey/Model empty means the video
+		// capability reports "not configured" rather than failing.
 		Video: ImageProviderConfig{
-			Name:    env("VIDEO_NAME", "happyhorse"),
-			BaseURL: envFirst(yunwuBase, "HAPPYHORSE_BASE_URL", "VIDEO_BASE_URL"),
-			APIKey:  envFirst(yunwuKey, "HAPPYHORSE_API_KEY", "VIDEO_API_KEY"),
-			Model:   env("HAPPYHORSE_MODEL", ""),
+			Name:     env("VIDEO_NAME", "happyhorse"),
+			Provider: video.provider,
+			BaseURL:  video.baseURL,
+			APIKey:   video.apiKey,
+			Model:    video.model,
 		},
 
 		// Game-asset crawling. Empty endpoint => capability degrades gracefully.
-		CrawlEndpoint: env("CRAWL_ENDPOINT", ""),
-		CrawlAPIKey:   env("CRAWL_API_KEY", ""),
+		CrawlEndpoint: crawlEndpoint,
+		CrawlAPIKey:   crawlAPIKey,
 
 		DBPath:          env("DB_PATH", "data/asset-studio.db"),
 		AssetDir:        env("ASSET_DIR", "data/assets"),
