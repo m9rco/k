@@ -32,6 +32,7 @@ func TestToolKind(t *testing.T) {
 		{"edit_image", "generate"},
 		{"image_to_video", "video"},
 		{"crawl_game_assets", "crawl"},
+		{"search_images", "search"},
 		{"crop_to_sizes", ""},
 		{"list_platform_sizes", ""},
 		{"unknown_tool", ""},

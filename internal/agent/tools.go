@@ -551,16 +551,13 @@ func (d ToolDeps) newSearchImagesTool() (tool.InvokableTool, error) {
 			}
 			return searchImagesResult{TaskID: taskID, Status: "queued"}, nil
 		},
-		utils.WithMarshalOutput(func(_ context.Context, v any) (string, error) {
-			b, _ := json.Marshal(v)
-			var probe struct {
-				AssetID string `json:"asset_id"`
-			}
-			if json.Unmarshal(b, &probe) == nil && probe.AssetID != "" {
-				return string(b), nil
-			}
-			return "好的，正在搜索并下载相关图片，结果会出现在左侧工作区。", nil
-		}),
+		// Standalone path returns an EMPTY string: search_images is ToolReturnDirectly,
+		// so a non-empty canned phrase here would be appended to the model's own
+		// in-turn confirmation, surfacing the same sentence twice. The empty result
+		// honors the system-prompt contract ("工具返回空内容表示任务已提交") and leaves
+		// the single model-streamed confirmation as the only acknowledgment. The
+		// await_result path still returns full JSON so the asset_id can be chained.
+		utils.WithMarshalOutput(asyncMarshal("")),
 	)
 }
 

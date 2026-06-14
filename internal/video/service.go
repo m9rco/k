@@ -86,7 +86,7 @@ type Service struct {
 // TaskAnnouncer broadcasts a task-created notice to a session's live clients so
 // the workspace can show an immediate placeholder. Optional.
 type TaskAnnouncer interface {
-	AnnounceTask(sessionID, taskID, kind string)
+	AnnounceTask(sessionID, taskID, kind string, count int)
 }
 
 // SetAnnouncer installs the task-created broadcaster (wired by main once the hub
@@ -145,7 +145,7 @@ func (s *Service) Start(ctx context.Context, p Params) (string, error) {
 		return "", err
 	}
 	if s.announce != nil {
-		s.announce.AnnounceTask(p.SessionID, taskID, "video")
+		s.announce.AnnounceTask(p.SessionID, taskID, "video", 1)
 	}
 	s.broker.Publish(taskID, transport.EventTaskQueued, p.SessionID, map[string]string{"intent": "image_to_video"})
 	runCtx, cancel := context.WithCancel(context.WithoutCancel(ctx))

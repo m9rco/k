@@ -56,9 +56,11 @@ type Service struct {
 }
 
 // TaskAnnouncer broadcasts a task-created notice to a session's live clients.
-// kind is one of "generate" / "video" so the frontend can pick a placeholder.
+// kind is one of "generate" / "video" / "search" so the frontend can pick a
+// placeholder; count is how many product slots to pre-render (1 for single-output
+// tasks, N for a search batch that downloads N images).
 type TaskAnnouncer interface {
-	AnnounceTask(sessionID, taskID, kind string)
+	AnnounceTask(sessionID, taskID, kind string, count int)
 }
 
 // SetAnnouncer installs the task-created broadcaster (wired by main once the hub
@@ -152,7 +154,7 @@ func (s *Service) Start(ctx context.Context, p GenerateParams) (string, error) {
 	// Announce over the conversation channel first so the workspace can paint a
 	// placeholder immediately, then publish the queued event on the SSE stream.
 	if s.announce != nil {
-		s.announce.AnnounceTask(p.SessionID, taskID, "generate")
+		s.announce.AnnounceTask(p.SessionID, taskID, "generate", 1)
 	}
 	s.broker.Publish(taskID, transport.EventTaskQueued, p.SessionID, map[string]string{"intent": string(p.Slots.Kind)})
 

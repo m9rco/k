@@ -1,31 +1,4 @@
-# web-search Specification
-
-## Purpose
-TBD - created by archiving change enhance-agent-capabilities. Update Purpose after archive.
-## Requirements
-### Requirement: 联网文字搜索
-系统 SHALL 提供 `web_search` 工具，支持 Agent 在会话中发起联网文字搜索，返回摘要与来源 URL 列表供 Agent 用于后续回复或决策。搜索能力 SHALL 通过可插拔 `Source` 接口实现，默认实现模拟浏览器 HTTP 请求抓取 Bing/百度搜索页，无需 API key；网络不可达时礼貌降级。
-
-#### Scenario: 命中搜索意图
-- **WHEN** 用户请求"帮我搜索 XXX 的相关信息"
-- **THEN** Agent 调用 `web_search` 工具并将搜索摘要融入回复
-- **AND** 工具调用过程以事件形式可见于前端
-
-#### Scenario: 搜索源未配置时降级
-- **WHEN** 搜索供应商未配置（SEARCH_API_KEY 为空）
-- **THEN** 工具返回错误，Agent 礼貌告知用户联网搜索暂未配置
-
-### Requirement: 图片搜索并注入工作区
-系统 SHALL 提供 `search_images` 工具，支持 Agent 按关键词搜索图片，将找到的图片下载并作为 `kind=searched` 资产注入工作区，供后续生图/生视频工具引用。
-
-#### Scenario: 搜索图片并注入工作区
-- **WHEN** 用户请求"帮我找一张《王者荣耀》的图"
-- **THEN** Agent 调用 `search_images`，图片下载完成后以资产卡片出现在工作区
-- **AND** 工作区卡片标注搜索来源
-
-#### Scenario: 搜到图片后可直接用于生成任务
-- **WHEN** `search_images` 完成且产物 asset_id 可用
-- **THEN** Agent 可在同一轮或下一轮将该 asset_id 传入 `edit_image` / `video` 等工具继续处理
+## ADDED Requirements
 
 ### Requirement: 搜图任务实时占位与逐张回填
 系统 SHALL 使 `search_images`（找图）复用长任务即时占位机制：在创建找图任务的瞬间经对话通道广播任务创建通知，且该通知 SHALL 携带任务类型 `search` 与本次请求的图片张数 N（由工具的 `limit` 归一化得到，取值 1/3/6/12）。前端据此 SHALL **按张数 N 立即占位**并订阅该任务进度，无需等待对话回答结束、亦不依赖 Agent 工具回调时序；每张图片下载完成时 SHALL 经进度事件即时回填对应占位，用户 SHALL 无需手动刷新即可看到陆续到达的搜图结果。
@@ -49,4 +22,3 @@ TBD - created by archiving change enhance-agent-capabilities. Update Purpose aft
 #### Scenario: 触发找图仅一句确认
 - **WHEN** 用户请求找图，Agent 调用 `search_images`
 - **THEN** 对话中只出现一句确认话术，不重复
-

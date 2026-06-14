@@ -16,7 +16,7 @@ export interface Asset {
 }
 
 export type TaskStatus = "queued" | "running" | "done" | "failed";
-export type TaskKind = "generate" | "video" | "crawl";
+export type TaskKind = "generate" | "video" | "crawl" | "search";
 
 export interface Task {
   id: string;
@@ -25,6 +25,11 @@ export interface Task {
   progress: number;
   error?: string;
   assetId?: string;
+  // count is how many product slots this task will yield (1 for single-output
+  // tasks; N for a search batch downloading N images). Drives the number of
+  // placeholder slots shown while the task runs. Client-only (from task_created),
+  // preserved across workspace refreshes since the /tasks API does not return it.
+  count?: number;
   // note is a short human-readable summary of the agent's understanding of this
   // operation (derived from the tool-call args), shown on the timeline node —
   // e.g. "换背景 · 淡紫色渐变".

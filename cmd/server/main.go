@@ -120,6 +120,7 @@ func run() error {
 
 	// Web search service (DDG text + Bing images, no API key required).
 	webSearchSvc := websearch.NewService(websearch.DefaultSource(), st, broker, cfg.AssetDir, id.New)
+	webSearchSvc.SetAnnouncer(announcer)
 
 	// Asset workspace: list assets/tasks, upload source images, partial retry.
 	wsSvc := workspace.NewService(st, cfg.AssetDir, func() string { return id.New("asset") },
@@ -347,13 +348,13 @@ func buildNumbering(st *store.Store, sessionID string, order, refs []string, ref
 // placeholder and subscribe to SSE progress the instant a task is created.
 type taskAnnouncer struct{ hub *transport.Hub }
 
-func (a taskAnnouncer) AnnounceTask(sessionID, taskID, kind string) {
-	log.Printf("announce: task_created session=%s task=%s kind=%s conns=%d", sessionID, taskID, kind, a.hub.ConnCount(sessionID))
+func (a taskAnnouncer) AnnounceTask(sessionID, taskID, kind string, count int) {
+	log.Printf("announce: task_created session=%s task=%s kind=%s count=%d conns=%d", sessionID, taskID, kind, count, a.hub.ConnCount(sessionID))
 	a.hub.Send(sessionID, transport.Event{
 		Type:      transport.EventTaskCreated,
 		SessionID: sessionID,
 		TaskID:    taskID,
-		Data:      map[string]string{"task_id": taskID, "kind": kind},
+		Data:      map[string]any{"task_id": taskID, "kind": kind, "count": count},
 	})
 }
 

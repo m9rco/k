@@ -693,7 +693,7 @@ func toolKind(name string) string {
 	case "generate_icon", "generate_image_from_text":
 		return "generate"
 	case "search_images":
-		return "generate"
+		return "search"
 	case "image_to_video":
 		return "video"
 	case "crawl_game_assets":

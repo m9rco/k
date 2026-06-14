@@ -61,11 +61,20 @@ export function useAppController() {
   const refreshWorkspace = React.useCallback(async (sid: string) => {
     try {
       const [assets, tasks] = await Promise.all([api.listAssets(sid), api.listTasks(sid)]);
-      setState((s) => ({
-        ...s,
-        assets: new Map(assets.map((a) => [a.id, a])),
-        tasks: new Map(tasks.map((t) => [t.id, t])),
-      }));
+      setState((s) => {
+        // Preserve client-only task fields the /tasks API does not return
+        // (count from task_created, note from the tool call) so a refresh
+        // mid-task — e.g. triggered by each downloaded search image — does not
+        // wipe the placeholder count or the agent's understanding note.
+        const prev = s.tasks;
+        const merged = new Map(
+          tasks.map((t) => {
+            const old = prev.get(t.id);
+            return [t.id, old ? { ...t, count: t.count ?? old.count, note: t.note ?? old.note } : t] as const;
+          }),
+        );
+        return { ...s, assets: new Map(assets.map((a) => [a.id, a])), tasks: merged };
+      });
       subscribeRunningTasks(sid, tasks);
     } catch (e) {
       toast("工作区加载失败：" + (e as Error).message);
@@ -147,16 +156,19 @@ export function useAppController() {
   }
 
   const ensureTaskPlaceholder = React.useCallback(
-    (sid: string, taskId: string, kind: TaskKind, note?: string) => {
+    (sid: string, taskId: string, kind: TaskKind, note?: string, count?: number) => {
       setState((s) => {
         const existing = s.tasks.get(taskId);
         const tasks = new Map(s.tasks);
         if (existing) {
-          // Backfill the note if newly known; otherwise leave the task as-is.
-          if (note && !existing.note) tasks.set(taskId, { ...existing, note });
-          else return s;
+          // Backfill the note / count if newly known; otherwise leave as-is.
+          const patch: Partial<Task> = {};
+          if (note && !existing.note) patch.note = note;
+          if (count != null && existing.count == null) patch.count = count;
+          if (Object.keys(patch).length === 0) return s;
+          tasks.set(taskId, { ...existing, ...patch });
         } else {
-          tasks.set(taskId, { id: taskId, kind, status: "running", progress: 0, note });
+          tasks.set(taskId, { id: taskId, kind, status: "running", progress: 0, note, count });
         }
         return { ...s, tasks };
       });
@@ -441,7 +453,14 @@ export function useAppController() {
           break;
         }
         case "task_created":
-          if (typeof d.task_id === "string") ensureTaskPlaceholder(sid, d.task_id, (d.kind as TaskKind) || "generate");
+          if (typeof d.task_id === "string")
+            ensureTaskPlaceholder(
+              sid,
+              d.task_id,
+              (d.kind as TaskKind) || "generate",
+              undefined,
+              typeof d.count === "number" ? d.count : undefined,
+            );
           break;
         case "error":
           clearLoading();

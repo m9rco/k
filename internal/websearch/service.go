@@ -33,7 +33,23 @@ type Service struct {
 	client   *http.Client
 	now      func() time.Time
 	newID    func(prefix string) string
+
+	// announce, when set, broadcasts a task_created event over the conversation
+	// channel the instant a search task is created, so the workspace paints the
+	// per-image placeholders immediately (mirrors generation/video). Optional.
+	announce TaskAnnouncer
 }
+
+// TaskAnnouncer broadcasts a task-created notice to a session's live clients.
+// count is the number of images the search will download, so the frontend can
+// pre-render that many placeholder slots (the "找几张就占几张" behavior).
+type TaskAnnouncer interface {
+	AnnounceTask(sessionID, taskID, kind string, count int)
+}
+
+// SetAnnouncer installs the task-created broadcaster (wired by main once the hub
+// exists, avoiding an init cycle). Safe to leave unset.
+func (s *Service) SetAnnouncer(a TaskAnnouncer) { s.announce = a }
 
 // NewService constructs the web-search service.
 func NewService(src Source, st *store.Store, broker *transport.TaskBroker, assetDir string, newID func(string) string) *Service {
@@ -70,13 +86,19 @@ func (s *Service) StartImageSearch(ctx context.Context, p ImageSearchParams) (st
 	if err := s.store.InsertTask(store.TaskRecord{
 		ID:        taskID,
 		SessionID: p.SessionID,
-		Kind:      "generate", // reuse kind for frontend task card compatibility
+		Kind:      "search", // distinct kind so the frontend classifies it as 搜图
 		Status:    "queued",
 		Intent:    "search_images:" + p.Query,
 		CreatedAt: now,
 		UpdatedAt: now,
 	}); err != nil {
 		return "", fmt.Errorf("insert search task: %w", err)
+	}
+	// Announce over the conversation channel first (carrying the requested image
+	// count) so the workspace pre-renders that many placeholder slots, then
+	// publish the queued event on this task's SSE stream.
+	if s.announce != nil {
+		s.announce.AnnounceTask(p.SessionID, taskID, "search", p.Limit)
 	}
 	s.broker.Publish(taskID, transport.EventTaskQueued, p.SessionID, nil)
 	go s.run(context.WithoutCancel(ctx), taskID, p)
@@ -120,6 +142,11 @@ func (s *Service) run(ctx context.Context, taskID string, p ImageSearchParams) {
 			Kind:      "searched",
 			Path:      path,
 			Mime:      mime,
+			// ParentID anchors every image in this batch to its search task, so the
+			// timeline aggregates them into one 搜图 node regardless of how many
+			// seconds the downloads span (it is a task id, not an asset id, so it
+			// never renders a spurious "由 图N 加工" derivation label).
+			ParentID:  taskID,
 			Meta:      string(meta),
 			CreatedAt: s.now(),
 		}); err != nil {

@@ -1,5 +1,5 @@
 import { motion } from "framer-motion";
-import { Upload, Wand2, Crop, Film, Globe, RotateCcw, Trash2, X } from "lucide-react";
+import { Upload, Wand2, Crop, Film, Globe, Search, RotateCcw, Trash2, X } from "lucide-react";
 import type { Asset } from "@/lib/types";
 import type { TimelineNode } from "@/lib/timeline";
 import { relativeTime } from "@/lib/timeline";
@@ -16,14 +16,15 @@ const KIND_META: Record<TimelineNode["kind"], { label: string; Icon: typeof Wand
   crop: { label: "切尺寸", Icon: Crop },
   video: { label: "生成视频", Icon: Film },
   crawl: { label: "爬取素材", Icon: Globe },
+  search: { label: "搜图", Icon: Search },
 };
 
 // title prefers the agent's understanding (task.note) when present, else the
-// generic action phrase; crop/crawl with multiple products show a count.
+// generic action phrase; crop/crawl/search with multiple products show a count.
 function nodeTitle(node: TimelineNode): string {
   if (node.task?.note) return node.task.note;
   const base = KIND_META[node.kind].label;
-  if ((node.kind === "crop" || node.kind === "crawl") && node.assets.length > 1) {
+  if ((node.kind === "crop" || node.kind === "crawl" || node.kind === "search") && node.assets.length > 1) {
     return `${base} ×${node.assets.length}`;
   }
   return base;
@@ -113,8 +114,70 @@ function NodeBody({
       </div>
     );
   }
+  // Running search batch: show the images downloaded so far alongside one
+  // shimmer placeholder per still-pending slot (占位数 = 请求张数).
+  if (node.kind === "search" && node.state === "running") {
+    return (
+      <SearchBatchBody node={node} labels={labels} onPreview={onPreview} onCrop={onCrop} onVideo={onVideo} onVideoOps={onVideoOps} />
+    );
+  }
   // Active or failed task node.
   return <ActiveNode node={node} />;
+}
+
+function SearchBatchBody({
+  node,
+  labels,
+  onPreview,
+  onCrop,
+  onVideo,
+  onVideoOps,
+}: {
+  node: TimelineNode;
+  labels: Map<string, string>;
+  onPreview: (a: Asset) => void;
+  onCrop: (a: Asset) => void;
+  onVideo: (a: Asset) => void;
+  onVideoOps: (a: Asset, op?: "trim" | "frame") => void;
+}) {
+  const app = useApp();
+  const arrived = node.assets.length;
+  // count comes from the task_created announcement; fall back to what has
+  // arrived so the grid never collapses if the count is unknown.
+  const total = Math.max(node.task?.count ?? 0, arrived, 1);
+  const pending = Math.max(0, total - arrived);
+  return (
+    <div className="space-y-1.5">
+      <div className="grid grid-cols-[repeat(auto-fill,minmax(120px,1fr))] gap-2">
+        {node.assets.map((a) => (
+          <AssetCard
+            key={a.id}
+            asset={a}
+            label={labels.get(a.id)}
+            onPreview={onPreview}
+            onCrop={onCrop}
+            onVideo={onVideo}
+            onVideoOps={onVideoOps}
+          />
+        ))}
+        {Array.from({ length: pending }).map((_, i) => (
+          <div key={`ph-${i}`} className="relative aspect-square overflow-hidden rounded-md border border-line bg-bg-elev-2">
+            <div className="absolute inset-0 -translate-x-full animate-shimmer bg-gradient-to-r from-transparent via-fg/10 to-transparent" />
+          </div>
+        ))}
+      </div>
+      {node.task && (
+        <button
+          type="button"
+          title="取消搜图"
+          onClick={() => app.removeTask(node.task!.id)}
+          className="flex items-center gap-1 text-[11px] text-fg-mute transition-colors hover:text-danger"
+        >
+          <X className="size-3" /> 取消（已找到 {arrived}/{total}）
+        </button>
+      )}
+    </div>
+  );
 }
 
 function ActiveNode({ node }: { node: TimelineNode }) {

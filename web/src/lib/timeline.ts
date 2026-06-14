@@ -12,7 +12,7 @@ export interface TimelineNode {
   // active end (now) so they stay visible at the top.
   at: number;
   state: "running" | "failed" | "done";
-  kind: "generate" | "video" | "crop" | "crawl" | "upload";
+  kind: "generate" | "video" | "crop" | "crawl" | "upload" | "search";
   // Produced assets (empty while running/failed; crop/crawl may hold several).
   assets: Asset[];
   // The originating task, present while running/failed (progress, retry).
@@ -25,6 +25,7 @@ export interface TimelineNode {
 function kindFromTask(k: Task["kind"]): TimelineNode["kind"] {
   if (k === "video") return "video";
   if (k === "crawl") return "crawl";
+  if (k === "search") return "search";
   return "generate";
 }
 
@@ -35,6 +36,7 @@ function kindFromAsset(k: Asset["kind"]): TimelineNode["kind"] {
     case "video": return "video";
     case "cropped": return "crop";
     case "crawled": return "crawl";
+    case "searched": return "search";
     default: return "generate";
   }
 }
@@ -61,17 +63,29 @@ export function buildTimeline(
   // assetId -> producing task (so a finished task's node keeps the task key).
   const taskByAsset = new Map<string, Task>();
   for (const t of tasks) if (t.assetId) taskByAsset.set(t.assetId, t);
+  // id -> task, used to resolve a searched asset's batch task from its parentId
+  // (search assets carry parentId = their search task id, not a source asset).
+  const taskById = new Map<string, Task>();
+  for (const t of tasks) taskById.set(t.id, t);
 
   // 1) Group assets into product nodes.
   const groups = new Map<string, TimelineNode>();
   const order: string[] = []; // preserve first-seen order of group keys
+  // search task ids that already have a product node, so step 2 does not also
+  // emit a separate running placeholder node for them (would duplicate the key).
+  const groupedSearchTaskIds = new Set<string>();
   for (const a of assets) {
     const nodeKind = kindFromAsset(a.kind);
+    // A searched asset belongs to its search batch task (parentId = task id);
+    // the whole batch collapses into one 搜图 node regardless of download timing.
+    const searchTask = nodeKind === "search" ? taskById.get(a.parentId || "") : undefined;
     // Aggregate multi-product ops (crop/crawl) by source + kind + same-second.
     const aggregatable = nodeKind === "crop" || nodeKind === "crawl";
     const sourceTask = taskByAsset.get(a.id);
     let groupKey: string;
-    if (aggregatable) {
+    if (searchTask) {
+      groupKey = `task:${searchTask.id}`;
+    } else if (aggregatable) {
       const sec = Math.floor(ts(a.createdAt) / 1000);
       groupKey = `agg:${nodeKind}:${a.parentId || "_"}:${sec}`;
     } else if (sourceTask) {
@@ -79,23 +93,39 @@ export function buildTimeline(
     } else {
       groupKey = `asset:${a.id}`;
     }
+    const groupTask = searchTask || sourceTask;
     const existing = groups.get(groupKey);
     if (existing) {
       existing.assets.push(a);
       existing.at = Math.max(existing.at, ts(a.createdAt));
     } else {
+      if (searchTask) groupedSearchTaskIds.add(searchTask.id);
       groups.set(groupKey, {
-        key: sourceTask ? `task:${sourceTask.id}` : `asset:${a.id}`,
+        key: groupTask ? `task:${groupTask.id}` : `asset:${a.id}`,
         at: ts(a.createdAt),
         state: "done",
         kind: nodeKind,
         assets: [a],
         // Carry the producing task so its note (the agent's understanding of the
         // operation) is available on the finished product node.
-        task: sourceTask,
-        parentId: a.parentId,
+        task: groupTask,
+        // A search asset's parentId is its task id (not a derivation source), so
+        // it must not surface a "由 图N 加工" label.
+        parentId: nodeKind === "search" ? undefined : a.parentId,
       });
       order.push(groupKey);
+    }
+  }
+  // Refine search batch nodes: while the task is still running, present the node
+  // at the active end with running state so it shows remaining placeholder slots
+  // alongside the images already downloaded.
+  for (const key of order) {
+    const n = groups.get(key)!;
+    if (n.kind !== "search" || !n.task) continue;
+    if (n.task.status === "failed") n.state = "failed";
+    else if (n.task.status !== "done") {
+      n.state = "running";
+      n.at = nowMs;
     }
   }
 
@@ -108,6 +138,7 @@ export function buildTimeline(
   for (const t of tasks) {
     if (t.status === "done") continue; // its product node covers it
     if (producedTaskIds.has(t.id)) continue;
+    if (groupedSearchTaskIds.has(t.id)) continue; // already a search batch node
     taskNodes.push({
       key: `task:${t.id}`,
       at: nowMs, // float to the active end
