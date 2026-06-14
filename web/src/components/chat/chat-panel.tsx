@@ -109,7 +109,7 @@ export function ChatPanel({ onboarding = false }: { onboarding?: boolean }) {
                   onDismiss={() => dismissFollowUp(it.id)}
                 />
               );
-            if (it.kind === "loading") return <LoadingBubble key={it.id} />;
+            if (it.kind === "loading") return <LoadingBubble key={it.id} level={it.level} />;
             return <ToolCard key={it.id} tool={it.tool} />;
           })}
         </AnimatePresence>

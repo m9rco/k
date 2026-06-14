@@ -164,7 +164,12 @@ func (o *Orchestrator) selfIntroduce(sessionID string) {
 		schema.UserMessage("请做个简短的自我介绍。"),
 	}
 
-	o.emit(sessionID, transport.Event{Type: transport.EventTurnStart, SessionID: sessionID})
+	o.emit(sessionID, transport.Event{Type: transport.EventTurnStart, SessionID: sessionID, Data: map[string]any{"streaming": true}})
+
+	// Degrade notifier: if the model falls back from streaming to a one-shot
+	// response, tell the frontend this turn is non-streaming so it switches to the
+	// static fallback deterministically (rather than waiting on its timeout).
+	ctx = withDegradeNotifier(ctx, o.degradeNotifier(sessionID))
 
 	stream, err := model.Stream(ctx, intro)
 	if err != nil {
@@ -340,8 +345,14 @@ func (o *Orchestrator) Handle(ctx context.Context, sessionID, userText string, l
 
 	// Emit turn_start immediately (before the model is called) so the frontend
 	// can enter a loading state without waiting for the first model increment,
-	// which can lag by seconds on generation-intent turns.
-	o.emit(sessionID, transport.Event{Type: transport.EventTurnStart, SessionID: sessionID})
+	// which can lag by seconds on generation-intent turns. streaming:true marks
+	// the default (real-streaming) path; a degrade flips it (see below).
+	o.emit(sessionID, transport.Event{Type: transport.EventTurnStart, SessionID: sessionID, Data: map[string]any{"streaming": true}})
+
+	// Degrade notifier: if the model falls back from streaming to a one-shot
+	// response mid-turn, signal the frontend so it switches to the static
+	// fallback deterministically instead of waiting on its timeout.
+	ctx = withDegradeNotifier(ctx, o.degradeNotifier(sessionID))
 
 	// capsuleAsked is flipped when the model calls clarify_intent, so turn_end
 	// can tell the frontend a structured question is awaiting the user's reply.
@@ -644,6 +655,24 @@ func (o *Orchestrator) emitTurnEnd(sessionID string, info turnEndInfo) {
 			"context":    st,
 		},
 	})
+}
+
+// degradeNotifier returns a once-guarded callback that, on first invocation,
+// emits a turn_start carrying {streaming:false, degraded:true} so the frontend
+// switches to the static (P2) wait fallback. The agent may attempt the model
+// more than once per turn (fake-ack retry), so a sync.Once bounds the signal to
+// a single emission; a repeat turn_start is treated idempotently by the client.
+func (o *Orchestrator) degradeNotifier(sessionID string) func() {
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			o.emit(sessionID, transport.Event{
+				Type:      transport.EventTurnStart,
+				SessionID: sessionID,
+				Data:      map[string]any{"streaming": false, "degraded": true},
+			})
+		})
+	}
 }
 
 // emit sends an event to the session's WS connections when a hub is present.

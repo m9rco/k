@@ -63,6 +63,24 @@ func (m *chatModel) Generate(ctx context.Context, input []*schema.Message, _ ...
 	return m.generateOpenAI(ctx, input)
 }
 
+// degradeNotifierKey scopes a per-turn callback that chatModel.Stream invokes
+// when it falls back from real streaming to a re-chunked one-shot response, so
+// the orchestrator can tell the frontend this turn is non-streaming.
+type degradeNotifierKey struct{}
+
+// withDegradeNotifier returns a context carrying fn, invoked (at most once per
+// turn, guarded by the caller) when the chat model degrades to one-shot.
+func withDegradeNotifier(ctx context.Context, fn func()) context.Context {
+	return context.WithValue(ctx, degradeNotifierKey{}, fn)
+}
+
+// notifyDegrade invokes the context's degrade notifier if one is installed.
+func notifyDegrade(ctx context.Context) {
+	if fn, ok := ctx.Value(degradeNotifierKey{}).(func()); ok && fn != nil {
+		fn()
+	}
+}
+
 // Stream performs a streaming completion, consuming the provider's SSE stream
 // so reply text and thinking surface incrementally in real time. If streaming
 // setup fails before any frame is produced, it degrades to a one-shot Generate
@@ -74,7 +92,9 @@ func (m *chatModel) Stream(ctx context.Context, input []*schema.Message, opts ..
 	resp, err := m.openStream(ctx, input)
 	if err != nil {
 		// Setup failed before any byte streamed: safe to degrade to one-shot.
+		// Tell the orchestrator so it can signal the frontend a non-streaming turn.
 		log.Printf("chatmodel: stream open failed, degrading to one-shot: %v", err)
+		notifyDegrade(ctx)
 		return m.fallbackStream(ctx, input, opts...)
 	}
 	sr, sw := schema.Pipe[*schema.Message](16)

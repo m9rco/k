@@ -174,3 +174,71 @@ func TestDegradedStreamChunksReasoning(t *testing.T) {
 		t.Errorf("content = %q, want 答复", content.String())
 	}
 }
+
+func TestStreamFiresDegradeNotifierOnFallback(t *testing.T) {
+	// Non-SSE 200 forces a degrade; the context's degrade notifier must fire.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"x"}}]}`))
+	}))
+	defer srv.Close()
+
+	var fired int32
+	ctx := withDegradeNotifier(context.Background(), func() { atomic.AddInt32(&fired, 1) })
+	m := fastRetryModel(srv.URL)
+	sr, err := m.Stream(ctx, []*schema.Message{schema.UserMessage("hi")})
+	if err != nil {
+		t.Fatalf("Stream: %v", err)
+	}
+	for {
+		if _, err := sr.Recv(); err != nil {
+			break
+		}
+	}
+	sr.Close()
+	if got := atomic.LoadInt32(&fired); got != 1 {
+		t.Errorf("degrade notifier fired %d times, want 1", got)
+	}
+}
+
+func TestStreamDoesNotFireDegradeNotifierOnHealthyStream(t *testing.T) {
+	// A proper SSE stream must NOT trigger the degrade notifier.
+	sse := strings.Join([]string{
+		`data: {"choices":[{"delta":{"content":"hi"}}]}`,
+		`data: [DONE]`,
+	}, "\n")
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte(sse))
+	}))
+	defer srv.Close()
+
+	var fired int32
+	ctx := withDegradeNotifier(context.Background(), func() { atomic.AddInt32(&fired, 1) })
+	m := fastRetryModel(srv.URL)
+	sr, err := m.Stream(ctx, []*schema.Message{schema.UserMessage("hi")})
+	if err != nil {
+		t.Fatalf("Stream: %v", err)
+	}
+	for {
+		if _, err := sr.Recv(); err != nil {
+			break
+		}
+	}
+	sr.Close()
+	if got := atomic.LoadInt32(&fired); got != 0 {
+		t.Errorf("degrade notifier fired %d times on healthy stream, want 0", got)
+	}
+}
+
+func TestDegradeNotifierSafeToCallRepeatedly(t *testing.T) {
+	// The orchestrator's notifier is once-guarded so repeated degrades within a
+	// turn (e.g. fake-ack retry) emit at most one signal. With no hub installed
+	// emit is a no-op; this asserts the returned closure is safe to invoke many
+	// times (sync.Once guard, no panic / re-entry).
+	o := &Orchestrator{}
+	fn := o.degradeNotifier("s1")
+	fn()
+	fn()
+	fn()
+}

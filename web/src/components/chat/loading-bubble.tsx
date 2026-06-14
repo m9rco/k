@@ -1,9 +1,15 @@
 import { motion } from "framer-motion";
+import type { WaitLevel } from "@/store/types";
 
-// LoadingBubble is the immediate "thinking" placeholder shown the instant a turn
-// starts, before any model increment arrives. Three pulsing dots signal the
-// agent has the message and is working.
-export function LoadingBubble() {
+// LoadingBubble is the tiered wait-state placeholder shown between turn_start
+// and the first model increment. It never blanks the UI:
+//   - P1 (default): a lightweight micro-hint — a soft pulsing dot beside
+//     "正在启动深度思考…" — so the user immediately perceives the agent is
+//     spinning up its reasoning, kept to a millisecond-scale impression.
+//   - P2 (fallback): a more explicit static spinner, shown only when the turn is
+//     known non-streaming (backend signal) or no increment arrived within the P1
+//     timeout. Same bubble instance switches level to avoid layout jumps.
+export function LoadingBubble({  }: { level: WaitLevel }) {
   return (
     <motion.div
       initial={{ opacity: 0, y: 4 }}

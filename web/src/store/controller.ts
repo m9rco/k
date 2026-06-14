@@ -46,6 +46,12 @@ export function useAppController() {
   const typer = React.useRef({ id: "", target: "", shown: 0, done: false });
   const reasoner = React.useRef({ id: "", target: "", shown: 0 });
   const tickRef = React.useRef<number | null>(null);
+  // P2 escalation timer: when a turn enters P1 (turn_start, no increment yet),
+  // we arm a ~1.5s timer that escalates the wait bubble to the static P2
+  // fallback if no message/reasoning increment has arrived. Cleared on the first
+  // increment, on turn_end/error/cancel, and on an explicit backend non-streaming
+  // signal (which escalates to P2 immediately).
+  const waitTimerRef = React.useRef<number | null>(null);
   // producedRef tracks whether the current turn produced any visible output
   // (assistant text / tool call / capsule); reset on turn_start, consulted on
   // turn_end to decide whether an empty-reply fallback line is needed.
@@ -236,20 +242,59 @@ export function useAppController() {
   }, [setChat]);
 
   // ============ turn lifecycle ============
-  // A loading placeholder bubble is shown the instant a turn starts (locally on
-  // send, and reaffirmed on the turn_start event) so the UI never sits blank
-  // while the model spins up. It is removed as soon as real content arrives or
-  // the turn ends.
+  // The wait state is tiered (P0/P1/P2): on turn_start the UI shows a lightweight
+  // P1 micro-hint ("正在启动深度思考…") instead of a blank or heavy static
+  // loader. It escalates to the static P2 fallback only when the turn is known
+  // non-streaming (backend signal) or no increment arrives within P1_TIMEOUT_MS.
+  // The first model increment removes the wait bubble entirely (→ P0 typewriter).
+  const P1_TIMEOUT_MS = 1500;
+
+  const clearWaitTimer = React.useCallback(() => {
+    if (waitTimerRef.current != null) {
+      window.clearTimeout(waitTimerRef.current);
+      waitTimerRef.current = null;
+    }
+  }, []);
+
+  // escalateWait bumps the in-flight wait bubble to P2 (static fallback). No-op
+  // when there is no wait bubble (the first increment already removed it).
+  const escalateWait = React.useCallback(() => {
+    clearWaitTimer();
+    setChat((c) => {
+      let changed = false;
+      const next = c.map((it) => {
+        if (it.kind === "loading" && it.level !== "p2") {
+          changed = true;
+          return { ...it, level: "p2" as const };
+        }
+        return it;
+      });
+      return changed ? next : c;
+    });
+  }, [clearWaitTimer, setChat]);
+
+  // A wait bubble is shown the instant a turn starts (locally on send, and
+  // reaffirmed on turn_start) so the UI never sits blank while the model spins
+  // up. It enters at P1 and arms the P2 escalation timer. Removed as soon as real
+  // content arrives or the turn ends. Re-invocation is idempotent (a degrade
+  // turn_start arrives as a second turn_start): it never inserts a duplicate
+  // bubble nor resets an already-escalated level.
   const showLoading = React.useCallback(() => {
     setState((s) => {
       if (s.chat.some((it) => it.kind === "loading")) return { ...s, thinking: true };
-      return { ...s, thinking: true, chat: [...s.chat, { kind: "loading", id: uid("load") }] };
+      return { ...s, thinking: true, chat: [...s.chat, { kind: "loading", id: uid("load"), level: "p1" }] };
     });
-  }, []);
+    clearWaitTimer();
+    waitTimerRef.current = window.setTimeout(() => {
+      waitTimerRef.current = null;
+      escalateWait();
+    }, P1_TIMEOUT_MS);
+  }, [clearWaitTimer, escalateWait]);
 
   const clearLoading = React.useCallback(() => {
+    clearWaitTimer();
     setChat((c) => c.filter((it) => it.kind !== "loading"));
-  }, [setChat]);
+  }, [clearWaitTimer, setChat]);
 
   const onAssistantDelta = React.useCallback((text: string, done: boolean) => {
     clearLoading();
@@ -417,8 +462,16 @@ export function useAppController() {
       const d = msg.data || {};
       switch (msg.type) {
         case "turn_start":
-          producedRef.current = false;
-          showLoading();
+          // A degrade arrives as a second turn_start carrying streaming:false;
+          // treat the repeat idempotently — do NOT reset producedRef, just show
+          // the (existing) wait bubble and escalate to the static P2 fallback.
+          if (d.streaming === false) {
+            showLoading();
+            escalateWait();
+          } else {
+            producedRef.current = false;
+            showLoading();
+          }
           break;
         case "turn_end":
           onTurnEnd(sid, d);
@@ -469,7 +522,7 @@ export function useAppController() {
           break;
       }
     };
-  }, [onAssistantDelta, onReasoning, onToolCall, onToolResult, ensureTaskPlaceholder, finishPendingTools, refreshContext, toast, showLoading, onTurnEnd, onCapsule, clearLoading]);
+  }, [onAssistantDelta, onReasoning, onToolCall, onToolResult, ensureTaskPlaceholder, finishPendingTools, refreshContext, toast, showLoading, escalateWait, onTurnEnd, onCapsule, clearLoading]);
 
   // ============ actions ============
   // sendMessage routes a user input: when a turn is in flight it joins the
@@ -568,6 +621,7 @@ export function useAppController() {
       wsRef.current?.close();
       streamsRef.current.forEach((es) => es.close());
       if (tickRef.current != null) window.clearInterval(tickRef.current);
+      if (waitTimerRef.current != null) window.clearTimeout(waitTimerRef.current);
     };
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -659,7 +713,6 @@ export function useAppController() {
     });
     const failed = ids.length - ok.length;
     if (failed > 0) toast(`移除 ${ok.length} 张，${failed} 张失败`);
-    else toast(`已移除 ${ok.length} 张`, "ok");
   }, [toast]);
 
   const removeTask = React.useCallback(async (taskId: string) => {

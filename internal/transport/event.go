@@ -26,6 +26,17 @@ const (
 	// EventTurnStart is emitted the instant a user message is accepted, before
 	// the model is called, so the frontend can enter a loading state without
 	// waiting for the first model increment (which can lag by seconds).
+	//
+	// Its Data carries a streaming-capability hint so the frontend can pick the
+	// right wait-state tier (P1 lightweight micro-hint vs P2 static fallback):
+	//   - {"streaming": true}                     normal streaming turn (default)
+	//   - {"streaming": false, "degraded": true}  the turn degraded to a one-shot
+	//     (re-chunked) response; the frontend should switch to the static fallback
+	//     deterministically rather than waiting on its timeout.
+	// The degraded variant may be emitted a second time within the same turn
+	// (after the initial streaming:true), so clients MUST treat a repeat
+	// turn_start idempotently (do not reset turn state, only adjust the wait tier).
+	// Unknown fields are ignored by older clients (additive evolution).
 	EventTurnStart EventType = "turn_start"
 	// EventTurnEnd is emitted when a turn finishes (success, error, or a clarify
 	// capsule was produced). Its payload carries turn-end metadata (toolUsed,

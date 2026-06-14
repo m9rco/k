@@ -1,5 +1,11 @@
 import type { Asset, Task, ToolCardData, ModelEntry } from "@/lib/types";
 
+// WaitLevel tiers the post-send loading state: "p1" is the lightweight default
+// micro-hint ("正在启动深度思考…"), "p2" is the heavier static fallback shown
+// only when the turn is known non-streaming (backend signal) or the first model
+// increment has not arrived within the P1 timeout.
+export type WaitLevel = "p1" | "p2";
+
 // Chat log is an ordered list of items: user/assistant bubbles, reasoning
 // blocks, and tool cards. Each carries a stable id for keyed rendering.
 export type ChatItem =
@@ -9,7 +15,7 @@ export type ChatItem =
   | { kind: "tool"; id: string; tool: ToolCardData }
   | { kind: "capsule"; id: string; question: string; options: CapsuleOption[]; answered: boolean }
   | { kind: "follow_up"; id: string; message: string; options: CapsuleOption[]; dismissed: boolean }
-  | { kind: "loading"; id: string };
+  | { kind: "loading"; id: string; level: WaitLevel };
 
 // CapsuleOption is one choice in a clarify prompt. value is sent on a plain
 // click; editableHint pre-fills the inline editor so the user can refine it
