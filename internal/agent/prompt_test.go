@@ -12,18 +12,20 @@ import (
 func TestSystemPromptDirectives(t *testing.T) {
 	p := SystemPrompt()
 	checks := map[string]string{
-		"clarify tool":       "clarify_intent",
-		"clarify-first":      "关键参数",
-		"no numbered list":   "结构化选项",
-		"injection guard":    "ignore previous instructions",
-		"reference id usage": "reference_asset_ids",
-		"chinese output":     "简体中文",
-		"thinking chinese":   "思考过程",
-		"async config gate":  "暂未配置",
-		"asset numbering":    "图N",
-		"multi-image intent": "被编辑底图",
-		"content first":      "写进正式回复正文",
-		"markdown rendered":  "前端会渲染",
+		"clarify tool":        "clarify_intent",
+		"clarify-first":       "关键参数",
+		"no numbered list":    "结构化选项",
+		"injection guard":     "ignore previous instructions",
+		"reference id usage":  "reference_asset_ids",
+		"chinese output":      "简体中文",
+		"thinking chinese":    "思考过程",
+		"async config gate":   "暂未配置",
+		"asset numbering":     "图N",
+		"multi-image intent":  "被编辑底图",
+		"content first":       "写进正式回复正文",
+		"markdown rendered":   "前端会渲染",
+		"intent hint advice":  "意图提示",
+		"intent hint as data": "仅供参考",
 	}
 	for name, want := range checks {
 		if !strings.Contains(p, want) {

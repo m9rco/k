@@ -89,3 +89,50 @@ func TestShouldRetryFakeAck(t *testing.T) {
 		})
 	}
 }
+
+func TestRemediationAction(t *testing.T) {
+	whitelistMissing := IntentHint{Whitelisted: true, MissingKeyParam: true, Labels: []string{"换背景"}}
+	whitelistOK := IntentHint{Whitelisted: true, MissingKeyParam: false, Labels: []string{"换背景"}}
+	offWhitelist := IntentHint{Whitelisted: false}
+	cases := []struct {
+		name         string
+		toolCalls    int
+		cancelled    bool
+		capsuleAsked bool
+		replyEmpty   bool
+		hint         IntentHint
+		want         remediation
+	}{
+		{name: "whitelist + missing key param -> clarify", toolCalls: 0, replyEmpty: true, hint: whitelistMissing, want: remediateClarify},
+		{name: "off-whitelist + empty reply -> refuse", toolCalls: 0, replyEmpty: true, hint: offWhitelist, want: remediateRefuse},
+		{name: "tool already called -> none", toolCalls: 1, replyEmpty: true, hint: whitelistMissing, want: remediateNone},
+		{name: "cancelled turn -> none", toolCalls: 0, cancelled: true, replyEmpty: true, hint: whitelistMissing, want: remediateNone},
+		{name: "capsule already asked -> none", toolCalls: 0, capsuleAsked: true, replyEmpty: true, hint: whitelistMissing, want: remediateNone},
+		{name: "whitelist with key param present -> none", toolCalls: 0, replyEmpty: true, hint: whitelistOK, want: remediateNone},
+		{name: "off-whitelist but model gave a body -> none", toolCalls: 0, replyEmpty: false, hint: offWhitelist, want: remediateNone},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := remediationAction(tc.toolCalls, tc.cancelled, tc.capsuleAsked, tc.replyEmpty, tc.hint)
+			if got != tc.want {
+				t.Errorf("remediationAction = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestRemediationClarifyBuildsOptions(t *testing.T) {
+	hint := IntentHint{Whitelisted: true, MissingKeyParam: true, Labels: []string{"换背景"}}
+	q, opts := remediationClarify(hint)
+	if q == "" {
+		t.Fatal("expected a non-empty clarify question")
+	}
+	if len(opts) < 2 || len(opts) > 4 {
+		t.Fatalf("expected 2-4 options, got %d", len(opts))
+	}
+	for i, o := range opts {
+		if o.Label == "" || o.Value == "" {
+			t.Errorf("option[%d] missing label/value: %+v", i, o)
+		}
+	}
+}

@@ -325,7 +325,16 @@ func (o *Orchestrator) Handle(ctx context.Context, sessionID, userText string, l
 	}()
 
 	w := o.window(sessionID)
-	w.Append(schema.UserMessage(userText))
+	// Deterministic pre-classification: nudge a weak model toward the right tool
+	// by injecting an advisory "意图提示" prefix, and capture the result to drive
+	// the post-turn remediation loop (clarify vs refuse). Advisory only — the model
+	// remains the decision-maker (see intent.go, SystemPrompt rule 10).
+	hint := ClassifyIntent(userText)
+	turnText := userText
+	if prefix := BuildIntentHint(hint); prefix != "" {
+		turnText = prefix + " " + userText
+	}
+	w.Append(schema.UserMessage(turnText))
 
 	ctx = withSession(ctx, sessionID)
 
@@ -407,10 +416,32 @@ func (o *Orchestrator) Handle(ctx context.Context, sessionID, userText string, l
 		cancelled bool
 	)
 	var serr error
-	reply, toolCalls, serr = o.streamOnce(ctx, ra, sessionID, baseMsgs, toolCB)
-	if serr != nil {
-		o.emitTurnEnd(sessionID, turnEndInfo{replyEmpty: true})
-		return "", fmt.Errorf("agent stream: %w", serr)
+	// Self-correcting retry loop: a weak model sometimes "confirms" an action in
+	// prose without emitting the tool call (looksLikeFakeExecAck). When that
+	// happens we re-run once with a stern correction appended, instead of leaving
+	// the workspace empty. maxAttempts=2 bounds this to a single correction so we
+	// never amplify latency/cost (see fakeack.go).
+	const maxAttempts = 2
+	attemptMsgs := baseMsgs
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		reply, toolCalls, serr = o.streamOnce(ctx, ra, sessionID, attemptMsgs, toolCB)
+		if serr != nil {
+			o.emitTurnEnd(sessionID, turnEndInfo{replyEmpty: true})
+			return "", fmt.Errorf("agent stream: %w", serr)
+		}
+		if ctx.Err() != nil {
+			break // cancelled: stop retrying
+		}
+		if !shouldRetryFakeAck(attempt, maxAttempts, toolCalls, reply) {
+			break
+		}
+		// Append the faked ack + a stern correction so the next attempt actually
+		// calls the tool rather than repeating the prose confirmation.
+		log.Printf("agent: session=%s fake-exec ack detected (attempt %d), self-correcting", sessionID, attempt)
+		attemptMsgs = append(append([]*schema.Message{}, attemptMsgs...),
+			schema.AssistantMessage(reply, nil),
+			schema.UserMessage(fakeAckCorrection),
+		)
 	}
 	cancelled = ctx.Err() != nil
 
@@ -429,8 +460,18 @@ func (o *Orchestrator) Handle(ctx context.Context, sessionID, userText string, l
 		return reply, nil
 	}
 
-	// Retries exhausted but the model still only faked execution: don't leave the
 	replyEmpty := strings.TrimSpace(reply) == ""
+	// Remediation fallback: the model still made zero tool calls after retries.
+	// Use the deterministic pre-classification to recover instead of leaving the
+	// turn empty or wrong (see remediationAction).
+	switch remediationAction(toolCalls, cancelled, capsuleAsked, replyEmpty, hint) {
+	case remediateClarify:
+		q, opts := remediationClarify(hint)
+		clarify(q, opts)
+	case remediateRefuse:
+		reply = RefusalMessage()
+		replyEmpty = false
+	}
 	w.Append(schema.AssistantMessage(reply, nil))
 	// Only emit a final body message when there is actual text; an empty
 	// done-message would otherwise render as a blank assistant bubble (the
@@ -549,6 +590,24 @@ type turnEndInfo struct {
 	hasCapsule bool
 	replyEmpty bool // no body text produced (frontend suppresses the empty bubble)
 	cancelled  bool // the turn was interrupted by the user
+}
+
+// remediationClarify builds the fallback clarify question used when the model
+// made no tool call but pre-classification says the intent is whitelisted yet a
+// key parameter (the image to act on) is missing. The options steer the user
+// toward supplying or generating an image so the next turn can proceed.
+func remediationClarify(hint IntentHint) (string, []ClarifyOption) {
+	intent := "这个操作"
+	if len(hint.Labels) > 0 {
+		intent = "「" + strings.Join(hint.Labels, "/") + "」"
+	}
+	q := "我可以帮你" + intent + "，但还不清楚要操作哪张图。请告诉我，或先准备一张图："
+	opts := []ClarifyOption{
+		{Label: "上传/选中一张图", Value: "我先上传一张图，请用它来" + intent, EditableHint: "我要操作的是这张图"},
+		{Label: "用文字生成一张", Value: "先用文字帮我生成一张图，再" + intent, EditableHint: "帮我生成一张……的图"},
+		{Label: "搜一张参考图", Value: "先帮我搜一张参考图，再" + intent, EditableHint: "帮我搜一张……的图"},
+	}
+	return q, opts
 }
 
 // emitFollowUp sends a proactive follow-up suggestion after a productive turn.

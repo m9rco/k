@@ -2,6 +2,11 @@ package agent
 
 import "regexp"
 
+// fakeAckCorrection is the stern instruction appended before a self-correcting
+// retry when the model only faked execution in prose. It tells the model its
+// previous turn did not actually do anything and demands a real tool call now.
+const fakeAckCorrection = "你刚才只用文字描述了「正在处理」，但并没有真正调用任何工具，工作区没有任何产物。请立即真正调用对应的工具来完成这个请求；如果确实缺少必要信息（如不知道操作哪张图），则改用 clarify_intent 询问。不要再只用文字假装执行。"
+
 // A weak chat model sometimes "confirms" an action in prose ("好的，正在处理图1
 // 的背景修改，产物会出现在左侧工作区。") without ever emitting the tool call that
 // would actually do it. The system prompt forbids this, but small models ignore
@@ -35,4 +40,36 @@ func looksLikeFakeExecAck(reply string) bool {
 // table is unit-testable without standing up a live model.
 func shouldRetryFakeAck(attempt, maxAttempts, toolCalls int, reply string) bool {
 	return toolCalls == 0 && attempt < maxAttempts && looksLikeFakeExecAck(reply)
+}
+
+// remediation is the post-turn fallback action when the model made no tool call.
+type remediation int
+
+const (
+	remediateNone    remediation = iota // leave the turn as-is (normal reply / empty)
+	remediateClarify                    // ask a structured clarify question
+	remediateRefuse                     // deterministic polite refusal
+)
+
+// remediationAction decides how to recover a turn that ended with zero tool
+// calls, using the deterministic pre-classification. It is a pure decision table
+// (unit-testable without a live model):
+//   - a cancelled turn, a turn that already called a tool, or one that already
+//     produced a clarify capsule is left untouched (remediateNone),
+//   - a whitelisted intent missing a key param → remediateClarify (so the turn
+//     never ends empty when we know what the user wanted),
+//   - a non-whitelisted request that produced no body → remediateRefuse (polite
+//     capability list, no extra model round-trip).
+func remediationAction(toolCalls int, cancelled, capsuleAsked, replyEmpty bool, hint IntentHint) remediation {
+	if toolCalls > 0 || cancelled || capsuleAsked {
+		return remediateNone
+	}
+	switch {
+	case hint.Whitelisted && hint.MissingKeyParam:
+		return remediateClarify
+	case !hint.Whitelisted && replyEmpty:
+		return remediateRefuse
+	default:
+		return remediateNone
+	}
 }
