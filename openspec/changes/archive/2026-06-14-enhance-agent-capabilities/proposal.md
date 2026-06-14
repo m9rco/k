@@ -1,9 +1,6 @@
 # Proposal: enhance-agent-capabilities
 
-## Summary
-本次变更全面强化 Agent 能力，覆盖 9 个方向：联网搜索与图片检索、多任务流水线、任务后主动反馈、Context 显示 bug、推理流式打字机、聊天框扩展性预留、项目优化审查、意图识别增强，以及移除无效爬虫逻辑。
-
-## Motivation
+## Why
 当前系统存在以下痛点：
 1. 无联网搜索能力，爬虫供应商缺失，用户无法搜索参考图
 2. Agent 每轮只能执行单个意图，复合指令需多次交互
@@ -13,15 +10,16 @@
 6. 聊天框缺乏扩展预留，无法支持后续富交互
 7. tools=0 高频出现，意图识别率偏低
 
-## Scope
+## What Changes
+全面强化 Agent 能力：联网搜索与图片检索、多任务流水线、任务后主动反馈、Context 显示修复、推理流式打字机、聊天框扩展性预留、意图识别增强，以及移除无效爬虫逻辑。
 
 ### 新增能力
 - **web-search**：内置联网搜索工具（文字搜索 + 图片搜索），将搜到的图片送入工作区；替代无效爬虫
 - **multi-task-pipeline**：单指令触发多工具串联执行（如 搜图→下载→生视频→生 icon）
 
 ### 修改能力
-- **conversation-orchestration**：意图识别增强（解决 tools=0）、任务后主动反馈、开启推理打字机
-- **frontend-experience**：Context bar 显示 bug 修复、聊天框富交互扩展性预留
+- **conversation-orchestration**：意图识别增强（解决 tools=0）、任务后主动反馈、Context 净占比下发
+- **frontend-experience**：Context bar 净占比显示、follow_up 建议渲染、聊天框扩展性预留
 - **material-crawling**：标记为 REMOVED（无供应商，由 web-search 替代）
 
 ## Out of Scope
