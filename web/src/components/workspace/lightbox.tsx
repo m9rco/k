@@ -75,8 +75,8 @@ export function Lightbox({
               </Button>
             )}
             {isVideo && (
-              <Button variant="outline" size="sm" onClick={() => onVideoOps(asset)}>
-                <Scissors className="size-3.5" /> 裁剪 / 抽帧
+              <Button variant="outline" size="sm" disabled title="功能待完善" onClick={() => onVideoOps(asset)}>
+                <Scissors className="size-3.5" /> 裁剪 / 抽帧（待完善）
               </Button>
             )}
             <Button variant="outline" size="sm" onClick={download}>

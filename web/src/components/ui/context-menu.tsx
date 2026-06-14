@@ -32,6 +32,7 @@ const ContextMenuItem = React.forwardRef<
     className={cn(
       "flex cursor-default select-none items-center gap-2 rounded-sm px-2.5 py-1.5 text-[13px] outline-none",
       "focus:bg-bg-elev-2 [&_svg]:size-4 [&_svg]:text-fg-mute",
+      "data-[disabled]:pointer-events-none data-[disabled]:opacity-40",
       destructive ? "text-danger focus:bg-danger/10 [&_svg]:text-danger" : "text-fg-dim focus:text-fg",
       className,
     )}

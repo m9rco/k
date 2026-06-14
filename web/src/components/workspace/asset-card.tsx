@@ -142,8 +142,9 @@ export function AssetCard({
         {!isVideo && <ContextMenuItem onSelect={() => onCrop(asset)}>切尺寸</ContextMenuItem>}
         {!isVideo && <ContextMenuItem onSelect={() => onPreview(asset)}>二次调整</ContextMenuItem>}
         {!isVideo && <ContextMenuItem onSelect={() => onVideo(asset)}>生成视频</ContextMenuItem>}
-        {isVideo && <ContextMenuItem onSelect={() => onVideoOps(asset, "trim")}>裁剪片段</ContextMenuItem>}
-        {isVideo && <ContextMenuItem onSelect={() => onVideoOps(asset, "frame")}>抽帧</ContextMenuItem>}
+        {/* 视频裁剪/抽帧暂禁用（功能待完善）；onVideoOps 透传链保留，完善后去掉 disabled 即恢复 */}
+        {isVideo && <ContextMenuItem disabled onSelect={() => onVideoOps(asset, "trim")}>裁剪片段（待完善）</ContextMenuItem>}
+        {isVideo && <ContextMenuItem disabled onSelect={() => onVideoOps(asset, "frame")}>抽帧（待完善）</ContextMenuItem>}
         <ContextMenuItem onSelect={() => downloadAsset(app.state.sessionId, asset.id)}>下载</ContextMenuItem>
         <ContextMenuSeparator />
         <ContextMenuItem destructive onSelect={() => app.removeAsset(asset.id)}>移除</ContextMenuItem>
