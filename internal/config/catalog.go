@@ -36,24 +36,24 @@ var modelCatalog = []CatalogEntry{
 	{ID: "deepseek-v4-flash", DisplayName: "DeepSeek V4 Flash", Scene: SceneChat, Vendor: "DeepSeek", IconKey: "deepseek", Provider: "openai"},
 	{ID: "gpt-5.4", DisplayName: "GPT-5.4", Scene: SceneChat, Vendor: "OpenAI", IconKey: "openai", Provider: "openai"},
 	{ID: "doubao-seed-2-0-mini-260428", DisplayName: "Doubao Seed 2.0 mini", Scene: SceneChat, Vendor: "Doubao", IconKey: "doubao", Provider: "openai"},
-	{ID: "claude-haiku-4-5-20251001", DisplayName: "Claude Haiku 4.5", Scene: SceneChat, Vendor: "Anthropic", IconKey: "claude", Provider: "anthropic"},
-	{ID: "claude-sonnet-4-6", DisplayName: "Claude Sonnet 4.6", Scene: SceneChat, Vendor: "Anthropic", IconKey: "claude", Provider: "anthropic"},
+	{ID: "claude-haiku-4-5-20251001", DisplayName: "Claude Haiku 4.5", Scene: SceneChat, Vendor: "Anthropic", IconKey: "anthropic", Provider: "anthropic"},
+	{ID: "claude-sonnet-4-6", DisplayName: "Claude Sonnet 4.6", Scene: SceneChat, Vendor: "Anthropic", IconKey: "anthropic", Provider: "anthropic"},
 
 	// 图生图 (image)
 	{ID: "gpt-image-2", DisplayName: "GPT Image 2", Scene: SceneImage, Vendor: "OpenAI", IconKey: "openai", Provider: "openai"},
-	{ID: "gemini-3-pro-image", DisplayName: "Gemini 3 Pro Image", Scene: SceneImage, Vendor: "Google", IconKey: "gemini", Provider: "gemini"},
-	{ID: "gemini-2.5-flash-image", DisplayName: "Gemini 2.5 Flash Image", Scene: SceneImage, Vendor: "Google", IconKey: "gemini", Provider: "gemini"},
-	{ID: "gemini-3.1-flash-image", DisplayName: "Gemini 3.1 Flash Image", Scene: SceneImage, Vendor: "Google", IconKey: "gemini", Provider: "gemini"},
-	{ID: "gemini-3.1-flash-image-preview", DisplayName: "Gemini 3.1 Flash Image (Preview)", Scene: SceneImage, Vendor: "Google", IconKey: "gemini", Provider: "gemini"},
+	{ID: "gemini-3-pro-image", DisplayName: "Gemini 3 Pro Image", Scene: SceneImage, Vendor: "Google", IconKey: "google", Provider: "gemini"},
+	{ID: "gemini-2.5-flash-image", DisplayName: "Gemini 2.5 Flash Image", Scene: SceneImage, Vendor: "Google", IconKey: "google", Provider: "gemini"},
+	{ID: "gemini-3.1-flash-image", DisplayName: "Gemini 3.1 Flash Image", Scene: SceneImage, Vendor: "Google", IconKey: "google", Provider: "gemini"},
+	{ID: "gemini-3.1-flash-image-preview", DisplayName: "Gemini 3.1 Flash Image (Preview)", Scene: SceneImage, Vendor: "Google", IconKey: "google", Provider: "gemini"},
 
 	// 文生图 (text_to_image)
-	{ID: "wan2.7-image-pro", DisplayName: "Wan 2.7 Image Pro", Scene: SceneTextToImage, Vendor: "Alibaba", IconKey: "wan", Provider: "dashscope"},
-	{ID: "qwen-image-2.0-2026-03-03", DisplayName: "Qwen Image 2.0", Scene: SceneTextToImage, Vendor: "Qwen", IconKey: "qwen", Provider: "dashscope"},
+	{ID: "wan2.7-image-pro", DisplayName: "Wan 2.7 Image Pro", Scene: SceneTextToImage, Vendor: "Alibaba", IconKey: "alibaba", Provider: "dashscope"},
+	{ID: "qwen-image-2.0-2026-03-03", DisplayName: "Qwen Image 2.0", Scene: SceneTextToImage, Vendor: "Alibaba", IconKey: "alibaba", Provider: "dashscope"},
 
 	// 图生视频 (video)
-	{ID: "happyhorse-1.0-r2v", DisplayName: "HappyHorse 1.0 R2V", Scene: SceneVideo, Vendor: "HappyHorse", IconKey: "happyhorse", Provider: "happyhorse"},
-	{ID: "veo_3_1_fast_components_vip", DisplayName: "Veo 3.1 Fast", Scene: SceneVideo, Vendor: "Google", IconKey: "veo", Provider: "veo"},
-	{ID: "veo_3_1_components_vip", DisplayName: "Veo 3.1", Scene: SceneVideo, Vendor: "Google", IconKey: "veo", Provider: "veo"},
+	{ID: "happyhorse-1.0-r2v", DisplayName: "HappyHorse 1.0 R2V", Scene: SceneVideo, Vendor: "Alibaba", IconKey: "alibaba", Provider: "happyhorse"},
+	{ID: "veo_3_1_fast_components_vip", DisplayName: "Veo 3.1 Fast", Scene: SceneVideo, Vendor: "Google", IconKey: "google", Provider: "veo"},
+	{ID: "veo_3_1_components_vip", DisplayName: "Veo 3.1", Scene: SceneVideo, Vendor: "Google", IconKey: "google", Provider: "veo"},
 }
 
 // sceneCredential returns the configured credential backing a scene (base_url +
