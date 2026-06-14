@@ -35,6 +35,11 @@ type CatalogEntry struct {
 	IconKey     string     `json:"iconKey"`
 	Provider    string     `json:"-"` // resolution detail, not exposed to the client
 	Model       string     `json:"-"` // provider wire name; falls back to ID when empty
+	// BaseURL overrides the scene's shared base for this entry. Most models in a
+	// scene share one endpoint (the scene credential), but some need their own —
+	// e.g. Veo lives at the OpenAI-style ".../v1" host while happyhorse (same video
+	// scene) lives under ".../alibailian". Empty means "use the scene credential".
+	BaseURL string `json:"-"`
 }
 
 // WireModel returns the provider-facing model name to send to the API: the
@@ -71,8 +76,8 @@ var modelCatalog = []CatalogEntry{
 
 	// 图生视频 (video)
 	{ID: "happyhorse-1.0-r2v", DisplayName: "HappyHorse 1.0 R2V", Scene: SceneVideo, Vendor: "Alibaba", IconKey: "alibaba", Provider: "happyhorse"},
-	{ID: "veo_3_1_fast_components_vip", DisplayName: "Veo 3.1 Fast", Scene: SceneVideo, Vendor: "Google", IconKey: "google", Provider: "veo"},
-	{ID: "veo_3_1_components_vip", DisplayName: "Veo 3.1", Scene: SceneVideo, Vendor: "Google", IconKey: "google", Provider: "veo"},
+	{ID: "veo_3_1_fast_components_vip", DisplayName: "Veo 3.1 Fast", Scene: SceneVideo, Vendor: "Google", IconKey: "google", Provider: "veo", Model: "veo-3.1-fast", BaseURL: "https://yunwu.ai"},
+	{ID: "veo_3_1_components_vip", DisplayName: "Veo 3.1", Scene: SceneVideo, Vendor: "Google", IconKey: "google", Provider: "veo", Model: "veo-3.1", BaseURL: "https://yunwu.ai"},
 }
 
 // sceneCredential returns the configured credential backing a scene (base_url +
@@ -214,6 +219,9 @@ func (c *Config) ResolveImageModel(scene ModelScene, modelID string) (ImageProvi
 		return ImageProviderConfig{}, false
 	}
 	base, key := c.sceneCredential(scene)
+	if e.BaseURL != "" {
+		base = e.BaseURL // per-entry endpoint override (e.g. Veo vs happyhorse)
+	}
 	return ImageProviderConfig{
 		Name:     strings.ToLower(e.Vendor),
 		Provider: e.Provider,

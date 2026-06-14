@@ -20,14 +20,12 @@ import (
 // part is appended when a source/reference image is supplied.
 //
 // Request:  POST {base}/v1beta/models/{model}:generateContent
-// Body:     {"contents":[{"parts":[{"text":...},{"inline_data":{mime_type,data}}]}]}
-// Response: candidates[].content.parts[].inline_data{mime_type,data(base64)}
+// Body:     {"contents":[{"parts":[{"text":...},{"inlineData":{mimeType,data}}]}]}
+// Response: candidates[].content.parts[].inlineData{mimeType,data(base64)}
 //
-// NOTE: the exact path/field casing the yunwu proxy expects could not be
-// verified online at authoring time; the shapes below follow Google's public
-// generateContent contract. If the proxy instead exposes Gemini as an
-// OpenAI-compatible /v1/images endpoint, configure Provider=openai to reuse
-// HTTPProvider with zero code change.
+// Field casing is camelCase (verified against the yunwu proxy's live response).
+// If the proxy instead exposes Gemini as an OpenAI-compatible /v1/images
+// endpoint, configure Provider=openai to reuse HTTPProvider with zero code change.
 type GeminiProvider struct {
 	name    string
 	baseURL string
@@ -64,13 +62,18 @@ func NewGeminiProvider(cfg config.ImageProviderConfig) *GeminiProvider {
 func (p *GeminiProvider) Name() string { return p.name }
 
 // geminiPart is one content part: either text or inline image data.
+//
+// Field tags use camelCase (inlineData/mimeType) — the canonical Gemini JSON the
+// API actually returns. snake_case (inline_data) decodes to nothing on the
+// response side, which surfaced as a misleading "empty image data" error. Google
+// accepts camelCase on the request side too, so the same struct serves both.
 type geminiPart struct {
 	Text       string            `json:"text,omitempty"`
-	InlineData *geminiInlineData `json:"inline_data,omitempty"`
+	InlineData *geminiInlineData `json:"inlineData,omitempty"`
 }
 
 type geminiInlineData struct {
-	MimeType string `json:"mime_type"`
+	MimeType string `json:"mimeType"`
 	Data     string `json:"data"` // base64-encoded image bytes
 }
 

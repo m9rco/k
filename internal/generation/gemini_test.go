@@ -15,6 +15,34 @@ import (
 // pngPixel is a 1x1 PNG used as a stand-in image payload.
 var geminiPNG = []byte{0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a}
 
+// TestGeminiParsesCamelCaseResponse pins the camelCase decoding fix. It feeds a
+// RAW camelCase JSON body (as the live Gemini/yunwu endpoint returns —
+// inlineData/mimeType, not snake_case) so the test would fail if the struct tags
+// regressed to snake_case. The other tests round-trip through the same struct and
+// therefore cannot catch a casing mismatch.
+func TestGeminiParsesCamelCaseResponse(t *testing.T) {
+	wantB64 := base64.StdEncoding.EncodeToString(geminiPNG)
+	raw := `{"candidates":[{"content":{"parts":[{"inlineData":{"mimeType":"image/jpeg","data":"` + wantB64 + `"}}],"role":"model"},"finishReason":"STOP"}]}`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(raw))
+	}))
+	defer srv.Close()
+
+	p := NewGeminiProvider(config.ImageProviderConfig{
+		Name: "gemini", BaseURL: srv.URL, APIKey: "sk-x", Model: "gemini-3.1-flash-image",
+	})
+	out, err := p.Generate(context.Background(), Request{Prompt: "a red circle"})
+	if err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+	if string(out.Data) != string(geminiPNG) {
+		t.Errorf("decoded image mismatch: got %d bytes", len(out.Data))
+	}
+	if out.Mime != "image/jpeg" {
+		t.Errorf("Mime = %q, want image/jpeg", out.Mime)
+	}
+}
+
 // TestGeminiBaseURLStripsAPIVersion guards against the ".../v1/v1beta/..." path
 // doubling: Gemini often inherits the shared OpenAI-style base ("…/v1"), but it
 // appends its own "/v1beta" segment. The provider must strip a trailing /v1 or

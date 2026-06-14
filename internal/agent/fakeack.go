@@ -17,7 +17,9 @@ import "regexp"
 // Pairing the two signals keeps false positives near zero, which matters because a
 // false positive triggers a wasted retry.
 var (
-	fakeAckProgressRe = regexp.MustCompile(`正在(处理|生成|制作|修改|裁剪|替换|为你|帮你)|(这就|马上|立刻|稍等|稍候)(为你|帮你|开始)?(处理|生成|制作)`)
+	// "正在……处理/生成/…" — allow a few chars between 正在 and the verb so phrasings
+	// like "正在按你的要求处理" still match (observed live; a tight "正在处理" missed it).
+	fakeAckProgressRe = regexp.MustCompile(`正在.{0,10}(处理|生成|制作|修改|裁剪|替换|绘制|制图|为你|帮你)|(这就|马上|立刻|稍等|稍候).{0,8}(处理|生成|制作)`)
 	fakeAckArtifactRe = regexp.MustCompile(`工作区|产物|左侧|生成好|处理好|稍后(查看|出现|展示)`)
 )
 
@@ -26,4 +28,12 @@ var (
 // Callers should only consult it when the turn made zero tool calls.
 func looksLikeFakeExecAck(reply string) bool {
 	return fakeAckProgressRe.MatchString(reply) && fakeAckArtifactRe.MatchString(reply)
+}
+
+// shouldRetryFakeAck decides whether a finished attempt warrants a self-correcting
+// retry: the model made no tool call, its reply looks like a fake execution ack,
+// and an attempt budget remains. Pulled out as a pure function so the decision
+// table is unit-testable without standing up a live model.
+func shouldRetryFakeAck(attempt, maxAttempts, toolCalls int, reply string) bool {
+	return toolCalls == 0 && attempt < maxAttempts && looksLikeFakeExecAck(reply)
 }

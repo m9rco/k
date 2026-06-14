@@ -395,10 +395,114 @@ func (o *Orchestrator) Handle(ctx context.Context, sessionID, userText string, l
 	// so the frontend can stop the spinner and show the action trajectory.
 	toolCB := o.toolCallbackHandler(sessionID)
 
-	stream, err := ra.Stream(ctx, w.Messages(), agentOption(toolCB))
+	// Run the turn with one self-correction retry. A weak model sometimes
+	// "confirms" an action in prose without emitting the tool call that performs
+	// it (looksLikeFakeExecAck). When the FIRST attempt makes zero tool calls yet
+	// reads like such a fake acknowledgement, finalize that bubble with a retry
+	// notice, inject a stern correction, and run once more — so the workspace is
+	// not silently left empty. Genuine chat (no fake-ack shape) and turns that did
+	// call a tool never retry.
+	const maxAttempts = 2
+	baseMsgs := w.Messages()
+	var (
+		reply     string
+		toolCalls int
+		cancelled bool
+		extraMsgs []*schema.Message // corrective context, appended on retry only
+		didRetry  bool
+	)
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		msgs := baseMsgs
+		if len(extraMsgs) > 0 {
+			msgs = append(append([]*schema.Message{}, baseMsgs...), extraMsgs...)
+		}
+		var serr error
+		reply, toolCalls, serr = o.streamOnce(ctx, ra, sessionID, msgs, toolCB)
+		if serr != nil {
+			o.emitTurnEnd(sessionID, turnEndInfo{replyEmpty: true})
+			return "", fmt.Errorf("agent stream: %w", serr)
+		}
+		if cancelled = ctx.Err() != nil; cancelled {
+			break
+		}
+		// Stop unless this looks like a fake ack and a retry is still available.
+		if !shouldRetryFakeAck(attempt, maxAttempts, toolCalls, reply) {
+			break
+		}
+		// Finalize the fake-ack bubble with a retry notice. The notice is longer
+		// than the streamed body, so the frontend replaces the bubble text on this
+		// done:true frame; the next attempt then streams into a fresh bubble.
+		o.emit(sessionID, transport.Event{
+			Type:      transport.EventMessage,
+			SessionID: sessionID,
+			Data:      map[string]any{"text": reply + "\n\n（检测到未实际执行，正在重试…）", "done": true},
+		})
+		extraMsgs = []*schema.Message{
+			schema.AssistantMessage(reply, nil),
+			schema.UserMessage("你上一条只是口头确认，却没有调用任何工具。若我的请求属于你的能力（换背景/换角色/换文案/切尺寸/生视频/物料爬取等），请在本轮直接调用对应工具完成，不要只回复文字说你将要做。"),
+		}
+		didRetry = true
+		log.Printf("agent: session=%s fake-ack detected (toolCalls=0), retrying once with correction", sessionID)
+	}
+
+	// Diagnostic: surface whether this turn actually invoked any tool. A request
+	// that should produce an asset but emitted 0 tool calls means the model only
+	// replied with text (e.g. a small model that "confirms" without acting).
+	log.Printf("agent: session=%s turn done toolCalls=%d replyLen=%d retried=%t capsule=%t cancelled=%t", sessionID, toolCalls, len(reply), didRetry, capsuleAsked, cancelled)
+
+	if cancelled {
+		// Interrupted mid-turn: persist whatever was produced (keeps context
+		// coherent for the next turn) but tell the frontend the turn was
+		// cancelled so it can close the loading state without a stray bubble.
+		w.Append(schema.AssistantMessage(reply, nil))
+		o.persist(sessionID, "user", userText)
+		if strings.TrimSpace(reply) != "" {
+			o.persist(sessionID, "assistant", reply)
+		}
+		o.emitTurnEnd(sessionID, turnEndInfo{toolCalls: toolCalls, hasCapsule: capsuleAsked, replyEmpty: strings.TrimSpace(reply) == "", cancelled: true})
+		return reply, nil
+	}
+
+	// Retries exhausted but the model still only faked execution: don't leave the
+	// user with a misleading "正在处理…". Append an honest notice so they know to
+	// retry or switch to a more capable model.
+	if toolCalls == 0 && looksLikeFakeExecAck(reply) {
+		reply += "\n\n（注意：我没有真正执行这步操作。可能是当前模型不稳定，请重试，或在右上角切换到能力更强的模型。）"
+		log.Printf("agent: session=%s fake-ack persisted after retries; appended honest notice", sessionID)
+	}
+
+	replyEmpty := strings.TrimSpace(reply) == ""
+	w.Append(schema.AssistantMessage(reply, nil))
+	// Only emit a final body message when there is actual text; an empty
+	// done-message would otherwise render as a blank assistant bubble (the
+	// frontend also guards via turn_end.replyEmpty, but suppressing here keeps
+	// the wire clean).
+	if !replyEmpty {
+		o.emit(sessionID, transport.Event{
+			Type:      transport.EventMessage,
+			SessionID: sessionID,
+			Data:      map[string]any{"text": reply, "done": true},
+		})
+	}
+	// Persist this turn so the conversation survives a server restart / reconnect.
+	// Only text is stored (large tool payloads stay out of the DB, mirroring D3).
+	o.persist(sessionID, "user", userText)
+	if !replyEmpty {
+		o.persist(sessionID, "assistant", reply)
+	}
+	o.emitTurnEnd(sessionID, turnEndInfo{toolCalls: toolCalls, hasCapsule: capsuleAsked, replyEmpty: replyEmpty})
+	return reply, nil
+}
+
+// streamOnce runs one pass of the react agent over msgs, consuming the stream and
+// emitting reasoning / tool-call / incremental message events as they arrive
+// (this drives the typewriter UI). It returns the accumulated reply text and the
+// number of tool calls the model requested. The caller decides whether the turn
+// is final and emits the terminal done:true frame; streamOnce never emits one.
+func (o *Orchestrator) streamOnce(ctx context.Context, ra *react.Agent, sessionID string, msgs []*schema.Message, toolCB callbacks.Handler) (string, int, error) {
+	stream, err := ra.Stream(ctx, msgs, agentOption(toolCB))
 	if err != nil {
-		o.emitTurnEnd(sessionID, turnEndInfo{replyEmpty: true})
-		return "", fmt.Errorf("agent stream: %w", err)
+		return "", 0, err
 	}
 	defer stream.Close()
 
@@ -450,49 +554,8 @@ func (o *Orchestrator) Handle(ctx context.Context, sessionID, userText string, l
 			})
 		}
 	}
-
-	reply := sb.String()
-	cancelled := ctx.Err() != nil
-	// Diagnostic: surface whether this turn actually invoked any tool. A request
-	// that should produce an asset but emitted 0 tool calls means the model only
-	// replied with text (e.g. a small model that "confirms" without acting) —
-	// this is the signal to inspect the model/prompt, not the workspace pipeline.
-	log.Printf("agent: session=%s turn done toolCalls=%d replyLen=%d chunks=%d capsule=%t cancelled=%t", sessionID, toolCalls, len(reply), chunks, capsuleAsked, cancelled)
-
-	if cancelled {
-		// Interrupted mid-turn: persist whatever was produced (keeps context
-		// coherent for the next turn) but tell the frontend the turn was
-		// cancelled so it can close the loading state without a stray bubble.
-		w.Append(schema.AssistantMessage(reply, nil))
-		o.persist(sessionID, "user", userText)
-		if strings.TrimSpace(reply) != "" {
-			o.persist(sessionID, "assistant", reply)
-		}
-		o.emitTurnEnd(sessionID, turnEndInfo{toolCalls: toolCalls, hasCapsule: capsuleAsked, replyEmpty: strings.TrimSpace(reply) == "", cancelled: true})
-		return reply, nil
-	}
-
-	replyEmpty := strings.TrimSpace(reply) == ""
-	w.Append(schema.AssistantMessage(reply, nil))
-	// Only emit a final body message when there is actual text; an empty
-	// done-message would otherwise render as a blank assistant bubble (the
-	// frontend also guards via turn_end.replyEmpty, but suppressing here keeps
-	// the wire clean).
-	if !replyEmpty {
-		o.emit(sessionID, transport.Event{
-			Type:      transport.EventMessage,
-			SessionID: sessionID,
-			Data:      map[string]any{"text": reply, "done": true},
-		})
-	}
-	// Persist this turn so the conversation survives a server restart / reconnect.
-	// Only text is stored (large tool payloads stay out of the DB, mirroring D3).
-	o.persist(sessionID, "user", userText)
-	if !replyEmpty {
-		o.persist(sessionID, "assistant", reply)
-	}
-	o.emitTurnEnd(sessionID, turnEndInfo{toolCalls: toolCalls, hasCapsule: capsuleAsked, replyEmpty: replyEmpty})
-	return reply, nil
+	log.Printf("agent: session=%s stream attempt done toolCalls=%d replyLen=%d chunks=%d", sessionID, toolCalls, sb.Len(), chunks)
+	return sb.String(), toolCalls, nil
 }
 
 // persist writes one conversation message to the store (best-effort: a failure

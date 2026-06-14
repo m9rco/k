@@ -14,6 +14,11 @@ func TestLooksLikeFakeExecAck(t *testing.T) {
 			want:  true,
 		},
 		{
+			name:  "observed fake ack with words between 正在 and verb",
+			reply: "好的，正在按你的要求处理这张图，产物会很快出现在左侧工作区。",
+			want:  true,
+		},
+		{
 			name:  "fake ack generate variant",
 			reply: "马上为你生成，稍后查看工作区即可。",
 			want:  true,
@@ -53,6 +58,33 @@ func TestLooksLikeFakeExecAck(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := looksLikeFakeExecAck(tc.reply); got != tc.want {
 				t.Errorf("looksLikeFakeExecAck(%q) = %v, want %v", tc.reply, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestShouldRetryFakeAck(t *testing.T) {
+	const maxAttempts = 2
+	fakeAck := "好的，正在处理图1的背景修改，产物会出现在左侧工作区。"
+	realReply := "已完成，图片已生成。"
+	cases := []struct {
+		name      string
+		attempt   int
+		toolCalls int
+		reply     string
+		want      bool
+	}{
+		{name: "first attempt, fake ack, no tools -> retry", attempt: 1, toolCalls: 0, reply: fakeAck, want: true},
+		{name: "tools were called -> no retry", attempt: 1, toolCalls: 1, reply: fakeAck, want: false},
+		{name: "not a fake ack -> no retry", attempt: 1, toolCalls: 0, reply: realReply, want: false},
+		{name: "last attempt -> no retry even if fake", attempt: 2, toolCalls: 0, reply: fakeAck, want: false},
+		{name: "empty reply -> no retry", attempt: 1, toolCalls: 0, reply: "", want: false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := shouldRetryFakeAck(tc.attempt, maxAttempts, tc.toolCalls, tc.reply); got != tc.want {
+				t.Errorf("shouldRetryFakeAck(attempt=%d, tools=%d, %q) = %v, want %v",
+					tc.attempt, tc.toolCalls, tc.reply, got, tc.want)
 			}
 		})
 	}

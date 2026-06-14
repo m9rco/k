@@ -73,11 +73,12 @@ func TestResolveChatModel(t *testing.T) {
 }
 
 // TestResolveChatModelUsesWireName verifies that a catalog entry whose provider
-// wire name differs from its stable id (deepseek-v4-flash -> the taiji name)
-// resolves to the WIRE name for the API, while the id stays the selection key.
+// wire name differs from its stable id (the taiji-hosted deepseek entry ->
+// "DeepSeek-V4-Flash-Online-32k") resolves to the WIRE name for the API, while
+// the id stays the selection key.
 func TestResolveChatModelUsesWireName(t *testing.T) {
 	cfg := baseConfig()
-	mc, ok := cfg.ResolveChatModel("deepseek-v4-flash")
+	mc, ok := cfg.ResolveChatModel("deepseek-v4-flash-tencent")
 	if !ok {
 		t.Fatal("expected resolve ok")
 	}
@@ -92,8 +93,8 @@ func TestResolveChatModelUsesWireName(t *testing.T) {
 func TestSceneDefaultMapsWireNameToCatalogID(t *testing.T) {
 	cfg := baseConfig()
 	cfg.ChatPrimary.Model = "DeepSeek-V4-Flash-Online-32k" // configured as wire name
-	if got := cfg.SceneDefaultModel(SceneChat); got != "deepseek-v4-flash" {
-		t.Errorf("SceneDefaultModel = %q, want catalog id deepseek-v4-flash", got)
+	if got := cfg.SceneDefaultModel(SceneChat); got != "deepseek-v4-flash-tencent" {
+		t.Errorf("SceneDefaultModel = %q, want catalog id deepseek-v4-flash-tencent", got)
 	}
 }
 
@@ -111,6 +112,31 @@ func TestResolveImageModel(t *testing.T) {
 	}
 	if _, ok := cfg.ResolveImageModel(SceneTextToImage, "wan2.7-image-pro"); ok {
 		t.Error("unconfigured scene should not resolve")
+	}
+}
+
+// TestResolveVeoUsesEntryBaseAndWireName verifies the per-entry overrides:
+// Veo shares the video scene with happyhorse but lives at a different endpoint,
+// so its catalog entry carries its own BaseURL (not the scene credential's) and
+// a wire name distinct from the stable id. The api key still comes from the
+// shared video credential.
+func TestResolveVeoUsesEntryBaseAndWireName(t *testing.T) {
+	cfg := baseConfig()
+	pc, ok := cfg.ResolveImageModel(SceneVideo, "veo_3_1_fast_components_vip")
+	if !ok {
+		t.Fatal("expected resolve ok")
+	}
+	if pc.Provider != "veo" {
+		t.Errorf("Provider = %q, want veo", pc.Provider)
+	}
+	if pc.BaseURL != "https://yunwu.ai" {
+		t.Errorf("BaseURL = %q, want the entry override https://yunwu.ai (not the scene base)", pc.BaseURL)
+	}
+	if pc.Model != "veo-3.1-fast" {
+		t.Errorf("Model = %q, want wire name veo-3.1-fast", pc.Model)
+	}
+	if pc.APIKey != "sk-vid" {
+		t.Errorf("APIKey = %q, want the shared video credential sk-vid", pc.APIKey)
 	}
 }
 
