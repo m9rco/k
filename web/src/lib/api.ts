@@ -36,12 +36,13 @@ export async function bootSession(): Promise<string> {
 }
 
 export function getContext(sid: string) {
-  return api<{ estimatedTokens: number; budget: number; compressed: boolean }>(
+  return api<{ estimatedTokens: number; budget: number; compressed: boolean; systemTokens?: number }>(
     `/api/session/${sid}/window`,
   ).then<ContextState>((w) => ({
     estimatedTokens: w.estimatedTokens,
     budget: w.budget,
     compressed: w.compressed,
+    systemTokens: w.systemTokens,
   }));
 }
 

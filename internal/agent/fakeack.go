@@ -17,9 +17,8 @@ import "regexp"
 // Pairing the two signals keeps false positives near zero, which matters because a
 // false positive triggers a wasted retry.
 var (
-	// "正在……处理/生成/…" — allow a few chars between 正在 and the verb so phrasings
-	// like "正在按你的要求处理" still match (observed live; a tight "正在处理" missed it).
-	fakeAckProgressRe = regexp.MustCompile(`正在.{0,10}(处理|生成|制作|修改|裁剪|替换|绘制|制图|为你|帮你)|(这就|马上|立刻|稍等|稍候).{0,8}(处理|生成|制作)`)
+	// "正在……处理/生成/搜索/下载/…" — allow a few chars between 正在 and the verb.
+	fakeAckProgressRe = regexp.MustCompile(`正在.{0,10}(处理|生成|制作|修改|裁剪|替换|绘制|制图|搜索|下载|查找|为你|帮你)|(这就|马上|立刻|稍等|稍候).{0,8}(处理|生成|制作|搜索|下载)`)
 	fakeAckArtifactRe = regexp.MustCompile(`工作区|产物|左侧|生成好|处理好|稍后(查看|出现|展示)`)
 )
 

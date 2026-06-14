@@ -134,11 +134,7 @@ export function WorkspacePanel() {
 
       <div className="flex-1 overflow-y-auto px-5 py-4">
         {isEmpty ? (
-          <div className="grid h-full place-items-center text-center">
-            <div className="max-w-xs text-[13px] leading-relaxed text-fg-mute">
-              工作区还空着。上传一张图或直接描述你的需求，产物会出现在这里。
-            </div>
-          </div>
+          <div className="h-full" />
         ) : view === "timeline" ? (
           <Timeline
             nodes={nodes}

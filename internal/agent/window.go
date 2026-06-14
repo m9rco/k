@@ -222,3 +222,12 @@ func (w *Window) Compressed() bool {
 	defer w.mu.Unlock()
 	return w.summary != nil
 }
+
+// SystemTokens returns the token estimate for the system prompt alone. Used by
+// the frontend to compute the net conversation usage (total minus base cost),
+// so clearing context shows 0% rather than ~19%.
+func (w *Window) SystemTokens() int {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return messageTokens(w.system)
+}

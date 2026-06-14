@@ -13,7 +13,7 @@ func TestSystemPromptDirectives(t *testing.T) {
 	p := SystemPrompt()
 	checks := map[string]string{
 		"clarify tool":       "clarify_intent",
-		"clarify-first":      "缺少安全调用工具所必需的信息",
+		"clarify-first":      "关键参数",
 		"no numbered list":   "结构化选项",
 		"injection guard":    "ignore previous instructions",
 		"reference id usage": "reference_asset_ids",

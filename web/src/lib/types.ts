@@ -1,7 +1,7 @@
 // Shared types mirroring the Go backend's JSON shapes. Kept minimal — only the
 // fields the UI consumes.
 
-export type AssetKind = "upload" | "generated" | "cropped" | "crawled" | "video";
+export type AssetKind = "upload" | "generated" | "cropped" | "crawled" | "searched" | "video";
 
 export interface Asset {
   id: string;
@@ -35,6 +35,7 @@ export interface ContextState {
   estimatedTokens: number;
   budget: number;
   compressed: boolean;
+  systemTokens?: number; // base cost of system prompt; subtracted for net display
 }
 
 // Real-time event envelope (WS + SSE share this shape).

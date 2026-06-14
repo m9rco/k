@@ -408,9 +408,11 @@ func (m *chatModel) anthropicBody(input []*schema.Message) map[string]any {
 	return body
 }
 
-// anthropicURL returns the Messages endpoint.
+// anthropicURL returns the Messages endpoint. Strips a trailing /v1 from the
+// base URL so a proxy configured as https://host/v1 doesn't produce /v1/v1/messages.
 func (m *chatModel) anthropicURL() string {
-	return m.baseURL("https://api.anthropic.com") + "/v1/messages"
+	base := strings.TrimSuffix(m.baseURL("https://api.anthropic.com"), "/v1")
+	return base + "/v1/messages"
 }
 
 // anthropicHeaders returns the auth/version headers for the Messages API.

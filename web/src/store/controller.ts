@@ -108,6 +108,9 @@ export function useAppController() {
         closeStream(taskId);
         void refreshWorkspace(sid);
         void refreshContext(sid);
+      } else if (type === "task_progress" && data.asset_id) {
+        // immediate backfill: each downloaded image is pushed as soon as it lands
+        void refreshWorkspace(sid);
       } else if (type === "task_failed") {
         closeStream(taskId);
         toast("有一个生成任务失败了，可在工作区重试", "warn");
@@ -427,6 +430,16 @@ export function useAppController() {
         case "tool_result":
           onToolResult(sid, d);
           break;
+        case "follow_up": {
+          const msg = (d.message as string) || "接下来想做什么？";
+          const rawOpts = Array.isArray(d.options) ? (d.options as Record<string, unknown>[]) : [];
+          const opts = rawOpts.map((o) => ({
+            label: (o.label as string) || "",
+            value: (o.value as string) || "",
+          }));
+          setChat((c) => [...c, { kind: "follow_up", id: uid("fu"), message: msg, options: opts, dismissed: false }]);
+          break;
+        }
         case "task_created":
           if (typeof d.task_id === "string") ensureTaskPlaceholder(sid, d.task_id, (d.kind as TaskKind) || "generate");
           break;
@@ -546,23 +559,18 @@ export function useAppController() {
       if (sel.has(id)) {
         sel.delete(id);
       } else {
-        if (sel.size >= MAX_SELECTED) {
-          toast(`最多选择 ${MAX_SELECTED} 张作为参考`, "warn");
-          return s;
-        }
         sel.add(id);
       }
       return { ...s, selected: sel };
     });
-  }, [toast]);
+  }, []);
 
   const selectAll = React.useCallback(() => {
     setState((s) => {
-      const ids = orderedAssetIds(s).filter((id) => s.assets.has(id)).slice(0, MAX_SELECTED);
-      if (s.assets.size > MAX_SELECTED) toast(`最多选择 ${MAX_SELECTED} 张，已选前 ${MAX_SELECTED} 张`, "warn");
+      const ids = orderedAssetIds(s).filter((id) => s.assets.has(id));
       return { ...s, selected: new Set(ids) };
     });
-  }, [toast]);
+  }, []);
 
   const clearSelection = React.useCallback(() => {
     setState((s) => ({ ...s, selected: new Set() }));
@@ -612,7 +620,7 @@ export function useAppController() {
         sel.delete(assetId);
         return { ...s, assets, selected: sel };
       });
-      toast("已移除", "ok");
+      // toast("已移除", "ok");
     } catch (e) {
       toast("移除失败：" + (e as Error).message);
     }
@@ -688,9 +696,10 @@ export function useAppController() {
     const sid = stateRef.current.sessionId;
     try {
       await api.clearWorkspace(sid);
-      setState((s) => ({ ...s, selected: new Set() }));
+      setState((s) => ({ ...s, selected: new Set(), chat: [] }));
+      typer.current = { id: "", target: "", shown: 0, done: false };
+      reasoner.current = { id: "", target: "", shown: 0 };
       await refreshWorkspace(sid);
-      toast("工作区已清空", "ok");
     } catch (e) {
       toast("清空失败：" + (e as Error).message);
     }
@@ -719,18 +728,15 @@ export function useAppController() {
     setState((s) => {
       const assets = new Map(s.assets);
       for (const r of results) if (r.status === "fulfilled") assets.set(r.value.id, r.value);
-      // Newly uploaded images are auto-selected as references, replacing the
-      // prior selection, capped at MAX_SELECTED (earliest-uploaded kept).
-      const selected = new Set(newIds.slice(0, MAX_SELECTED));
+      const selected = new Set(newIds);
       return { ...s, assets, selected };
     });
     const ok = results.filter((r) => r.status === "fulfilled").length;
     const fail = results.length - ok;
-    if (fail === 0) {
-      const capped = ok > MAX_SELECTED ? `，已选中前 ${MAX_SELECTED} 张作为参考` : "";
-      toast(ok === 1 ? "已上传并选中，现在可以让我换背景/角色/文案" : `已上传 ${ok} 张图${capped}`, "ok");
-    } else if (ok === 0) toast(`上传失败 ${fail} 张`, "error");
-    else toast(`已上传 ${ok} 张，失败 ${fail} 张`, "warn");
+    if (fail > 0) {
+      if (ok === 0) toast(`上传失败 ${fail} 张`, "error");
+      else toast(`已上传 ${ok} 张，失败 ${fail} 张`, "warn");
+    }
   }, [toast]);
 
   return {
@@ -762,5 +768,7 @@ export function useAppController() {
     toast,
     collapseReasoningItem: (id: string) =>
       setChat((c) => c.map((it) => (it.kind === "reasoning" && it.id === id ? { ...it, collapsed: !it.collapsed } : it))),
+    dismissFollowUp: (id: string) =>
+      setChat((c) => c.map((it) => (it.kind === "follow_up" && it.id === id ? { ...it, dismissed: true } : it))),
   } as const;
 }

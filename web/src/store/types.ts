@@ -8,6 +8,7 @@ export type ChatItem =
   | { kind: "reasoning"; id: string; text: string; collapsed: boolean; done: boolean }
   | { kind: "tool"; id: string; tool: ToolCardData }
   | { kind: "capsule"; id: string; question: string; options: CapsuleOption[]; answered: boolean }
+  | { kind: "follow_up"; id: string; message: string; options: CapsuleOption[]; dismissed: boolean }
   | { kind: "loading"; id: string };
 
 // CapsuleOption is one choice in a clarify prompt. value is sent on a plain
@@ -45,7 +46,7 @@ export interface AppState {
   // queue holds messages typed while a turn is in flight; auto-flushed on
   // turn_end, or reordered/interrupt-sent by the user (Cursor-style).
   queue: QueuedMessage[];
-  context: { estimatedTokens: number; budget: number; compressed: boolean } | null;
+  context: { estimatedTokens: number; budget: number; compressed: boolean; systemTokens?: number } | null;
   // models holds the per-scene catalog + current selection + server defaults;
   // loaded lazily when the model picker opens. null until first fetched.
   models: { catalog: Record<string, ModelEntry[]>; selected: Record<string, string>; defaults: Record<string, string> } | null;

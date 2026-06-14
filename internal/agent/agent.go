@@ -31,6 +31,7 @@ import (
 	"gameasset/internal/transport"
 	"gameasset/internal/usermodel"
 	"gameasset/internal/video"
+	"gameasset/internal/websearch"
 )
 
 // sessionKey scopes a tool invocation to its caller's session via context.
@@ -53,6 +54,7 @@ type Orchestrator struct {
 	crop       *crop.Service
 	video      *video.Service
 	crawl      *crawl.Service
+	webSearch  *websearch.Service
 	store      *store.Store
 	newID      func(string) string
 	budget     int
@@ -95,6 +97,9 @@ func NewOrchestrator(cfg *config.Config, gen *generation.Service, cr *crop.Servi
 		turnMu:     make(map[string]*sync.Mutex),
 	}
 }
+
+// SetWebSearch installs the web-search service (DDG text + Bing images).
+func (o *Orchestrator) SetWebSearch(svc *websearch.Service) { o.webSearch = svc }
 
 // SetTextToImage installs the text-to-image generation service (wan/qwen). When
 // left unset, the generate_image_from_text tool stays out of the whitelist and
@@ -341,7 +346,7 @@ func (o *Orchestrator) Handle(ctx context.Context, sessionID, userText string, l
 		})
 	}
 
-	deps := ToolDeps{Generation: o.gen, TextToImage: o.textToImg, Crop: o.crop, Video: o.video, Crawl: o.crawl, SessionID: sessionID, Lossless: lossless, Clarify: clarify}
+	deps := ToolDeps{Generation: o.gen, TextToImage: o.textToImg, Crop: o.crop, Video: o.video, Crawl: o.crawl, WebSearch: o.webSearch, Store: o.store, SessionID: sessionID, Lossless: lossless, Clarify: clarify}
 	// Per-session generation model overrides (image / text-to-image / video).
 	// Zero value => the tool uses the service default provider.
 	if pc, ok := o.models.ImageModel(sessionID, config.SceneImage); ok {
@@ -395,60 +400,21 @@ func (o *Orchestrator) Handle(ctx context.Context, sessionID, userText string, l
 	// so the frontend can stop the spinner and show the action trajectory.
 	toolCB := o.toolCallbackHandler(sessionID)
 
-	// Run the turn with one self-correction retry. A weak model sometimes
-	// "confirms" an action in prose without emitting the tool call that performs
-	// it (looksLikeFakeExecAck). When the FIRST attempt makes zero tool calls yet
-	// reads like such a fake acknowledgement, finalize that bubble with a retry
-	// notice, inject a stern correction, and run once more — so the workspace is
-	// not silently left empty. Genuine chat (no fake-ack shape) and turns that did
-	// call a tool never retry.
-	const maxAttempts = 2
 	baseMsgs := w.Messages()
 	var (
 		reply     string
 		toolCalls int
 		cancelled bool
-		extraMsgs []*schema.Message // corrective context, appended on retry only
-		didRetry  bool
 	)
-	for attempt := 1; attempt <= maxAttempts; attempt++ {
-		msgs := baseMsgs
-		if len(extraMsgs) > 0 {
-			msgs = append(append([]*schema.Message{}, baseMsgs...), extraMsgs...)
-		}
-		var serr error
-		reply, toolCalls, serr = o.streamOnce(ctx, ra, sessionID, msgs, toolCB)
-		if serr != nil {
-			o.emitTurnEnd(sessionID, turnEndInfo{replyEmpty: true})
-			return "", fmt.Errorf("agent stream: %w", serr)
-		}
-		if cancelled = ctx.Err() != nil; cancelled {
-			break
-		}
-		// Stop unless this looks like a fake ack and a retry is still available.
-		if !shouldRetryFakeAck(attempt, maxAttempts, toolCalls, reply) {
-			break
-		}
-		// Finalize the fake-ack bubble with a retry notice. The notice is longer
-		// than the streamed body, so the frontend replaces the bubble text on this
-		// done:true frame; the next attempt then streams into a fresh bubble.
-		o.emit(sessionID, transport.Event{
-			Type:      transport.EventMessage,
-			SessionID: sessionID,
-			Data:      map[string]any{"text": reply + "\n\n（检测到未实际执行，正在重试…）", "done": true},
-		})
-		extraMsgs = []*schema.Message{
-			schema.AssistantMessage(reply, nil),
-			schema.UserMessage("你上一条只是口头确认，却没有调用任何工具。若我的请求属于你的能力（换背景/换角色/换文案/切尺寸/生视频/物料爬取等），请在本轮直接调用对应工具完成，不要只回复文字说你将要做。"),
-		}
-		didRetry = true
-		log.Printf("agent: session=%s fake-ack detected (toolCalls=0), retrying once with correction", sessionID)
+	var serr error
+	reply, toolCalls, serr = o.streamOnce(ctx, ra, sessionID, baseMsgs, toolCB)
+	if serr != nil {
+		o.emitTurnEnd(sessionID, turnEndInfo{replyEmpty: true})
+		return "", fmt.Errorf("agent stream: %w", serr)
 	}
+	cancelled = ctx.Err() != nil
 
-	// Diagnostic: surface whether this turn actually invoked any tool. A request
-	// that should produce an asset but emitted 0 tool calls means the model only
-	// replied with text (e.g. a small model that "confirms" without acting).
-	log.Printf("agent: session=%s turn done toolCalls=%d replyLen=%d retried=%t capsule=%t cancelled=%t", sessionID, toolCalls, len(reply), didRetry, capsuleAsked, cancelled)
+	log.Printf("agent: session=%s turn done toolCalls=%d replyLen=%d capsule=%t cancelled=%t", sessionID, toolCalls, len(reply), capsuleAsked, cancelled)
 
 	if cancelled {
 		// Interrupted mid-turn: persist whatever was produced (keeps context
@@ -464,13 +430,6 @@ func (o *Orchestrator) Handle(ctx context.Context, sessionID, userText string, l
 	}
 
 	// Retries exhausted but the model still only faked execution: don't leave the
-	// user with a misleading "正在处理…". Append an honest notice so they know to
-	// retry or switch to a more capable model.
-	if toolCalls == 0 && looksLikeFakeExecAck(reply) {
-		reply += "\n\n（注意：我没有真正执行这步操作。可能是当前模型不稳定，请重试，或在右上角切换到能力更强的模型。）"
-		log.Printf("agent: session=%s fake-ack persisted after retries; appended honest notice", sessionID)
-	}
-
 	replyEmpty := strings.TrimSpace(reply) == ""
 	w.Append(schema.AssistantMessage(reply, nil))
 	// Only emit a final body message when there is actual text; an empty
@@ -491,6 +450,11 @@ func (o *Orchestrator) Handle(ctx context.Context, sessionID, userText string, l
 		o.persist(sessionID, "assistant", reply)
 	}
 	o.emitTurnEnd(sessionID, turnEndInfo{toolCalls: toolCalls, hasCapsule: capsuleAsked, replyEmpty: replyEmpty})
+	// Proactive follow-up: when tools were called (workspace changed) and no
+	// clarify capsule is pending, suggest what the user could do next (T16).
+	if toolCalls > 0 && !capsuleAsked && !replyEmpty {
+		o.emitFollowUp(sessionID)
+	}
 	return reply, nil
 }
 
@@ -587,6 +551,23 @@ type turnEndInfo struct {
 	cancelled  bool // the turn was interrupted by the user
 }
 
+// emitFollowUp sends a proactive follow-up suggestion after a productive turn.
+func (o *Orchestrator) emitFollowUp(sessionID string) {
+	o.emit(sessionID, transport.Event{
+		Type:      transport.EventFollowUp,
+		SessionID: sessionID,
+		Data: map[string]any{
+			"message": "已完成！接下来想做什么？",
+			"options": []map[string]any{
+				{"label": "生成视频", "value": "帮我把刚才的图生成一段视频"},
+				{"label": "再换个风格", "value": "帮我再生成一版，换个风格"},
+				{"label": "切平台尺寸", "value": "帮我切成各平台的尺寸"},
+				{"label": "下载产物", "value": "下载刚才生成的产物"},
+			},
+		},
+	})
+}
+
 // emitTurnEnd sends a turn_end event carrying turn metadata (tool usage, whether
 // a clarify capsule was produced, whether the reply was empty or the turn was
 // cancelled) and the latest context window state, so the frontend can close its
@@ -649,6 +630,10 @@ func fullStreamToolCallChecker(_ context.Context, sr *schema.StreamReader[*schem
 func toolKind(name string) string {
 	switch name {
 	case "edit_image":
+		return "generate"
+	case "generate_icon", "generate_image_from_text":
+		return "generate"
+	case "search_images":
 		return "generate"
 	case "image_to_video":
 		return "video"
@@ -733,6 +718,10 @@ type ContextState struct {
 	EstimatedTokens int  `json:"estimatedTokens"`
 	Budget          int  `json:"budget"`
 	Compressed      bool `json:"compressed"`
+	// SystemTokens is the base cost of the system prompt alone. The frontend
+	// uses this to display net conversation usage (total − system) so clearing
+	// context shows 0% rather than ~19%.
+	SystemTokens int `json:"systemTokens"`
 }
 
 // State returns the context window snapshot for a session.
@@ -742,5 +731,6 @@ func (o *Orchestrator) State(sessionID string) ContextState {
 		EstimatedTokens: w.EstimateTokens(),
 		Budget:          o.budget,
 		Compressed:      w.Compressed(),
+		SystemTokens:    w.SystemTokens(),
 	}
 }

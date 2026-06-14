@@ -6,6 +6,7 @@ import { MessageBubble } from "./message-bubble";
 import { ReasoningBlock } from "./reasoning-block";
 import { ToolCard } from "./tool-card";
 import { CapsuleBubble } from "./capsule-bubble";
+import { FollowUpBubble } from "./follow-up-bubble";
 import { LoadingBubble } from "./loading-bubble";
 import { Composer } from "./composer";
 import { ContextBar } from "./context-bar";
@@ -55,7 +56,7 @@ function Welcome() {
 }
 
 export function ChatPanel({ onboarding = false }: { onboarding?: boolean }) {
-  const { state, collapseReasoningItem, capsuleSelect } = useApp();
+  const { state, collapseReasoningItem, capsuleSelect, dismissFollowUp } = useApp();
   const logRef = React.useRef<HTMLDivElement>(null);
 
   // Keep pinned to newest content when already near the bottom.
@@ -94,6 +95,17 @@ export function ChatPanel({ onboarding = false }: { onboarding?: boolean }) {
                   options={it.options}
                   answered={it.answered}
                   onSubmit={(value) => capsuleSelect(it.id, value)}
+                />
+              );
+            if (it.kind === "follow_up")
+              return (
+                <FollowUpBubble
+                  key={it.id}
+                  message={it.message}
+                  options={it.options}
+                  dismissed={it.dismissed}
+                  onSubmit={(value) => { dismissFollowUp(it.id); capsuleSelect(it.id, value); }}
+                  onDismiss={() => dismissFollowUp(it.id)}
                 />
               );
             if (it.kind === "loading") return <LoadingBubble key={it.id} />;

@@ -32,6 +32,7 @@ import (
 	"gameasset/internal/store"
 	"gameasset/internal/transport"
 	"gameasset/internal/video"
+	"gameasset/internal/websearch"
 	"gameasset/internal/workspace"
 	"gameasset/web"
 )
@@ -117,6 +118,9 @@ func run() error {
 	// Game-asset crawl service (pluggable source; degrades when unconfigured).
 	crawlSvc := crawl.NewService(crawl.NewHTTPSource(cfg.CrawlEndpoint, cfg.CrawlAPIKey), st, broker, cfg.AssetDir, id.New)
 
+	// Web search service (DDG text + Bing images, no API key required).
+	webSearchSvc := websearch.NewService(websearch.DefaultSource(), st, broker, cfg.AssetDir, id.New)
+
 	// Asset workspace: list assets/tasks, upload source images, partial retry.
 	wsSvc := workspace.NewService(st, cfg.AssetDir, func() string { return id.New("asset") },
 		func(sessionID, taskID string) error {
@@ -155,6 +159,8 @@ func run() error {
 	} else {
 		log.Printf("text-to-image: not configured, capability disabled")
 	}
+	orch.SetWebSearch(webSearchSvc)
+	log.Printf("web-search: DDG text + Bing images enabled (no API key)")
 	hub.SetHandler(func(ctx context.Context, sessionID string, msg transport.Inbound) {
 		switch msg.Type {
 		case "user_message":

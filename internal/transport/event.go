@@ -33,6 +33,10 @@ const (
 	// the loading state and refresh the context indicator.
 	EventTurnEnd EventType = "turn_end"
 
+	// EventFollowUp is emitted after a turn that produced workspace assets, as a
+	// proactive suggestion for the user's next action.
+	EventFollowUp EventType = "follow_up"
+
 	// EventTaskCreated is broadcast over the conversation (WS) channel the moment
 	// a long task is created, so the workspace can show an immediate placeholder
 	// and subscribe to its SSE progress without waiting for the agent turn to end.

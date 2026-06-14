@@ -11,7 +11,9 @@ import { ModelPicker } from "./model-picker";
 export function ContextBar() {
   const { state, clearContext } = useApp();
   const ctx = state.context;
-  const pct = ctx && ctx.budget > 0 ? Math.min(100, Math.round((ctx.estimatedTokens / ctx.budget) * 100)) : 0;
+  const pct = ctx && ctx.budget > 0
+    ? Math.min(100, Math.round(((ctx.estimatedTokens - (ctx.systemTokens ?? 0)) / ctx.budget) * 100))
+    : 0;
   const [pickerOpen, setPickerOpen] = React.useState(false);
 
   return (
