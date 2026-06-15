@@ -58,9 +58,10 @@ type AssetView struct {
 	Height   int    `json:"height"`
 	Provider string `json:"provider,omitempty"`
 	ParentID string `json:"parentId,omitempty"`
-	URL      string `json:"url"`
-	// CreatedAt lets the frontend order the timeline by real creation time and
-	// show relative timestamps. RFC3339; sourced from the stored asset row.
+	// SizeID is set for platform-adaptation products (crop or AI repaint). It
+	// lets the frontend collapse a batch of adapted sizes into one timeline node.
+	SizeID    string `json:"sizeId,omitempty"`
+	URL       string `json:"url"`
 	CreatedAt string `json:"createdAt,omitempty"`
 }
 
@@ -134,12 +135,21 @@ func (s *Service) handleListAssets(w http.ResponseWriter, r *http.Request) {
 	}
 	out := make([]AssetView, 0, len(assets))
 	for _, a := range assets {
-		out = append(out, AssetView{
+		view := AssetView{
 			ID: a.ID, Kind: a.Kind, Mime: a.Mime, Width: a.Width, Height: a.Height,
 			Provider: a.Provider, ParentID: a.ParentID,
 			URL:       fmt.Sprintf("/api/session/%s/assets/%s/raw", sessionID, a.ID),
 			CreatedAt: a.CreatedAt.Format(time.RFC3339),
-		})
+		}
+		if a.Meta != "" {
+			var m struct {
+				SizeID string `json:"sizeId"`
+			}
+			if json.Unmarshal([]byte(a.Meta), &m) == nil {
+				view.SizeID = m.SizeID
+			}
+		}
+		out = append(out, view)
 	}
 	writeJSON(w, map[string]any{"assets": out})
 }

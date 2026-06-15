@@ -11,7 +11,9 @@ export interface Asset {
   width?: number;
   height?: number;
   parentId?: string;
-  // createdAt (RFC3339) drives timeline ordering and relative-time display.
+  // sizeId is set for platform-adaptation products (crop fast path or AI repaint).
+  // The timeline uses it to collapse a batch of adapted sizes into one node.
+  sizeId?: string;
   createdAt?: string;
 }
 

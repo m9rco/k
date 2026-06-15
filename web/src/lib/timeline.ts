@@ -79,15 +79,21 @@ export function buildTimeline(
     // A searched asset belongs to its search batch task (parentId = task id);
     // the whole batch collapses into one 搜图 node regardless of download timing.
     const searchTask = nodeKind === "search" ? taskById.get(a.parentId || "") : undefined;
-    // Aggregate multi-product ops (crop/crawl) by source + kind + same-second.
-    const aggregatable = nodeKind === "crop" || nodeKind === "crawl";
+    // Aggregate multi-product ops (crop/crawl/platform-adaptation) by source +
+    // kind + same-second. Platform-adaptation AI products have kind="generated"
+    // but carry sizeId, so they behave like crop for grouping purposes.
+    const aggregatable = nodeKind === "crop" || nodeKind === "crawl" || (nodeKind === "generate" && !!a.sizeId);
+    const aggKind = aggregatable && nodeKind === "generate" ? "crop" : nodeKind;
     const sourceTask = taskByAsset.get(a.id);
     let groupKey: string;
     if (searchTask) {
       groupKey = `task:${searchTask.id}`;
     } else if (aggregatable) {
-      const sec = Math.floor(ts(a.createdAt) / 1000);
-      groupKey = `agg:${nodeKind}:${a.parentId || "_"}:${sec}`;
+      // Platform-adaptation products (sizeId set) all derive from one source in
+      // one batch — no time bucket needed. Regular crop/crawl use same-second
+      // bucketing so two separate crops of the same image stay distinct.
+      const bucket = a.sizeId ? "" : `:${Math.floor(ts(a.createdAt) / 1000)}`;
+      groupKey = `agg:${aggKind}:${a.parentId || "_"}${bucket}`;
     } else if (sourceTask) {
       groupKey = `task:${sourceTask.id}`;
     } else {
