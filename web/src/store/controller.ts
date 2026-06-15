@@ -59,9 +59,33 @@ export function useAppController() {
   // lastToolNoteRef holds the agent's humanized understanding of the most recent
   // tool call, stamped onto the task when its tool_result (with task_id) lands.
   const lastToolNoteRef = React.useRef<string | undefined>(undefined);
+  // pendingFollowUpRef stashes a follow_up payload that arrived while async tasks
+  // (generate / video / search) were still in flight. The backend emits follow_up
+  // at turn-end, but for async tasks the turn ends the instant the task is
+  // submitted — long before the artifact exists — so a "已完成" bubble would lie.
+  // We hold it and render only once the session has no queued/running tasks left.
+  const pendingFollowUpRef = React.useRef<{ message: string; options: { label: string; value: string }[] } | null>(null);
   const setChat = React.useCallback((fn: (c: ChatItem[]) => ChatItem[]) => {
     setState((s) => ({ ...s, chat: fn(s.chat) }));
   }, []);
+
+  // renderFollowUp appends a follow_up bubble to the chat. Used both for the
+  // immediate case (no async task in flight) and the deferred case (flushed once
+  // the session's tasks all settle — see pendingFollowUpRef / applyTaskEvent).
+  const renderFollowUp = React.useCallback((message: string, options: { label: string; value: string }[]) => {
+    setChat((c) => [...c, { kind: "follow_up", id: uid("fu"), message, options, dismissed: false }]);
+  }, [setChat]);
+
+  // sessionHasPendingTask reports whether any task is still queued/running (i.e.
+  // an artifact is still being produced), optionally ignoring one task id (the one
+  // that just transitioned, whose new terminal status may not be in `tasks` yet).
+  const sessionHasPendingTask = (tasks: Map<string, Task>, ignoreID?: string) => {
+    for (const [id, t] of tasks) {
+      if (id === ignoreID) continue;
+      if (t.status === "queued" || t.status === "running") return true;
+    }
+    return false;
+  };
 
   // ============ workspace data ============
   const refreshWorkspace = React.useCallback(async (sid: string) => {
@@ -130,8 +154,18 @@ export function useAppController() {
         closeStream(taskId);
         toast("有一个生成任务失败了，可在工作区重试", "warn");
       }
+      // Flush a deferred follow_up once this turn's async work has fully settled:
+      // the backend sent it at turn-end (when the task was merely submitted), and
+      // we held it so "已完成" only appears after the artifact actually exists.
+      if ((type === "task_done" || type === "task_failed") && pendingFollowUpRef.current) {
+        if (!sessionHasPendingTask(stateRef.current.tasks, taskId)) {
+          const fu = pendingFollowUpRef.current;
+          pendingFollowUpRef.current = null;
+          renderFollowUp(fu.message, fu.options);
+        }
+      }
     },
-    [closeStream, refreshWorkspace, refreshContext, toast],
+    [closeStream, refreshWorkspace, refreshContext, toast, renderFollowUp],
   );
 
   const subscribeTask = React.useCallback(
@@ -492,6 +526,9 @@ export function useAppController() {
             escalateWait();
           } else {
             producedRef.current = false;
+            // A new turn supersedes any follow_up still waiting on the prior turn's
+            // tasks — drop it so it can't later attach to this turn's work.
+            pendingFollowUpRef.current = null;
             showLoading();
           }
           break;
@@ -529,7 +566,16 @@ export function useAppController() {
             label: (o.label as string) || "",
             value: (o.value as string) || "",
           }));
-          setChat((c) => [...c, { kind: "follow_up", id: uid("fu"), message: msg, options: opts, dismissed: false }]);
+          // Defer until async tasks settle: the backend emits follow_up at turn-end,
+          // but generate/video/search turns end while the task is still running, so
+          // showing "已完成" now would precede the actual artifact. Stash it and let
+          // applyTaskEvent flush it once no task is queued/running. When nothing is
+          // pending (synchronous tools like crop, or already finished), render now.
+          if (sessionHasPendingTask(stateRef.current.tasks)) {
+            pendingFollowUpRef.current = { message: msg, options: opts };
+          } else {
+            renderFollowUp(msg, opts);
+          }
           break;
         }
         case "task_created":
@@ -549,7 +595,7 @@ export function useAppController() {
           break;
       }
     };
-  }, [onAssistantDelta, onReasoning, onToolCall, onToolResult, ensureTaskPlaceholder, finishPendingTools, refreshContext, toast, showLoading, escalateWait, onTurnEnd, onCapsule, clearLoading, onTurnReset]);
+  }, [onAssistantDelta, onReasoning, onToolCall, onToolResult, ensureTaskPlaceholder, finishPendingTools, refreshContext, toast, showLoading, escalateWait, onTurnEnd, onCapsule, clearLoading, onTurnReset, renderFollowUp]);
 
   // ============ actions ============
   // sendMessage routes a user input: when a turn is in flight it joins the
