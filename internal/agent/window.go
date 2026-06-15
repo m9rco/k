@@ -259,6 +259,17 @@ func (w *Window) compressLocked() {
 	for w.totalTokensLocked() > w.budget && len(w.recent) > w.keepRecent {
 		// Take the oldest non-retained messages and fold them into the summary.
 		foldCount := len(w.recent) - w.keepRecent
+		// Never leave recent starting with an orphaned tool-result message: a
+		// role:"tool" with no preceding assistant{tool_calls} is an invalid
+		// sequence that Anthropic/OpenAI reject, causing the provider to fail or
+		// silently drop messages — which reverse-trains the model to stop using
+		// tools. Advance foldCount until recent[0] is not a tool message.
+		for foldCount < len(w.recent) && w.recent[foldCount].Role == schema.Tool {
+			foldCount++
+		}
+		if foldCount >= len(w.recent) {
+			break // cannot split cleanly; skip this compression cycle
+		}
 		older := w.recent[:foldCount]
 
 		// Preserve the most recent edit lineage (source→output) among the folded
