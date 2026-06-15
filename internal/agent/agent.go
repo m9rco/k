@@ -202,10 +202,11 @@ func (o *Orchestrator) selfIntroduce(sessionID string) {
 	}
 	replyEmpty := strings.TrimSpace(reply) == ""
 	if !replyEmpty {
-		// Record the intro as a normal assistant turn so the conversation context
-		// stays coherent for subsequent turns.
-		o.window(sessionID).Append(schema.AssistantMessage(reply, nil))
-		o.persist(sessionID, "assistant", reply)
+		// The self-introduction is a UI courtesy on model switch — it is NOT part
+		// of the task conversation, so it is deliberately NOT appended to the
+		// window or persisted. Recording it would seed the history with
+		// task-irrelevant chit-chat that dilutes the "call a tool" signal and, after
+		// a restart, reverse-trains the model to reply in prose (see restoreLocked).
 		o.emit(sessionID, transport.Event{
 			Type:      transport.EventMessage,
 			SessionID: sessionID,
@@ -275,6 +276,21 @@ func (o *Orchestrator) restoreLocked(sessionID string, w *Window) {
 		case "user":
 			w.Append(schema.UserMessage(m.Content))
 		case "assistant":
+			// A turn that called tools persisted its calls in ToolRefs; rebuild the
+			// assistant{tool_calls}→tool structure so the restored window is a valid
+			// tool exchange and the model keeps seeing that past turns used tools
+			// (otherwise history collapses to bare text acks and reverse-trains the
+			// model to stop calling tools — the root cause this restores from).
+			if m.ToolRefs != "" {
+				var calls []turnToolCall
+				if err := json.Unmarshal([]byte(m.ToolRefs), &calls); err == nil && len(calls) > 0 {
+					for _, rm := range turnAssistantMessages(m.Content, calls) {
+						w.Append(rm)
+					}
+					continue
+				}
+				// Malformed refs: fall through to plain text rather than drop the turn.
+			}
 			w.Append(schema.AssistantMessage(m.Content, nil))
 		}
 	}
@@ -423,7 +439,7 @@ func (o *Orchestrator) Handle(ctx context.Context, sessionID, userText string, l
 	baseMsgs := w.Messages()
 	var (
 		reply     string
-		toolCalls int
+		turnCalls []turnToolCall
 		cancelled bool
 	)
 	var serr error
@@ -435,7 +451,7 @@ func (o *Orchestrator) Handle(ctx context.Context, sessionID, userText string, l
 	const maxAttempts = 2
 	attemptMsgs := baseMsgs
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
-		reply, toolCalls, serr = o.streamOnce(ctx, ra, sessionID, attemptMsgs, toolCB)
+		reply, turnCalls, serr = o.streamOnce(ctx, ra, sessionID, attemptMsgs, toolCB)
 		if serr != nil {
 			o.emitTurnEnd(sessionID, turnEndInfo{replyEmpty: true})
 			return "", fmt.Errorf("agent stream: %w", serr)
@@ -443,7 +459,7 @@ func (o *Orchestrator) Handle(ctx context.Context, sessionID, userText string, l
 		if ctx.Err() != nil {
 			break // cancelled: stop retrying
 		}
-		if !shouldRetryFakeAck(attempt, maxAttempts, toolCalls, reply) {
+		if !shouldRetryFakeAck(attempt, maxAttempts, len(turnCalls), reply) {
 			break
 		}
 		// Append the faked ack + a stern correction so the next attempt actually
@@ -456,18 +472,20 @@ func (o *Orchestrator) Handle(ctx context.Context, sessionID, userText string, l
 	}
 	cancelled = ctx.Err() != nil
 
-	log.Printf("agent: session=%s turn done toolCalls=%d replyLen=%d capsule=%t cancelled=%t", sessionID, toolCalls, len(reply), capsuleAsked, cancelled)
+	log.Printf("agent: session=%s turn done toolCalls=%d replyLen=%d capsule=%t cancelled=%t", sessionID, len(turnCalls), len(reply), capsuleAsked, cancelled)
 
 	if cancelled {
-		// Interrupted mid-turn: persist whatever was produced (keeps context
+		// Interrupted mid-turn: persist whatever text was produced (keeps context
 		// coherent for the next turn) but tell the frontend the turn was
-		// cancelled so it can close the loading state without a stray bubble.
+		// cancelled so it can close the loading state without a stray bubble. A
+		// cancelled turn's tool calls may not have executed, so we deliberately do
+		// NOT fabricate a tool-call structure here — just the prose, best-effort.
 		w.Append(schema.AssistantMessage(reply, nil))
 		o.persist(sessionID, "user", userText)
 		if strings.TrimSpace(reply) != "" {
 			o.persist(sessionID, "assistant", reply)
 		}
-		o.emitTurnEnd(sessionID, turnEndInfo{toolCalls: toolCalls, hasCapsule: capsuleAsked, replyEmpty: strings.TrimSpace(reply) == "", cancelled: true})
+		o.emitTurnEnd(sessionID, turnEndInfo{toolCalls: len(turnCalls), hasCapsule: capsuleAsked, replyEmpty: strings.TrimSpace(reply) == "", cancelled: true})
 		return reply, nil
 	}
 
@@ -475,7 +493,7 @@ func (o *Orchestrator) Handle(ctx context.Context, sessionID, userText string, l
 	// Remediation fallback: the model still made zero tool calls after retries.
 	// Use the deterministic pre-classification to recover instead of leaving the
 	// turn empty or wrong (see remediationAction).
-	switch remediationAction(toolCalls, cancelled, capsuleAsked, replyEmpty, hint) {
+	switch remediationAction(len(turnCalls), cancelled, capsuleAsked, replyEmpty, hint) {
 	case remediateClarify:
 		q, opts := remediationClarify(hint)
 		clarify(q, opts)
@@ -483,7 +501,14 @@ func (o *Orchestrator) Handle(ctx context.Context, sessionID, userText string, l
 		reply = RefusalMessage()
 		replyEmpty = false
 	}
-	w.Append(schema.AssistantMessage(reply, nil))
+	// Record this turn into the window with its REAL structure: when the model
+	// called tools, append the assistant{tool_calls} message + one tool result per
+	// call (not a bare text ack). This keeps the live window — and, via tool_refs,
+	// the restored window — a valid tool exchange so the model keeps seeing that
+	// past turns called tools (the reverse-few-shot bug, see restoreLocked).
+	for _, m := range turnAssistantMessages(reply, turnCalls) {
+		w.Append(m)
+	}
 	// Only emit a final body message when there is actual text; an empty
 	// done-message would otherwise render as a blank assistant bubble (the
 	// frontend also guards via turn_end.replyEmpty, but suppressing here keeps
@@ -496,15 +521,14 @@ func (o *Orchestrator) Handle(ctx context.Context, sessionID, userText string, l
 		})
 	}
 	// Persist this turn so the conversation survives a server restart / reconnect.
-	// Only text is stored (large tool payloads stay out of the DB, mirroring D3).
+	// Only text + a compact tool-call note are stored (large tool payloads stay out
+	// of the DB, mirroring D3); the note lets restore rebuild the tool structure.
 	o.persist(sessionID, "user", userText)
-	if !replyEmpty {
-		o.persist(sessionID, "assistant", reply)
-	}
-	o.emitTurnEnd(sessionID, turnEndInfo{toolCalls: toolCalls, hasCapsule: capsuleAsked, replyEmpty: replyEmpty})
+	o.persistAssistant(sessionID, reply, turnCalls)
+	o.emitTurnEnd(sessionID, turnEndInfo{toolCalls: len(turnCalls), hasCapsule: capsuleAsked, replyEmpty: replyEmpty})
 	// Proactive follow-up: when tools were called (workspace changed) and no
 	// clarify capsule is pending, suggest what the user could do next (T16).
-	if toolCalls > 0 && !capsuleAsked && !replyEmpty {
+	if len(turnCalls) > 0 && !capsuleAsked && !replyEmpty {
 		o.emitFollowUp(sessionID)
 	}
 	return reply, nil
@@ -515,15 +539,15 @@ func (o *Orchestrator) Handle(ctx context.Context, sessionID, userText string, l
 // (this drives the typewriter UI). It returns the accumulated reply text and the
 // number of tool calls the model requested. The caller decides whether the turn
 // is final and emits the terminal done:true frame; streamOnce never emits one.
-func (o *Orchestrator) streamOnce(ctx context.Context, ra *react.Agent, sessionID string, msgs []*schema.Message, toolCB callbacks.Handler) (string, int, error) {
+func (o *Orchestrator) streamOnce(ctx context.Context, ra *react.Agent, sessionID string, msgs []*schema.Message, toolCB callbacks.Handler) (string, []turnToolCall, error) {
 	stream, err := ra.Stream(ctx, msgs, agentOption(toolCB))
 	if err != nil {
-		return "", 0, err
+		return "", nil, err
 	}
 	defer stream.Close()
 
 	var sb strings.Builder
-	toolCalls := 0
+	var calls []turnToolCall
 	chunks := 0
 	for {
 		chunk, err := stream.Recv()
@@ -550,7 +574,14 @@ func (o *Orchestrator) streamOnce(ctx context.Context, ra *react.Agent, sessionI
 			if tc.Function.Name == "" {
 				continue
 			}
-			toolCalls++
+			// Capture each tool call so the turn can be recorded into the window /
+			// store with its real assistant{tool_calls}→tool structure (rather than
+			// collapsing to a bare text ack, which reverse-trains the model).
+			calls = append(calls, turnToolCall{
+				ID:   tc.ID,
+				Name: tc.Function.Name,
+				Args: tc.Function.Arguments,
+			})
 			o.emit(sessionID, transport.Event{
 				Type:      transport.EventToolCall,
 				SessionID: sessionID,
@@ -570,8 +601,8 @@ func (o *Orchestrator) streamOnce(ctx context.Context, ra *react.Agent, sessionI
 			})
 		}
 	}
-	log.Printf("agent: session=%s stream attempt done toolCalls=%d replyLen=%d chunks=%d", sessionID, toolCalls, sb.Len(), chunks)
-	return sb.String(), toolCalls, nil
+	log.Printf("agent: session=%s stream attempt done toolCalls=%d replyLen=%d chunks=%d", sessionID, len(calls), sb.Len(), chunks)
+	return sb.String(), calls, nil
 }
 
 // persist writes one conversation message to the store (best-effort: a failure
@@ -592,6 +623,81 @@ func (o *Orchestrator) persist(sessionID, role, content string) {
 		CreatedAt: time.Now().UTC(),
 	}); err != nil {
 		log.Printf("agent: persist message session=%s role=%s failed: %v", sessionID, role, err)
+	}
+}
+
+// turnToolCall is one tool invocation observed during a turn, captured so the
+// turn can be recorded with its real assistant{tool_calls}→tool structure.
+type turnToolCall struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+	Args string `json:"args"`
+}
+
+// turnAssistantMessages builds the canonical window representation of a completed
+// assistant turn. When the model called tools, it produces an assistant message
+// carrying the tool_calls followed by one synthetic tool result per call (the
+// raw result lives as an asset addressed by id — D3 — so a compact note suffices),
+// then, if there was also prose, a trailing assistant text message. When no tool
+// was called it is just the assistant text. This is the structure the provider
+// requires (a role:"tool" message must follow an assistant with matching
+// tool_calls) and the structure that keeps the model seeing that past turns used
+// tools, instead of the bare-ack collapse that reverse-trained it to stop.
+func turnAssistantMessages(reply string, calls []turnToolCall) []*schema.Message {
+	if len(calls) == 0 {
+		return []*schema.Message{schema.AssistantMessage(reply, nil)}
+	}
+	tcs := make([]schema.ToolCall, 0, len(calls))
+	for _, c := range calls {
+		tcs = append(tcs, schema.ToolCall{
+			ID:       c.ID,
+			Function: schema.FunctionCall{Name: c.Name, Arguments: c.Args},
+		})
+	}
+	out := []*schema.Message{schema.AssistantMessage("", tcs)}
+	for _, c := range calls {
+		tm := schema.ToolMessage("["+c.Name+" 已执行]", c.ID)
+		tm.ToolName = c.Name
+		out = append(out, tm)
+	}
+	if strings.TrimSpace(reply) != "" {
+		out = append(out, schema.AssistantMessage(reply, nil))
+	}
+	return out
+}
+
+// persistAssistant stores a completed assistant turn. When the turn called tools,
+// the tool-call list is recorded (compactly, as JSON) in the message's ToolRefs
+// column so restoreLocked can rebuild the assistant{tool_calls}→tool structure on
+// restart; the visible prose (if any) goes in Content. A pure-text turn persists
+// as before. Nothing is stored when there is neither prose nor a tool call.
+func (o *Orchestrator) persistAssistant(sessionID, reply string, calls []turnToolCall) {
+	if o.store == nil {
+		return
+	}
+	if len(calls) == 0 {
+		o.persist(sessionID, "assistant", reply)
+		return
+	}
+	refs, err := json.Marshal(calls)
+	if err != nil {
+		log.Printf("agent: marshal tool refs session=%s failed: %v", sessionID, err)
+		o.persist(sessionID, "assistant", reply) // degrade to text-only rather than lose the turn
+		return
+	}
+	id := "msg"
+	if o.newID != nil {
+		id = o.newID("msg")
+	}
+	if err := o.store.InsertMessage(store.MessageRecord{
+		ID:        id,
+		SessionID: sessionID,
+		Role:      "assistant",
+		Content:   reply,
+		ToolRefs:  string(refs),
+		CreatedAt: time.Now().UTC(),
+	}); err != nil {
+		log.Printf("agent: persist assistant turn session=%s failed: %v", sessionID, err)
 	}
 }
 

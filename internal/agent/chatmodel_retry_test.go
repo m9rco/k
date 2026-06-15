@@ -242,3 +242,63 @@ func TestDegradeNotifierSafeToCallRepeatedly(t *testing.T) {
 	fn()
 	fn()
 }
+
+// TestStreamOpenFailsFastTo OneShotOn503 asserts the design D1 fast-failover:
+// when the streaming endpoint returns 503, Stream must NOT burn the full retry
+// budget on it. It retries the stream open only streamOpenRetries times, then
+// degrades to a one-shot Generate (which here succeeds), keeping the user's
+// wait short on a proxy whose streaming endpoint is flaky.
+func TestStreamOpenFailsFastToOneShotOn503(t *testing.T) {
+	var streamOpens, oneShots int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// The streaming request carries Accept: text/event-stream; the one-shot
+		// fallback (Generate) does not — use that to tell the two paths apart.
+		if strings.Contains(r.Header.Get("Accept"), "event-stream") {
+			atomic.AddInt32(&streamOpens, 1)
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_, _ = w.Write([]byte(`{"error":{"message":"upstream busy"}}`))
+			return
+		}
+		atomic.AddInt32(&oneShots, 1)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"fell back ok"}}]}`))
+	}))
+	defer srv.Close()
+
+	var fired int32
+	ctx := withDegradeNotifier(context.Background(), func() { atomic.AddInt32(&fired, 1) })
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+
+	m := fastRetryModel(srv.URL)
+	sr, err := m.Stream(ctx, []*schema.Message{schema.UserMessage("hi")})
+	if err != nil {
+		t.Fatalf("Stream: %v", err)
+	}
+	defer sr.Close()
+	var got strings.Builder
+	for {
+		msg, err := sr.Recv()
+		if err != nil {
+			break
+		}
+		if msg != nil {
+			got.WriteString(msg.Content)
+		}
+	}
+	if got.String() != "fell back ok" {
+		t.Errorf("degraded content = %q, want %q", got.String(), "fell back ok")
+	}
+	// Stream open is tried at most streamOpenRetries+1 times — NOT maxRetries+1.
+	if so := atomic.LoadInt32(&streamOpens); so != int32(streamOpenRetries+1) {
+		t.Errorf("stream opens = %d, want %d (fast failover, not full %d-retry budget)", so, streamOpenRetries+1, maxRetries)
+	}
+	// The fallback one-shot must have been used exactly once.
+	if os := atomic.LoadInt32(&oneShots); os != 1 {
+		t.Errorf("one-shot fallback calls = %d, want 1", os)
+	}
+	// And the degrade notifier must fire so the frontend switches to static wait.
+	if atomic.LoadInt32(&fired) != 1 {
+		t.Errorf("degrade notifier fired %d times, want 1", atomic.LoadInt32(&fired))
+	}
+}

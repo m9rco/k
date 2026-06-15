@@ -2,6 +2,8 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -266,5 +268,176 @@ func TestWindowEmptyWhenNoHistory(t *testing.T) {
 	msgs := w.Messages()
 	if len(msgs) != 1 || msgs[0].Role != schema.System {
 		t.Fatalf("fresh session should be system-only, got %d messages", len(msgs))
+	}
+}
+
+// --- tool-call history persistence / rebuild (reverse-few-shot fix) -------
+
+// TestOpenAIBodySerializesAssistantToolCalls guards the core wire-level bug: a
+// historical assistant message carrying tool_calls must serialize them, otherwise
+// the following role:"tool" message is orphaned and the provider rejects the
+// whole request (400) — and the model also stops seeing that past turns called
+// tools.
+func TestOpenAIBodySerializesAssistantToolCalls(t *testing.T) {
+	m := &chatModel{cfg: config.ModelConfig{Provider: "openai", Model: "x"}}
+	asst := schema.AssistantMessage("", []schema.ToolCall{{
+		ID:       "call_1",
+		Function: schema.FunctionCall{Name: "edit_image", Arguments: `{"source_asset_id":"a1"}`},
+	}})
+	toolMsg := schema.ToolMessage("[edit_image 已执行]", "call_1")
+	body := m.openAIBody([]*schema.Message{
+		schema.UserMessage("把背景改蓝"),
+		asst,
+		toolMsg,
+	})
+	// Round-trip through JSON to assert the exact shape the provider receives
+	// (openAIBody builds an unexported anonymous struct we can't name here).
+	raw, err := json.Marshal(body)
+	if err != nil {
+		t.Fatalf("marshal body: %v", err)
+	}
+	var decoded struct {
+		Messages []struct {
+			Role      string `json:"role"`
+			ToolCalls []struct {
+				ID       string `json:"id"`
+				Type     string `json:"type"`
+				Function struct {
+					Name      string `json:"name"`
+					Arguments string `json:"arguments"`
+				} `json:"function"`
+			} `json:"tool_calls"`
+			ToolCallID string `json:"tool_call_id"`
+		} `json:"messages"`
+	}
+	if err := json.Unmarshal(raw, &decoded); err != nil {
+		t.Fatalf("unmarshal body: %v", err)
+	}
+	// Find the assistant message and assert it carries the tool call.
+	var asstOK, toolOK bool
+	for _, mm := range decoded.Messages {
+		if mm.Role == "assistant" && len(mm.ToolCalls) == 1 {
+			tc := mm.ToolCalls[0]
+			if tc.ID == "call_1" && tc.Type == "function" && tc.Function.Name == "edit_image" && strings.Contains(tc.Function.Arguments, "a1") {
+				asstOK = true
+			}
+		}
+		if mm.Role == "tool" && mm.ToolCallID == "call_1" {
+			toolOK = true
+		}
+	}
+	if !asstOK {
+		t.Error("assistant message must serialize its tool_calls (id/type/function)")
+	}
+	if !toolOK {
+		t.Error("tool message must keep its tool_call_id so it pairs with the assistant call")
+	}
+}
+
+// TestTurnAssistantMessagesStructure asserts the canonical window shape for a
+// tool-calling turn: assistant{tool_calls} → tool result(s) → optional prose.
+func TestTurnAssistantMessagesStructure(t *testing.T) {
+	// No tools: just the assistant text.
+	plain := turnAssistantMessages("你好", nil)
+	if len(plain) != 1 || plain[0].Role != schema.Assistant || plain[0].Content != "你好" {
+		t.Fatalf("plain turn = %d msgs, want 1 assistant text", len(plain))
+	}
+
+	// With tools: assistant(tool_calls) + tool result + trailing prose.
+	calls := []turnToolCall{{ID: "c1", Name: "edit_image", Args: `{"x":1}`}}
+	got := turnAssistantMessages("已开始处理", calls)
+	if len(got) != 3 {
+		t.Fatalf("tool turn = %d msgs, want 3 (assistant+tool+prose)", len(got))
+	}
+	if got[0].Role != schema.Assistant || len(got[0].ToolCalls) != 1 || got[0].ToolCalls[0].ID != "c1" {
+		t.Errorf("msg[0] must be assistant carrying the tool call")
+	}
+	if got[1].Role != schema.Tool || got[1].ToolCallID != "c1" {
+		t.Errorf("msg[1] must be a tool result paired to c1, got role=%q id=%q", got[1].Role, got[1].ToolCallID)
+	}
+	if got[2].Role != schema.Assistant || got[2].Content != "已开始处理" {
+		t.Errorf("msg[2] must be the trailing prose")
+	}
+
+	// Tool call with NO prose: no trailing empty assistant text.
+	noProse := turnAssistantMessages("", calls)
+	if len(noProse) != 2 {
+		t.Errorf("tool turn without prose = %d msgs, want 2 (assistant+tool)", len(noProse))
+	}
+}
+
+// TestWindowRestoresToolCallStructure is the regression test for the reported
+// bug: a restarted session whose history had tool-calling turns must rebuild
+// them as real tool exchanges (not bare text acks), so the model keeps calling
+// tools instead of mimicking a prose-only history.
+func TestWindowRestoresToolCallStructure(t *testing.T) {
+	dir := t.TempDir()
+	st, err := store.Open(filepath.Join(dir, "h.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	now := time.Now().UTC()
+	_ = st.UpsertSession(store.SessionRecord{ID: "s", Fingerprint: "fp", CreatedAt: now, LastSeenAt: now})
+	_ = st.InsertMessage(store.MessageRecord{ID: "m1", SessionID: "s", Role: "user", Content: "把图1背景改蓝", CreatedAt: now})
+	refs := `[{"id":"call_x","name":"edit_image","args":"{\"source_asset_id\":\"a1\"}"}]`
+	_ = st.InsertMessage(store.MessageRecord{ID: "m2", SessionID: "s", Role: "assistant", Content: "已开始处理", ToolRefs: refs, CreatedAt: now.Add(time.Second)})
+
+	o := newRestoreOrch(t, st)
+	w := o.window("s")
+	msgs := w.Messages()
+
+	var asstWithCall, pairedTool bool
+	for _, m := range msgs {
+		if m.Role == schema.Assistant && len(m.ToolCalls) == 1 && m.ToolCalls[0].Function.Name == "edit_image" {
+			asstWithCall = true
+		}
+		if m.Role == schema.Tool && m.ToolCallID == "call_x" {
+			pairedTool = true
+		}
+	}
+	if !asstWithCall {
+		t.Error("restored history must rebuild the assistant message carrying tool_calls")
+	}
+	if !pairedTool {
+		t.Error("restored history must rebuild a tool result paired to the call")
+	}
+}
+
+// TestPersistAssistantWritesToolRefs asserts a tool-calling turn round-trips its
+// tool list into the ToolRefs column (no schema change needed).
+func TestPersistAssistantWritesToolRefs(t *testing.T) {
+	dir := t.TempDir()
+	st, err := store.Open(filepath.Join(dir, "h.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	o := newRestoreOrch(t, st)
+	// Unique ids per insert: persistAssistant + the pure-text persist below would
+	// otherwise collide on the fixed "msg1" primary key.
+	var n int
+	o.newID = func(p string) string { n++; return fmt.Sprintf("%s%d", p, n) }
+
+	now := time.Now().UTC()
+	_ = st.UpsertSession(store.SessionRecord{ID: "s", Fingerprint: "fp", CreatedAt: now, LastSeenAt: now})
+	_ = st.UpsertSession(store.SessionRecord{ID: "s2", Fingerprint: "fp", CreatedAt: now, LastSeenAt: now})
+
+	o.persistAssistant("s", "已开始处理", []turnToolCall{{ID: "c1", Name: "edit_image", Args: "{}"}})
+	got, err := st.ListMessages("s")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("want 1 persisted message, got %d", len(got))
+	}
+	if got[0].ToolRefs == "" || !strings.Contains(got[0].ToolRefs, "edit_image") {
+		t.Errorf("tool-calling turn must persist tool refs, got %q", got[0].ToolRefs)
+	}
+	// A pure-text turn must NOT write tool refs.
+	o.persistAssistant("s2", "你好", nil)
+	got2, _ := st.ListMessages("s2")
+	if len(got2) != 1 || got2[0].ToolRefs != "" {
+		t.Errorf("pure-text turn must not write tool refs, got %q", got2[0].ToolRefs)
 	}
 }

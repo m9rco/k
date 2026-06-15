@@ -61,7 +61,7 @@ var modelCatalog = []CatalogEntry{
 	{ID: "doubao-seed-2-0-mini-260428", DisplayName: "Doubao Seed 2.0 mini", Scene: SceneChat, Vendor: "Doubao", IconKey: "doubao", Provider: "openai"},
 	{ID: "claude-haiku-4-5-20251001", DisplayName: "Claude Haiku 4.5", Scene: SceneChat, Vendor: "Anthropic", IconKey: "anthropic", Provider: "anthropic"},
 	{ID: "claude-sonnet-4-6", DisplayName: "Claude Sonnet 4.6", Scene: SceneChat, Vendor: "Anthropic", IconKey: "anthropic", Provider: "anthropic"},
-	{ID: "deepseek-v4-flash-tencent", DisplayName: "DeepSeek V4 Flash（太极版）", Scene: SceneChat, Vendor: "DeepSeek", IconKey: "deepseek", Provider: "openai", Model: "DeepSeek-V4-Flash-Online-32k"},
+	{ID: "deepseek-v4-flash-tencent", DisplayName: "DeepSeek WOA（太极）", Scene: SceneChat, Vendor: "DeepSeek", IconKey: "deepseek", Provider: "openai", Model: "DeepSeek-V4-Flash-Online-32k"},
 
 	// 图生图 (image)
 	{ID: "gpt-image-2", DisplayName: "GPT Image 2", Scene: SceneImage, Vendor: "OpenAI", IconKey: "openai", Provider: "openai"},

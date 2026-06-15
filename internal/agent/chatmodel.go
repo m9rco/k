@@ -140,9 +140,11 @@ func (m *chatModel) openStream(ctx context.Context, input []*schema.Message) (*h
 	for k, v := range headers {
 		hdr[k] = v
 	}
-	// Share the retry path so a transient 429/5xx on stream open backs off and
-	// retries rather than immediately degrading to the (rhythm-less) fallback.
-	resp, err := m.sendWithRetry(ctx, url, buf, hdr)
+	// Stream open shares the retry path but with a SMALL budget: a transient
+	// 429/5xx here fails over fast to the one-shot fallback (which keeps the full
+	// retry budget and, on flaky proxies, often hits a healthier non-streaming
+	// endpoint) instead of stalling the user ~15s on the streaming endpoint.
+	resp, err := m.sendWithRetry(ctx, url, buf, hdr, streamOpenRetries)
 	if err != nil {
 		return nil, err
 	}
@@ -276,6 +278,27 @@ func (m *chatModel) openAIBody(input []*schema.Message) map[string]any {
 		om := oaMsg{Role: string(in.Role), Content: in.Content}
 		if in.Role == schema.Tool {
 			om.ToolCallID = in.ToolCallID
+		}
+		// Serialize assistant tool calls so multi-turn history stays a valid
+		// OpenAI conversation: a role:"tool" message MUST be preceded by the
+		// assistant message carrying the matching tool_calls, or the provider
+		// rejects the request (400 "messages with role 'tool' must be a response
+		// to a preceding message with 'tool_calls'"). Dropping them also erased
+		// every past tool use from the model's view of the history, which trained
+		// it to stop calling tools (reverse few-shot).
+		if len(in.ToolCalls) > 0 {
+			tcs := make([]map[string]any, 0, len(in.ToolCalls))
+			for _, tc := range in.ToolCalls {
+				tcs = append(tcs, map[string]any{
+					"id":   tc.ID,
+					"type": "function",
+					"function": map[string]any{
+						"name":      tc.Function.Name,
+						"arguments": tc.Function.Arguments,
+					},
+				})
+			}
+			om.ToolCalls = tcs
 		}
 		msgs = append(msgs, om)
 	}
@@ -501,7 +524,7 @@ func (m *chatModel) postJSONWithHeaders(ctx context.Context, url string, body an
 	for k, v := range headers {
 		hdr[k] = v
 	}
-	resp, err := m.sendWithRetry(ctx, url, buf, hdr)
+	resp, err := m.sendWithRetry(ctx, url, buf, hdr, maxRetries)
 	if err != nil {
 		return nil, err
 	}
@@ -513,18 +536,28 @@ func (m *chatModel) postJSONWithHeaders(ctx context.Context, url string, body an
 	return data, nil
 }
 
-// maxRetries bounds transient-failure retries (429 / 5xx) per request.
+// maxRetries bounds transient-failure retries (429 / 5xx) for the non-streaming
+// one-shot path, which is the last line of defense and must try hard to succeed.
 const maxRetries = 4
 
+// streamOpenRetries bounds retries when OPENING a stream. It is deliberately
+// small: a stream open that returns 429/5xx degrades to the one-shot Generate
+// fallback (which keeps the full maxRetries budget), so burning the full budget
+// on the stream endpoint just makes the user wait ~15s before that fallback even
+// starts. Some proxies are flaky on their streaming endpoint specifically while
+// the non-streaming endpoint stays healthy, so failing over fast is the win.
+const streamOpenRetries = 1
+
 // sendWithRetry POSTs body to url, retrying on rate-limit (429) and transient
-// server errors (5xx) with exponential backoff. It honors a Retry-After header
-// when present and aborts promptly on context cancellation. A fresh request is
-// built each attempt because the body reader is consumed on send. The returned
-// response (which the caller must close) is the first 2xx, or the last attempt
-// when retries are exhausted or the status is non-retryable.
-func (m *chatModel) sendWithRetry(ctx context.Context, url string, body []byte, headers map[string]string) (*http.Response, error) {
+// server errors (5xx) with exponential backoff, up to maxAttempts retries (so
+// maxAttempts+1 total tries). It honors a Retry-After header when present and
+// aborts promptly on context cancellation. A fresh request is built each attempt
+// because the body reader is consumed on send. The returned response (which the
+// caller must close) is the first 2xx, or the last attempt when retries are
+// exhausted or the status is non-retryable.
+func (m *chatModel) sendWithRetry(ctx context.Context, url string, body []byte, headers map[string]string, maxAttempts int) (*http.Response, error) {
 	var lastErr error
-	for attempt := 0; attempt <= maxRetries; attempt++ {
+	for attempt := 0; attempt <= maxAttempts; attempt++ {
 		if attempt > 0 {
 			delay := m.backoffDelay(attempt)
 			select {
@@ -550,7 +583,7 @@ func (m *chatModel) sendWithRetry(ctx context.Context, url string, body []byte, 
 		}
 		// Retryable: drain+close this body and try again (after honoring Retry-After).
 		honorRetryAfter(ctx, resp)
-		lastErr = fmt.Errorf("chat provider %s returned %d (attempt %d/%d)", m.cfg.Provider, resp.StatusCode, attempt+1, maxRetries+1)
+		lastErr = fmt.Errorf("chat provider %s returned %d (attempt %d/%d)", m.cfg.Provider, resp.StatusCode, attempt+1, maxAttempts+1)
 		resp.Body.Close()
 	}
 	return nil, lastErr
