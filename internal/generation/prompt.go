@@ -13,6 +13,12 @@ const (
 	EditCharacter  EditKind = "change_character"
 	EditBackground EditKind = "change_background"
 	EditText       EditKind = "change_text"
+	// EditCharacterAdd ADDS a new character to the scene while keeping the
+	// existing subject(s), as opposed to EditCharacter which REPLACES the main
+	// character. Distinguishing the two prevents "增加一个角色" from being executed
+	// as a replacement (the prompt template makes the add-vs-replace intent
+	// explicit to the image model).
+	EditCharacterAdd EditKind = "add_character"
 	// EditIcon generates an icon related to the source image (re-creation via the
 	// image model, not a pure crop). Output is converged to the target icon size
 	// after generation (see service.run).
@@ -102,6 +108,14 @@ func BuildPrompt(slots Slots, palette []PaletteColor) (string, error) {
 		b.WriteString("Replace the main character in the image with: ")
 		b.WriteString(desc)
 		b.WriteString(". Preserve the existing scene and composition.")
+	case EditCharacterAdd:
+		desc := Sanitize(slots.CharacterDesc)
+		if desc == "" {
+			return "", fmt.Errorf("character description required")
+		}
+		b.WriteString("Add a new character to the image while keeping the existing character(s) and subject unchanged: ")
+		b.WriteString(desc)
+		b.WriteString(". Place the new character naturally beside the existing one(s), preserving the original scene, composition and the existing subject; do NOT replace or remove anyone already in the image.")
 	case EditBackground:
 		desc := Sanitize(slots.BackgroundDesc)
 		if desc == "" {

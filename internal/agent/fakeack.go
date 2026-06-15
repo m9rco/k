@@ -125,6 +125,11 @@ func remediationAction(toolCalls int, cancelled, capsuleAsked, replyEmpty bool, 
 	if toolCalls > 0 || cancelled || capsuleAsked {
 		return remediateNone
 	}
+	// Note: when a "[上次产物: 图N]" annotation was injected upstream,
+	// hasWorkspaceImage treats it as an available image, so ClassifyIntent leaves
+	// MissingKeyParam=false and the clarify branches below never fire. That is
+	// intentional (sticky-last-output / clarify-recent-context): with a known
+	// last output we default to editing it rather than asking which image.
 	switch {
 	case looksLikeFakeExecAck(reply) && hint.Whitelisted && hint.MissingKeyParam:
 		return remediateClarify

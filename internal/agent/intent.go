@@ -44,6 +44,8 @@ var intentRules = []intentRule{
 		strong: []string{"换背景", "改背景", "替换背景", "换个背景", "换一下背景", "背景换", "背景改成", "背景替换", "改成…背景"}},
 	{label: "换角色", tool: "edit_image", imageOp: true,
 		strong: []string{"换角色", "换人物", "替换角色", "换主角", "换主体", "角色换", "人物换", "换成…角色"}},
+	{label: "增加角色", tool: "edit_image", imageOp: true,
+		strong: []string{"增加角色", "添加角色", "加个角色", "加一个角色", "多加一个", "增加一位", "增加一个人", "加个人物", "再加一个", "旁边加", "新增角色"}},
 	{label: "换文案", tool: "edit_image", imageOp: true,
 		strong: []string{"换文案", "改文案", "换文字", "改文字", "替换文案", "文案换", "改字", "换标题", "改标题"}},
 	{label: "切尺寸", tool: "crop_to_sizes", imageOp: true,
@@ -154,9 +156,15 @@ func matchAny(s string, keywords []string) bool {
 
 // hasWorkspaceImage reports whether the message prefix indicates at least one
 // image is available to operate on: a workspace numbering entry ("图1="), a
-// reference-assets list, or a single asset id.
+// reference-assets list, a single asset id, or a last-produced annotation
+// ("[上次产物: 图N]"). The last-produced case means a recent output exists that
+// the model should default to, so MissingKeyParam must NOT fire (sticky-last-
+// output: don't ask "which image" when we already know the latest one).
 func hasWorkspaceImage(userText string) bool {
 	if strings.Contains(userText, "[reference assets:") || strings.Contains(userText, "[asset ") {
+		return true
+	}
+	if strings.Contains(userText, "[上次产物:") {
 		return true
 	}
 	// "[工作区: 图1=..., 视频1=...]" — an image is present iff a 图N entry exists.

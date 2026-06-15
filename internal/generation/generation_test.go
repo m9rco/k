@@ -115,6 +115,45 @@ func TestBuildPromptRequiresSlotContent(t *testing.T) {
 	}
 }
 
+// TestBuildPromptAddVsReplaceCharacter verifies add_character produces an ADD
+// instruction that preserves existing subjects, distinct from change_character's
+// REPLACE instruction (Bug 2b: "增加角色" must not become "替换角色").
+func TestBuildPromptAddVsReplaceCharacter(t *testing.T) {
+	desc := "一位废土风格男性，破旧夹克"
+
+	replace, err := BuildPrompt(Slots{Kind: EditCharacter, CharacterDesc: desc}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(replace, "Replace the main character") {
+		t.Errorf("change_character should REPLACE, got %q", replace)
+	}
+
+	add, err := BuildPrompt(Slots{Kind: EditCharacterAdd, CharacterDesc: desc}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(add, "Add a new character") {
+		t.Errorf("add_character should ADD, got %q", add)
+	}
+	// The add template must explicitly forbid replacing/removing existing subjects.
+	if !strings.Contains(add, "do NOT replace") {
+		t.Errorf("add_character must protect existing subjects, got %q", add)
+	}
+	if strings.Contains(add, "Replace the main character") {
+		t.Errorf("add_character must not carry the replace instruction: %q", add)
+	}
+	// Both carry the sanitized description.
+	if !strings.Contains(add, desc) || !strings.Contains(replace, desc) {
+		t.Error("character description should appear in both prompts")
+	}
+
+	// Empty desc is still rejected for the add variant.
+	if _, err := BuildPrompt(Slots{Kind: EditCharacterAdd}, nil); err == nil {
+		t.Error("expected error for empty add_character desc")
+	}
+}
+
 // --- failover ---
 
 type stubProvider struct {

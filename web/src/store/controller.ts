@@ -132,6 +132,10 @@ export function useAppController() {
   const applyTaskEvent = React.useCallback(
     (sid: string, taskId: string, type: string, data: Record<string, unknown>) => {
       const progress = typeof data.progress === "number" ? data.progress : undefined;
+      // Capture the task kind from the last committed state BEFORE the enqueued
+      // setState below — the task_done auto-select needs it, and reading it after
+      // setState would race the not-yet-applied update.
+      const taskKind = stateRef.current.tasks.get(taskId)?.kind;
       setState((s) => {
         const tasks = new Map(s.tasks);
         const cur: Task = tasks.get(taskId) || { id: taskId, kind: "generate", status: "queued", progress: 0 };
@@ -147,6 +151,14 @@ export function useAppController() {
         closeStream(taskId);
         void refreshWorkspace(sid);
         void refreshContext(sid);
+        // Sticky-last-output: a single-product edit/generation becomes the new
+        // focus so the next turn iterates on IT, not the original source. Only
+        // for single-output image/video kinds — search/crawl produce a batch and
+        // must not hijack the selection. The id comes from the task_done payload.
+        const newAsset = typeof data.assetId === "string" ? data.assetId : "";
+        if (newAsset && (taskKind === "generate" || taskKind === "video")) {
+          setState((s) => ({ ...s, selected: new Set([newAsset]) }));
+        }
       } else if (type === "task_progress" && data.asset_id) {
         // immediate backfill: each downloaded image is pushed as soon as it lands
         void refreshWorkspace(sid);
@@ -453,6 +465,13 @@ export function useAppController() {
       payload.ref = ref;
     }
     ws.send(JSON.stringify(payload));
+    // Sticky-last-output: consume the explicit selection now that it is captured
+    // in the payload. The next turn defaults to the produced output (auto-selected
+    // on task_done) or, absent a new product, the backend's [上次产物] anchor —
+    // so a stale selection never silently overrides the latest image.
+    if (stateRef.current.selected.size > 0) {
+      setState((s) => (s.selected.size > 0 ? { ...s, selected: new Set() } : s));
+    }
   }, [setChat, toast, showLoading]);
 
   const onTurnEnd = React.useCallback((sid: string, data: Record<string, unknown>) => {

@@ -44,6 +44,10 @@ type Service struct {
 	// placeholder without waiting for the agent turn to finish. Optional (nil in
 	// tests / when no hub is wired).
 	announce TaskAnnouncer
+	// onAsset, when set, is called with (sessionID, assetID) when a task
+	// completes successfully. Used by the orchestrator to track the last produced
+	// asset so follow-up turns default to editing it.
+	onAsset func(sessionID, assetID string)
 
 	// params caches each task's request so a failed product can be retried
 	// without the caller re-supplying inputs (short-term in-memory store, D7).
@@ -66,6 +70,11 @@ type TaskAnnouncer interface {
 // SetAnnouncer installs the task-created broadcaster (wired by main once the hub
 // exists, avoiding an init cycle). Safe to leave unset.
 func (s *Service) SetAnnouncer(a TaskAnnouncer) { s.announce = a }
+
+// SetAssetCallback installs a callback invoked with (sessionID, assetID) when a
+// generation task completes successfully. Used by the orchestrator to track the
+// last-produced asset for context continuity. Safe to leave unset.
+func (s *Service) SetAssetCallback(fn func(sessionID, assetID string)) { s.onAsset = fn }
 
 // NewService constructs a generation service.
 func NewService(gen generator, st *store.Store, broker *transport.TaskBroker, assetDir string, newID func(string) string) *Service {
@@ -384,6 +393,9 @@ func (s *Service) run(ctx context.Context, taskID string, p GenerateParams) {
 		"assetId":  assetID,
 		"provider": out.Provider,
 	})
+	if s.onAsset != nil {
+		s.onAsset(p.SessionID, assetID)
+	}
 	log.Printf("gen.run: task=%s DONE asset=%s published task_done", taskID, assetID)
 }
 

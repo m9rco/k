@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"strings"
 	"sync"
 	"time"
 
@@ -93,6 +94,12 @@ func (g *turnCallGuard) firstSeen(sig string) bool {
 // empty acknowledgment so no second bubble appears.
 const statusDuplicate = "duplicate"
 
+// statusClarified marks a result produced when an edit tool could not proceed
+// because a required description was missing, so it surfaced a clarify capsule to
+// the user instead of starting a doomed task. Like statusDuplicate it maps to an
+// empty acknowledgment (the capsule itself is the user-facing output).
+const statusClarified = "clarified"
+
 // argSig builds a stable signature for a tool's args struct so two identical
 // same-turn calls collapse to one. It marshals to JSON, then drops fields that
 // don't change WHAT the call produces (only how its result is delivered), so a
@@ -174,8 +181,8 @@ func asyncMarshal(standaloneFriendly string) utils.MarshalOutput {
 			Status  string `json:"status"`
 		}
 		if json.Unmarshal(b, &probe) == nil {
-			if probe.Status == statusDuplicate {
-				return "", nil // duplicate same-turn call: no second bubble
+			if probe.Status == statusDuplicate || probe.Status == statusClarified {
+				return "", nil // duplicate / clarify-capsule: no second bubble
 			}
 			if probe.AssetID != "" {
 				return string(b), nil // await path: give full JSON back to model
@@ -188,8 +195,8 @@ func asyncMarshal(standaloneFriendly string) utils.MarshalOutput {
 // --- change_character / change_background / change_text -------------------
 
 type editArgs struct {
-	// Intent is one of change_character, change_background, change_text.
-	Intent string `json:"intent" jsonschema:"description=The edit intent: change_character, change_background, or change_text,enum=change_character,enum=change_background,enum=change_text"`
+	// Intent is one of change_character, add_character, change_background, change_text.
+	Intent string `json:"intent" jsonschema:"description=The edit intent. change_character REPLACES the existing main character with a new one; add_character ADDS a new character while KEEPING the existing subject(s) (use this when the user says 增加/添加/多加一个角色/在旁边加一个人); change_background; change_text,enum=change_character,enum=add_character,enum=change_background,enum=change_text"`
 	// SourceAssetID is the existing asset to edit. Empty for a fresh generation.
 	SourceAssetID string `json:"source_asset_id,omitempty" jsonschema:"description=The base image to EDIT ON TOP OF (被编辑底图). Set this when the user says '把X放进图Z' or '在图Z基础上修改' — Z is the source. Leave EMPTY when generating a brand-new image purely from references."`
 	// ReferenceAssetIDs lists up to 6 reference assets to reuse composition/style
@@ -197,7 +204,7 @@ type editArgs struct {
 	// source_asset_id when provided.
 	ReferenceAssetIDs []string `json:"reference_asset_ids,omitempty" jsonschema:"description=IDs of up to 6 assets used as REFERENCES (参照物 for style/character/composition). First is primary. For '根据图X图Y生成新图' put X and Y here and leave source_asset_id empty; for '把图X放进图Z' put X here and Z in source_asset_id."`
 	// CharacterDesc/BackgroundDesc/TextContent carry the per-intent payload.
-	CharacterDesc  string `json:"character_desc,omitempty" jsonschema:"description=Description of the new character (for change_character)"`
+	CharacterDesc  string `json:"character_desc,omitempty" jsonschema:"description=Description of the character (the NEW one to replace with for change_character, or the one to ADD for add_character)"`
 	BackgroundDesc string `json:"background_desc,omitempty" jsonschema:"description=Description of the new background (for change_background)"`
 	TextContent    string `json:"text_content,omitempty" jsonschema:"description=The new copy/text to render (for change_text)"`
 	// ReuseComposition preserves the source/reference image composition.
@@ -214,11 +221,51 @@ type editResult struct {
 	AssetID string `json:"asset_id,omitempty"` // populated when await_result=true and done
 }
 
+// editMissingDesc reports whether an edit call lacks the description its intent
+// requires, and if so returns a clarify question + concrete editable options to
+// surface to the user. This keeps a missing description from reaching the
+// generation pipeline (which would fail with "description required") and turns it
+// into a friendly capsule the user can answer in one click/edit. Returns
+// (false, "", nil) when the description is present.
+func editMissingDesc(a editArgs) (bool, string, []ClarifyOption) {
+	switch generation.EditKind(a.Intent) {
+	case generation.EditCharacter, generation.EditCharacterAdd:
+		if strings.TrimSpace(a.CharacterDesc) == "" {
+			verb := "替换成的"
+			if generation.EditKind(a.Intent) == generation.EditCharacterAdd {
+				verb = "新增的"
+			}
+			return true, "好的，要" + verb + "角色长什么样？给我点描述，或选一个再改：", []ClarifyOption{
+				{Label: "动漫少女", Value: "动漫风格少女，明亮大眼，精致五官", EditableHint: "动漫风格少女，……"},
+				{Label: "写实男性", Value: "写实风格男性，硬朗轮廓，自然光影", EditableHint: "写实风格男性，……"},
+				{Label: "Q版角色", Value: "Q版卡通角色，大头比例，可爱风格", EditableHint: "Q版卡通角色，……"},
+			}
+		}
+	case generation.EditBackground:
+		if strings.TrimSpace(a.BackgroundDesc) == "" {
+			return true, "好的，背景想换成什么风格？给我点描述，或选一个再改：", []ClarifyOption{
+				{Label: "中国风", Value: "中国风，水墨意境，亭台楼阁，远山云雾，淡雅色调", EditableHint: "中国风，……"},
+				{Label: "赛博朋克", Value: "赛博朋克，霓虹灯，未来都市夜景，雨夜街道", EditableHint: "赛博朋克，……"},
+				{Label: "简约纯色", Value: "简约纯色背景，柔和渐变，干净留白", EditableHint: "简约……色背景"},
+				{Label: "自然风光", Value: "自然风光，蓝天白云，开阔草地，明亮通透", EditableHint: "自然风光，……"},
+			}
+		}
+	case generation.EditText:
+		if strings.TrimSpace(a.TextContent) == "" {
+			return true, "好的，文案要换成什么内容？告诉我要显示的文字：", []ClarifyOption{
+				{Label: "输入文案", Value: "把文案换成：", EditableHint: "把文案换成：……"},
+			}
+		}
+	}
+	return false, "", nil
+}
+
 func (d ToolDeps) newEditTool() (tool.InvokableTool, error) {
 	return utils.InferTool(
 		"edit_image",
-		"换背景/换角色/换文案：对已有图片进行编辑（换背景、换角色/主体、替换文案），自动做颜色适配。"+
-			"触发词：换背景/改背景/换角色/换人物/换文案/改文案/替换/调整图片/二次修改。"+
+		"换背景/换角色/增加角色/换文案：对已有图片进行编辑（换背景、替换或新增角色/主体、替换文案），自动做颜色适配。"+
+			"触发词：换背景/改背景/换角色/换人物/增加角色/添加角色/多加一个人/换文案/改文案/替换/调整图片/二次修改。"+
+			"换角色与增加角色不同：intent=change_character 是把原角色替换掉，intent=add_character 是保留原角色再新增一个。"+
 			"Use source_asset_id to adjust an already-generated image. "+
 			"Returns a task id; progress streams over SSE and the result lands in the workspace. "+
 			"Set await_result=true only when you must chain this result into the next tool call.",
@@ -230,9 +277,23 @@ func (d ToolDeps) newEditTool() (tool.InvokableTool, error) {
 			}
 			kind := generation.EditKind(a.Intent)
 			switch kind {
-			case generation.EditCharacter, generation.EditBackground, generation.EditText:
+			case generation.EditCharacter, generation.EditCharacterAdd, generation.EditBackground, generation.EditText:
 			default:
 				return editResult{}, fmt.Errorf("unsupported intent %q", a.Intent)
+			}
+			// Validate the required per-intent description BEFORE starting an async
+			// task. A missing description makes the generation pipeline fail later
+			// with "description required" — and because edit_image is
+			// ToolReturnDirectly, returning a Go error here would abort the turn with
+			// an empty reply (the user just sees errors, retry reuses the same empty
+			// args). Instead surface a clarify capsule so the user can pick/type the
+			// missing detail, and return a benign result (no doomed task, no crash).
+			if missing, question, opts := editMissingDesc(a); missing {
+				if d.Clarify != nil {
+					d.Clarify(question, opts)
+				}
+				log.Printf("edit_image: missing description for intent=%q, surfaced clarify capsule", a.Intent)
+				return editResult{Status: statusClarified}, nil
 			}
 			taskID, err := d.Generation.Start(ctx, generation.GenerateParams{
 				SessionID:         d.SessionID,

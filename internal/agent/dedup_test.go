@@ -186,3 +186,65 @@ func TestTurnCallGuardFirstSeen(t *testing.T) {
 		t.Error("nil guard should always report first-seen")
 	}
 }
+
+// TestEditToolMissingDescClarifies verifies edit_image surfaces a clarify capsule
+// (not a turn-aborting error, not a doomed task) when the required per-intent
+// description is empty. The tool must return without error and emit a question +
+// editable options via the Clarify callback, so the user can answer in one turn.
+func TestEditToolMissingDescClarifies(t *testing.T) {
+	cases := []struct {
+		name string
+		args string
+	}{
+		{"change_background empty", `{"intent":"change_background","source_asset_id":"a1"}`},
+		{"change_character empty", `{"intent":"change_character","source_asset_id":"a1"}`},
+		{"add_character empty", `{"intent":"add_character","source_asset_id":"a1"}`},
+		{"change_text empty", `{"intent":"change_text","source_asset_id":"a1"}`},
+		{"whitespace-only desc", `{"intent":"change_background","source_asset_id":"a1","background_desc":"   "}`},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			var gotQ string
+			var gotOpts []ClarifyOption
+			deps := ToolDeps{
+				SessionID: "s",
+				dedup:     newTurnCallGuard(),
+				Clarify:   func(q string, o []ClarifyOption) { gotQ = q; gotOpts = o },
+			}
+			et, err := deps.newEditTool()
+			if err != nil {
+				t.Fatal(err)
+			}
+			out, err := et.InvokableRun(context.Background(), c.args)
+			if err != nil {
+				t.Fatalf("missing desc must NOT return a Go error (aborts the turn), got %v", err)
+			}
+			// Benign result -> no stray bubble (maps to empty via asyncMarshal).
+			if out != "" {
+				t.Errorf("expected empty acknowledgment for clarify path, got %q", out)
+			}
+			if gotQ == "" {
+				t.Error("expected a clarify question to be surfaced")
+			}
+			if len(gotOpts) == 0 {
+				t.Error("expected at least one clarify option")
+			}
+			for i, o := range gotOpts {
+				if o.Label == "" || o.Value == "" {
+					t.Errorf("option[%d] missing label/value: %+v", i, o)
+				}
+			}
+		})
+	}
+}
+
+// TestEditToolProceedsWithDesc verifies a present description does NOT trigger the
+// clarify path (editMissingDesc returns false).
+func TestEditToolProceedsWithDesc(t *testing.T) {
+	if missing, _, _ := editMissingDesc(editArgs{Intent: "change_background", BackgroundDesc: "中国风"}); missing {
+		t.Error("non-empty background_desc should not be flagged missing")
+	}
+	if missing, _, _ := editMissingDesc(editArgs{Intent: "add_character", CharacterDesc: "废土男性"}); missing {
+		t.Error("non-empty character_desc should not be flagged missing")
+	}
+}

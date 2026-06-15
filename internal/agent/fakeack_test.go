@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/cloudwego/eino/schema"
@@ -135,7 +136,7 @@ func TestRemediationAction(t *testing.T) {
 
 func TestRemediationClarifyBuildsOptions(t *testing.T) {
 	hint := IntentHint{Whitelisted: true, MissingKeyParam: true, Labels: []string{"换背景"}}
-	q, opts := remediationClarify(hint)
+	q, opts := remediationClarify(hint, "")
 	if q == "" {
 		t.Fatal("expected a non-empty clarify question")
 	}
@@ -146,6 +147,19 @@ func TestRemediationClarifyBuildsOptions(t *testing.T) {
 		if o.Label == "" || o.Value == "" {
 			t.Errorf("option[%d] missing label/value: %+v", i, o)
 		}
+	}
+
+	// With a last-produced asset, the first option offers to continue on it and
+	// carries the asset id back to the agent (clarify-recent-context).
+	q2, opts2 := remediationClarify(hint, "asset_last")
+	if q2 == "" {
+		t.Fatal("expected a non-empty clarify question")
+	}
+	if len(opts2) != len(opts)+1 {
+		t.Fatalf("lastProduced should add exactly one option, got %d vs %d", len(opts2), len(opts))
+	}
+	if !strings.Contains(opts2[0].Value, "asset_last") {
+		t.Errorf("first option should carry the last-produced id, got %q", opts2[0].Value)
 	}
 }
 

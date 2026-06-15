@@ -69,6 +69,11 @@ type Orchestrator struct {
 	// turnMu serializes Handle per session so two turns never interleave writes
 	// into the same window (one lock per session id).
 	turnMu map[string]*sync.Mutex
+	// lastProduced tracks the most recently produced asset_id per session so
+	// follow-up turns default to editing the latest output rather than forcing
+	// the user to re-select it. In-memory only; survives across turns within a
+	// process lifetime (loss on restart is acceptable).
+	lastProduced map[string]string
 }
 
 // NewOrchestrator builds the orchestrator from config and backing services. The
@@ -80,22 +85,39 @@ func NewOrchestrator(cfg *config.Config, gen *generation.Service, cr *crop.Servi
 		mc = cfg.ChatTest
 	}
 	return &Orchestrator{
-		model:      newChatModel(mc),
-		cfg:        cfg,
-		models:     usermodel.NewManager(cfg, st),
-		gen:        gen,
-		crop:       cr,
-		video:      vid,
-		crawl:      cw,
-		budget:     cfg.ContextTokenBudget,
-		keepRecent: 6,
-		hub:        hub,
-		store:      st,
-		newID:      newID,
-		windows:    make(map[string]*Window),
-		cancels:    make(map[string]context.CancelFunc),
-		turnMu:     make(map[string]*sync.Mutex),
+		model:        newChatModel(mc),
+		cfg:          cfg,
+		models:       usermodel.NewManager(cfg, st),
+		gen:          gen,
+		crop:         cr,
+		video:        vid,
+		crawl:        cw,
+		budget:       cfg.ContextTokenBudget,
+		keepRecent:   6,
+		hub:          hub,
+		store:        st,
+		newID:        newID,
+		windows:      make(map[string]*Window),
+		cancels:      make(map[string]context.CancelFunc),
+		turnMu:       make(map[string]*sync.Mutex),
+		lastProduced: make(map[string]string),
 	}
+}
+
+// SetLastProduced records the most recently produced asset_id for a session.
+// Called by generation/video services via callback when a task completes.
+func (o *Orchestrator) SetLastProduced(sessionID, assetID string) {
+	o.mu.Lock()
+	o.lastProduced[sessionID] = assetID
+	o.mu.Unlock()
+}
+
+// LastProduced returns the most recently produced asset_id for a session, or ""
+// if none has been produced in this process lifetime.
+func (o *Orchestrator) LastProduced(sessionID string) string {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return o.lastProduced[sessionID]
 }
 
 // SetWebSearch installs the web-search service (DDG text + Bing images).
@@ -307,6 +329,9 @@ func (o *Orchestrator) ResetContext(sessionID string) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	o.windows[sessionID] = NewWindow(SystemPrompt(), o.budget, o.keepRecent, nil)
+	// Drop the sticky last-produced anchor too: a fresh window must not keep
+	// injecting "[上次产物]" from the discarded context (sticky-last-output).
+	delete(o.lastProduced, sessionID)
 	if o.store != nil {
 		if err := o.store.DeleteMessages(sessionID); err != nil {
 			log.Printf("agent: clear history session=%s failed: %v", sessionID, err)
@@ -521,7 +546,7 @@ func (o *Orchestrator) Handle(ctx context.Context, sessionID, userText string, l
 	// turn empty or wrong (see remediationAction).
 	switch remediationAction(len(turnCalls), cancelled, capsuleAsked, replyEmpty, reply, hint) {
 	case remediateClarify:
-		q, opts := remediationClarify(hint)
+		q, opts := remediationClarify(hint, o.LastProduced(sessionID))
 		clarify(q, opts)
 	case remediateRefuse:
 		reply = RefusalMessage()
@@ -728,17 +753,32 @@ type turnEndInfo struct {
 // made no tool call but pre-classification says the intent is whitelisted yet a
 // key parameter (the image to act on) is missing. The options steer the user
 // toward supplying or generating an image so the next turn can proceed.
-func remediationClarify(hint IntentHint) (string, []ClarifyOption) {
+//
+// lastProduced, when non-empty, is the session's most recent output asset: it is
+// offered as the first option ("继续在上一张图上修改") so the user can one-click
+// continue on it. This is a degraded path: the normal sticky-last-output flow
+// annotates "[上次产物]" upstream so MissingKeyParam never fires and this
+// function is not reached. It only triggers after a restart (lastProduced lost,
+// rebuilt here from whatever the caller still tracks) — clarify-recent-context.
+func remediationClarify(hint IntentHint, lastProduced string) (string, []ClarifyOption) {
 	intent := "这个操作"
 	if len(hint.Labels) > 0 {
 		intent = "「" + strings.Join(hint.Labels, "/") + "」"
 	}
 	q := "我可以帮你" + intent + "，但还不清楚要操作哪张图。请告诉我，或先准备一张图："
-	opts := []ClarifyOption{
-		{Label: "上传/选中一张图", Value: "我先上传一张图，请用它来" + intent, EditableHint: "我要操作的是这张图"},
-		{Label: "用文字生成一张", Value: "先用文字帮我生成一张图，再" + intent, EditableHint: "帮我生成一张……的图"},
-		{Label: "搜一张参考图", Value: "先帮我搜一张参考图，再" + intent, EditableHint: "帮我搜一张……的图"},
+	opts := make([]ClarifyOption, 0, 4)
+	if lastProduced != "" {
+		opts = append(opts, ClarifyOption{
+			Label:        "继续在上一张图上修改",
+			Value:        "[asset " + lastProduced + "] 用上一张产物来" + intent,
+			EditableHint: "继续修改上一张图",
+		})
 	}
+	opts = append(opts,
+		ClarifyOption{Label: "上传/选中一张图", Value: "我先上传一张图，请用它来" + intent, EditableHint: "我要操作的是这张图"},
+		ClarifyOption{Label: "用文字生成一张", Value: "先用文字帮我生成一张图，再" + intent, EditableHint: "帮我生成一张……的图"},
+		ClarifyOption{Label: "搜一张参考图", Value: "先帮我搜一张参考图，再" + intent, EditableHint: "帮我搜一张……的图"},
+	)
 	return q, opts
 }
 

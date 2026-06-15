@@ -5,6 +5,7 @@
 package agent
 
 import (
+	"encoding/json"
 	"fmt"
 	"strings"
 	"sync"
@@ -128,6 +129,91 @@ type Window struct {
 	budget     int
 	keepRecent int // minimum recent messages to retain verbatim
 	summarize  Summarizer
+	// lastAssetOp records the most recent "edit lineage" (source asset → output
+	// asset) seen among compressed turns, so summarization doesn't erase which
+	// image the conversation has been iterating on. Updated as turns are folded;
+	// rendered as a structured "[最近编辑: source=… → output=…]" anchor in the
+	// summary (summary-asset-anchor). Either side may be empty when only one is
+	// recoverable from the window.
+	lastAssetOp assetOp
+}
+
+// assetOp is the source→output lineage of one edit operation. SourceID comes
+// from an edit tool-call's source_asset_id argument; OutputID is resolved from a
+// "[上次产物: 图N]" annotation against the workspace numbering map in the same
+// folded slice.
+type assetOp struct {
+	SourceID string
+	OutputID string
+}
+
+func (op assetOp) zero() bool { return op.SourceID == "" && op.OutputID == "" }
+
+// parseWorkspaceLabels parses a "[工作区: 图1=abc(生成), 视频1=def(视频)]" prefix into
+// a label→id map ("图1"→"abc"). Returns nil when no workspace prefix is present.
+func parseWorkspaceLabels(content string) map[string]string {
+	start := strings.Index(content, "[工作区: ")
+	if start < 0 {
+		return nil
+	}
+	rest := content[start+len("[工作区: "):]
+	end := strings.IndexByte(rest, ']')
+	if end < 0 {
+		return nil
+	}
+	body := rest[:end]
+	out := map[string]string{}
+	for _, entry := range strings.Split(body, ",") {
+		entry = strings.TrimSpace(entry)
+		eq := strings.IndexByte(entry, '=')
+		if eq <= 0 {
+			continue
+		}
+		lbl := entry[:eq]
+		idAndKind := entry[eq+1:]
+		// Strip the trailing "(类型)" annotation.
+		if p := strings.IndexByte(idAndKind, '('); p >= 0 {
+			idAndKind = idAndKind[:p]
+		}
+		id := strings.TrimSpace(idAndKind)
+		if lbl != "" && id != "" {
+			out[lbl] = id
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// parseLastProducedLabel extracts the "图N"/"视频N" label from a
+// "[上次产物: 图N]" annotation, or "" when absent.
+func parseLastProducedLabel(content string) string {
+	start := strings.Index(content, "[上次产物: ")
+	if start < 0 {
+		return ""
+	}
+	rest := content[start+len("[上次产物: "):]
+	end := strings.IndexByte(rest, ']')
+	if end < 0 {
+		return ""
+	}
+	return strings.TrimSpace(rest[:end])
+}
+
+// parseSourceAssetID pulls source_asset_id out of an edit tool-call's JSON
+// arguments, or "" when the field is absent/unparseable.
+func parseSourceAssetID(argsJSON string) string {
+	if argsJSON == "" {
+		return ""
+	}
+	var probe struct {
+		SourceAssetID string `json:"source_asset_id"`
+	}
+	if err := json.Unmarshal([]byte(argsJSON), &probe); err != nil {
+		return ""
+	}
+	return probe.SourceAssetID
 }
 
 // NewWindow creates a window bounded by tokenBudget. keepRecent is the minimum
@@ -175,13 +261,96 @@ func (w *Window) compressLocked() {
 		foldCount := len(w.recent) - w.keepRecent
 		older := w.recent[:foldCount]
 
+		// Preserve the most recent edit lineage (source→output) among the folded
+		// turns before they are summarized away (summary-asset-anchor). Merge
+		// per-field rather than overwrite: source and output often arrive in
+		// separate compression batches (the edit tool-call vs the next turn's
+		// [上次产物] annotation), so a whole-struct overwrite would drop one side.
+		if op := extractAssetOp(older); !op.zero() {
+			if op.SourceID != "" {
+				w.lastAssetOp.SourceID = op.SourceID
+			}
+			if op.OutputID != "" {
+				w.lastAssetOp.OutputID = op.OutputID
+			}
+		}
+
 		merged := older
 		if w.summary != nil {
 			merged = append([]*schema.Message{w.summary}, older...)
 		}
-		w.summary = schema.SystemMessage(w.summarize(merged))
+		body := w.summarize(merged)
+		// Strip any prior anchor line so re-summarizing the old summary doesn't
+		// duplicate it, then append the freshest anchor once.
+		body = stripAssetAnchor(body)
+		if !w.lastAssetOp.zero() {
+			body += "\n" + renderAssetAnchor(w.lastAssetOp)
+		}
+		w.summary = schema.SystemMessage(body)
 		w.recent = append([]*schema.Message{}, w.recent[foldCount:]...)
 	}
+}
+
+// assetAnchorPrefix marks the structured edit-lineage line appended to a summary.
+const assetAnchorPrefix = "[最近编辑:"
+
+// renderAssetAnchor formats an edit lineage as a single structured line. Either
+// side may be empty (only the present side is rendered).
+func renderAssetAnchor(op assetOp) string {
+	switch {
+	case op.SourceID != "" && op.OutputID != "":
+		return assetAnchorPrefix + " source=" + op.SourceID + " → output=" + op.OutputID + "]"
+	case op.OutputID != "":
+		return assetAnchorPrefix + " output=" + op.OutputID + "]"
+	default:
+		return assetAnchorPrefix + " source=" + op.SourceID + "]"
+	}
+}
+
+// stripAssetAnchor removes a trailing "[最近编辑: …]" line from a summary body so
+// re-compression does not accumulate stale anchors.
+func stripAssetAnchor(body string) string {
+	lines := strings.Split(body, "\n")
+	kept := lines[:0]
+	for _, ln := range lines {
+		if strings.HasPrefix(strings.TrimSpace(ln), assetAnchorPrefix) {
+			continue
+		}
+		kept = append(kept, ln)
+	}
+	return strings.TrimRight(strings.Join(kept, "\n"), "\n")
+}
+
+// extractAssetOp scans a folded message slice for the most recent edit lineage:
+// the source_asset_id carried in an edit tool-call's arguments, paired with the
+// output asset resolved from a "[上次产物: 图N]" annotation against the workspace
+// numbering map present in the same slice. Returns a zero assetOp when neither is
+// recoverable (e.g. a pure-text conversation with no edits).
+func extractAssetOp(msgs []*schema.Message) assetOp {
+	var op assetOp
+	label := map[string]string{} // "图N"/"视频N" -> asset id, latest map wins
+	for _, m := range msgs {
+		if m == nil {
+			continue
+		}
+		// Refresh the numbering map from any "[工作区: …]" prefix on this message.
+		if lm := parseWorkspaceLabels(m.Content); len(lm) > 0 {
+			label = lm
+		}
+		// Output: resolve "[上次产物: 图N]" against the current map.
+		if lbl := parseLastProducedLabel(m.Content); lbl != "" {
+			if id, ok := label[lbl]; ok {
+				op.OutputID = id
+			}
+		}
+		// Source: the source_asset_id on an edit tool call.
+		for _, tc := range m.ToolCalls {
+			if src := parseSourceAssetID(tc.Function.Arguments); src != "" {
+				op.SourceID = src
+			}
+		}
+	}
+	return op
 }
 
 func (w *Window) totalTokensLocked() int {

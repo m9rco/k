@@ -76,6 +76,10 @@ type Service struct {
 	now      func() time.Time
 	newID    func(prefix string) string
 	announce TaskAnnouncer
+	// onAsset, when set, is called with (sessionID, assetID) when a video task
+	// completes successfully. Used by the orchestrator to track the last produced
+	// asset for context continuity.
+	onAsset  func(sessionID, assetID string)
 	uploader ImageUploader
 	// cancels holds the cancel func for each in-flight task so a user-initiated
 	// cancel can abort the provider request and stop the pipeline.
@@ -92,6 +96,11 @@ type TaskAnnouncer interface {
 // SetAnnouncer installs the task-created broadcaster (wired by main once the hub
 // exists). Safe to leave unset.
 func (s *Service) SetAnnouncer(a TaskAnnouncer) { s.announce = a }
+
+// SetAssetCallback installs a callback invoked with (sessionID, assetID) when a
+// video task completes successfully. Used by the orchestrator to track the
+// last-produced asset for context continuity. Safe to leave unset.
+func (s *Service) SetAssetCallback(fn func(sessionID, assetID string)) { s.onAsset = fn }
 
 // SetUploader installs the public-image uploader (COS). Required for video to be
 // considered configured, since the provider fetches the source image by URL.
@@ -255,6 +264,9 @@ func (s *Service) run(ctx context.Context, taskID string, p Params) {
 		"assetId":  assetID,
 		"provider": out.Provider,
 	})
+	if s.onAsset != nil {
+		s.onAsset(p.SessionID, assetID)
+	}
 }
 
 // buildMotionPrompt wraps the sanitized motion description in a server template

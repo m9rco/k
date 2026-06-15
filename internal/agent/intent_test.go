@@ -71,6 +71,14 @@ func TestClassifyIntentMissingKeyParam(t *testing.T) {
 		t.Error("did not expect MissingKeyParam when a workspace image is present")
 	}
 
+	// A "[上次产物: 图N]" annotation counts as an available image: with a known
+	// last output we default to editing it, so MissingKeyParam must stay false
+	// (sticky-last-output / clarify-recent-context).
+	h4 := ClassifyIntent("[工作区: 图1=a1(生成), 图2=a2(生成)] [上次产物: 图2] 再换个角色")
+	if h4.MissingKeyParam {
+		t.Error("did not expect MissingKeyParam when [上次产物] annotation is present")
+	}
+
 	// Non-image intent never flags missing key param.
 	h3 := ClassifyIntent("查一下今天的新闻")
 	if h3.MissingKeyParam {

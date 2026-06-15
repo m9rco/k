@@ -441,3 +441,80 @@ func TestPersistAssistantWritesToolRefs(t *testing.T) {
 		t.Errorf("pure-text turn must not write tool refs, got %q", got2[0].ToolRefs)
 	}
 }
+
+// TestWindowSummaryPreservesAssetAnchor verifies that when older turns are
+// compressed away, the most recent edit lineage (source→output) is preserved as
+// a structured "[最近编辑: …]" anchor in the summary (summary-asset-anchor).
+func TestWindowSummaryPreservesAssetAnchor(t *testing.T) {
+	w := NewWindow("SYS", 256, 2, nil)
+	// An edit turn: user message carries the workspace map + last-produced label;
+	// the assistant tool-call carries source_asset_id. After producing output a2,
+	// the next turn's prefix annotates [上次产物: 图2] (=a2).
+	w.Append(schema.UserMessage("[工作区: 图1=a1(生成)] [选中: 图1] 换个背景"))
+	w.Append(&schema.Message{
+		Role: schema.Assistant,
+		ToolCalls: []schema.ToolCall{{
+			ID:       "c1",
+			Function: schema.FunctionCall{Name: "edit_image", Arguments: `{"intent":"change_background","source_asset_id":"a1"}`},
+		}},
+	})
+	w.Append(schema.UserMessage("[工作区: 图1=a1(生成), 图2=a2(生成)] [上次产物: 图2] 再换个角色"))
+	// Pad with long turns to force compression of the early edit turn.
+	long := strings.Repeat("赛博朋克城市夜景，霓虹灯，雨夜街道。", 30)
+	for i := 0; i < 8; i++ {
+		w.Append(schema.UserMessage(long))
+	}
+	if !w.Compressed() {
+		t.Fatal("expected compression")
+	}
+	summary := w.Messages()[1].Content
+	if !strings.Contains(summary, "[最近编辑:") {
+		t.Fatalf("summary missing edit anchor: %q", summary)
+	}
+	if !strings.Contains(summary, "source=a1") || !strings.Contains(summary, "output=a2") {
+		t.Errorf("anchor should carry source=a1 → output=a2, got %q", summary)
+	}
+	// Anchor must not be duplicated across repeated compressions.
+	if strings.Count(summary, "[最近编辑:") != 1 {
+		t.Errorf("anchor duplicated in %q", summary)
+	}
+}
+
+// TestWindowSummaryNoAnchorWithoutEdits verifies a pure-text conversation yields
+// no edit anchor (summary-asset-anchor: don't fabricate one).
+func TestWindowSummaryNoAnchorWithoutEdits(t *testing.T) {
+	w := NewWindow("SYS", 256, 2, nil)
+	long := strings.Repeat("你好，我们来聊聊宣发素材的整体规划和思路吧。", 30)
+	for i := 0; i < 8; i++ {
+		w.Append(schema.UserMessage(long))
+	}
+	if !w.Compressed() {
+		t.Fatal("expected compression")
+	}
+	if strings.Contains(w.Messages()[1].Content, "[最近编辑:") {
+		t.Errorf("no edit turns should yield no anchor: %q", w.Messages()[1].Content)
+	}
+}
+
+// TestOrchestratorLastProduced covers the per-session last-produced tracking
+// used by sticky-last-output.
+func TestOrchestratorLastProduced(t *testing.T) {
+	o := &Orchestrator{lastProduced: make(map[string]string)}
+	if got := o.LastProduced("s1"); got != "" {
+		t.Errorf("empty session should yield empty, got %q", got)
+	}
+	o.SetLastProduced("s1", "asset_x")
+	o.SetLastProduced("s2", "asset_y")
+	if got := o.LastProduced("s1"); got != "asset_x" {
+		t.Errorf("s1 last produced = %q, want asset_x", got)
+	}
+	if got := o.LastProduced("s2"); got != "asset_y" {
+		t.Errorf("s2 last produced = %q, want asset_y", got)
+	}
+	// Latest write wins.
+	o.SetLastProduced("s1", "asset_z")
+	if got := o.LastProduced("s1"); got != "asset_z" {
+		t.Errorf("s1 last produced should update to asset_z, got %q", got)
+	}
+}
+

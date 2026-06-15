@@ -148,6 +148,10 @@ func run() error {
 
 	// Conversation orchestration: Eino ReAct agent over the whitelist of tools.
 	orch := agent.NewOrchestrator(cfg, genSvc, cropSvc, vidSvc, crawlSvc, hub, st, id.New)
+	// Track the last produced asset per session so follow-up turns default to
+	// editing the latest output (sticky-last-output continuity).
+	genSvc.SetAssetCallback(orch.SetLastProduced)
+	vidSvc.SetAssetCallback(orch.SetLastProduced)
 	// Text-to-image (wan/qwen): a second generation service wired with the
 	// text-to-image provider. Only enabled when its API key is configured, so the
 	// generate_image_from_text tool stays out of the whitelist otherwise.
@@ -155,6 +159,7 @@ func run() error {
 		t2iGen := generation.NewFailoverGenerator(generation.NewProvider(cfg.TextToImage), nil)
 		t2iSvc := generation.NewService(t2iGen, st, broker, cfg.AssetDir, id.New)
 		t2iSvc.SetAnnouncer(announcer)
+		t2iSvc.SetAssetCallback(orch.SetLastProduced)
 		orch.SetTextToImage(t2iSvc)
 		log.Printf("text-to-image: provider=%s model=%s enabled", cfg.TextToImage.Provider, cfg.TextToImage.Model)
 	} else {
@@ -169,7 +174,7 @@ func run() error {
 			// Asset numbering map: lets the model resolve "图N" the user typed and
 			// reply with matching labels. Built from the client-provided display
 			// order (authoritative for drag-reorders) joined with stored kinds.
-			if numbering := buildNumbering(st, sessionID, msg.AssetOrder, msg.Refs, msg.Ref); numbering != "" {
+			if numbering := buildNumbering(st, sessionID, msg.AssetOrder, msg.Refs, msg.Ref, orch.LastProduced(sessionID)); numbering != "" {
 				text = numbering + " " + text
 			} else if len(msg.Refs) > 0 {
 				// Fallback (no display order supplied): surface up to 6 reference ids.
@@ -321,8 +326,10 @@ func runTurn(ctx context.Context, orch *agent.Orchestrator, hub *transport.Hub, 
 // buildNumbering joins the client-supplied display order with stored asset kinds
 // into the "图N → asset_id" context prefix (see agent.BuildAssetNumbering). The
 // selected ids (refs / single ref) are annotated so the model knows which the
-// user picked. Returns "" when there is no display order to number.
-func buildNumbering(st *store.Store, sessionID string, order, refs []string, ref string) string {
+// user picked; when nothing is selected, lastProduced (the session's most recent
+// output) is annotated as "[上次产物: 图N]" so the model defaults to editing it.
+// Returns "" when there is no display order to number.
+func buildNumbering(st *store.Store, sessionID string, order, refs []string, ref, lastProduced string) string {
 	if len(order) == 0 {
 		return ""
 	}
@@ -340,7 +347,7 @@ func buildNumbering(st *store.Store, sessionID string, order, refs []string, ref
 	if len(selected) == 0 && ref != "" {
 		selected = []string{ref}
 	}
-	return agent.BuildAssetNumbering(refList, selected)
+	return agent.BuildAssetNumbering(refList, selected, lastProduced)
 }
 
 // taskAnnouncer adapts the WS hub to the generation/video TaskAnnouncer hook:
