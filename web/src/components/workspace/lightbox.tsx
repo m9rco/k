@@ -72,7 +72,7 @@ export function Lightbox({
           <div className="flex items-center gap-2">
             {!isVideo && (
               <Button variant="outline" size="sm" onClick={() => onCrop(asset)}>
-                <Crop className="size-3.5" /> 切尺寸
+                <Crop className="size-3.5" /> 适配尺寸
               </Button>
             )}
             {isVideo && (

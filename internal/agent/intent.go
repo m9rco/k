@@ -48,7 +48,7 @@ var intentRules = []intentRule{
 		strong: []string{"增加角色", "添加角色", "加个角色", "加一个角色", "多加一个", "增加一位", "增加一个人", "加个人物", "再加一个", "旁边加", "新增角色"}},
 	{label: "换文案", tool: "edit_image", imageOp: true,
 		strong: []string{"换文案", "改文案", "换文字", "改文字", "替换文案", "文案换", "改字", "换标题", "改标题"}},
-	{label: "切尺寸", tool: "crop_to_sizes", imageOp: true,
+	{label: "切尺寸", tool: "adapt_to_platform", imageOp: true,
 		strong: []string{"切尺寸", "裁剪", "裁成", "切成", "改尺寸", "适配尺寸", "切图", "裁一下", "各平台尺寸", "广告位"},
 		weak:   []string{"尺寸", "各平台", "横版", "竖版"}},
 	{label: "生成icon", tool: "generate_icon", imageOp: true,

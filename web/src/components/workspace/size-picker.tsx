@@ -14,6 +14,11 @@ interface Chosen {
 
 type CropMode = "cover" | "contain" | "anchor" | "rect";
 
+// Top-level action: AI platform adaptation (default — preserves subject + intent,
+// smart-routes crop vs repaint) or manual deterministic crop (the fallback path
+// with the four crop modes).
+type Action = "adapt" | "crop";
+
 const MODES: { id: CropMode; name: string; hint: string }[] = [
   { id: "cover", name: "智能铺满", hint: "等比铺满目标框，居中裁掉溢出部分（默认）" },
   { id: "contain", name: "等比留白", hint: "完整放入目标框，多余区域留白，不裁切任何内容" },
@@ -43,6 +48,7 @@ export function SizePicker({
   const [activeChannel, setActiveChannel] = React.useState<string | null>(null);
   const [chosen, setChosen] = React.useState<Map<string, Chosen>>(new Map());
   const [running, setRunning] = React.useState(false);
+  const [action, setAction] = React.useState<Action>("adapt");
   const [mode, setMode] = React.useState<CropMode>("cover");
   const [anchor, setAnchor] = React.useState("center");
   const [rect, setRect] = React.useState<api.CropRect | null>(null);
@@ -55,6 +61,7 @@ export function SizePicker({
     if (assetIds) {
       setChosen(new Map());
       setGroup("all");
+      setAction("adapt");
       setMode("cover");
       setAnchor("center");
       setRect(null);
@@ -98,22 +105,38 @@ export function SizePicker({
 
   const run = async () => {
     if (!assetIds || chosen.size === 0) return;
-    if (mode === "rect" && !rect) {
+    if (action === "crop" && mode === "rect" && !rect) {
       app.toast("请先在源图上框选裁剪区域", "warn");
       return;
     }
-    setRunning(true);
     const sizeIds = [...chosen.keys()];
-    const opts = cropOpts();
+    if (action === "adapt") {
+      // Platform adaptation goes THROUGH the conversation agent so the LLM
+      // understands the image + marketing intent before any image-model repaint
+      // (never a standalone, intent-blind resize). The chat bubble shows only the
+      // human-readable size names; the raw size ids ride a hidden channel so the
+      // agent can call adapt_to_platform with exact ids without leaking ids/tool
+      // names into the conversation UI.
+      const labels = [...chosen.values()].map((c) => c.label).join("、");
+      const text =
+        `把${assetIds.length > 1 ? `这 ${assetIds.length} 张图` : "这张图"}适配到以下平台尺寸，` +
+        `保留主体与核心宣发意图、不改变原图逻辑：${labels}`;
+      app.sendMessage(text, assetIds.length === 1 ? assetIds[0] : assetIds, sizeIds);
+      onOpenChange(false);
+      return;
+    }
+    // Manual crop: deterministic, no AI — call the crop endpoint directly.
+    setRunning(true);
     try {
+      const opts = cropOpts();
       for (const aid of assetIds) {
         await api.crop(app.state.sessionId, aid, sizeIds, app.state.lossless, opts);
       }
       onOpenChange(false);
       await app.refreshWorkspace(app.state.sessionId);
-      app.toast(`已切 ${sizeIds.length} 个尺寸 × ${assetIds.length} 张`, "ok");
+      app.toast(`已裁剪 ${sizeIds.length} 个尺寸 × ${assetIds.length} 张`, "ok");
     } catch (e) {
-      app.toast("切尺寸失败：" + (e as Error).message);
+      app.toast("裁剪失败：" + (e as Error).message);
     } finally {
       setRunning(false);
     }
@@ -124,45 +147,80 @@ export function SizePicker({
       <DialogContent className="w-[min(760px,94vw)]">
         <DialogHeader>
           <DialogTitle>
-            选择平台尺寸{assetIds && assetIds.length > 1 ? ` · ${assetIds.length} 张` : ""}
+            适配平台尺寸{assetIds && assetIds.length > 1 ? ` · ${assetIds.length} 张` : ""}
           </DialogTitle>
         </DialogHeader>
 
-        {/* crop mode selector */}
+        {/* action: AI platform adaptation (default) vs manual deterministic crop */}
         <div className="space-y-2">
-          <div className="flex flex-wrap gap-1.5">
-            {MODES.map((m) => {
-              const disabled = m.id === "rect" && rectDisabled;
-              const active = mode === m.id;
-              return (
-                <button
-                  key={m.id}
-                  disabled={disabled}
-                  onClick={() => setMode(m.id)}
-                  className={cn(
-                    "rounded-md border px-2.5 py-1 text-xs transition-all duration-200 ease-out",
-                    active
-                      ? "border-accent bg-accent/15 text-accent"
-                      : "border-line text-fg-dim hover:border-accent/50 hover:text-fg",
-                    disabled && "cursor-not-allowed opacity-40 hover:border-line hover:text-fg-dim",
-                  )}
-                  title={disabled ? "多张时不支持手动框选" : m.hint}
-                >
-                  {m.name}
-                </button>
-              );
-            })}
+          <div className="flex gap-1.5">
+            <button
+              onClick={() => setAction("adapt")}
+              className={cn(
+                "rounded-md border px-3 py-1.5 text-xs transition-all duration-200 ease-out",
+                action === "adapt"
+                  ? "border-accent bg-accent/15 text-accent"
+                  : "border-line text-fg-dim hover:border-accent/50 hover:text-fg",
+              )}
+            >
+              AI 平台适配
+            </button>
+            <button
+              onClick={() => setAction("crop")}
+              className={cn(
+                "rounded-md border px-3 py-1.5 text-xs transition-all duration-200 ease-out",
+                action === "crop"
+                  ? "border-accent bg-accent/15 text-accent"
+                  : "border-line text-fg-dim hover:border-accent/50 hover:text-fg",
+              )}
+            >
+              手动裁剪
+            </button>
           </div>
           <p className="text-[11px] leading-relaxed text-fg-mute">
-            {MODES.find((m) => m.id === mode)?.hint}
+            {action === "adapt"
+              ? "保留主体与宣发意图，自动适配各平台：比例一致直接缩放，横竖翻转或比例差异大时由 AI 重绘补全画面。"
+              : "确定性裁剪，不经过 AI。可选铺满 / 留白 / 锚点 / 框选模式。"}
           </p>
         </div>
 
-        {/* mode-specific controls */}
-        {mode === "anchor" && (
+        {/* crop mode selector — only for the manual crop path */}
+        {action === "crop" && (
+          <div className="space-y-2">
+            <div className="flex flex-wrap gap-1.5">
+              {MODES.map((m) => {
+                const disabled = m.id === "rect" && rectDisabled;
+                const active = mode === m.id;
+                return (
+                  <button
+                    key={m.id}
+                    disabled={disabled}
+                    onClick={() => setMode(m.id)}
+                    className={cn(
+                      "rounded-md border px-2.5 py-1 text-xs transition-all duration-200 ease-out",
+                      active
+                        ? "border-accent bg-accent/15 text-accent"
+                        : "border-line text-fg-dim hover:border-accent/50 hover:text-fg",
+                      disabled && "cursor-not-allowed opacity-40 hover:border-line hover:text-fg-dim",
+                    )}
+                    title={disabled ? "多张时不支持手动框选" : m.hint}
+                  >
+                    {m.name}
+                  </button>
+                );
+              })}
+            </div>
+            <p className="text-[11px] leading-relaxed text-fg-mute">
+              {MODES.find((m) => m.id === mode)?.hint}
+            </p>
+          </div>
+        )}
+
+        {/* mode-specific controls (manual crop path only) */}
+        {action === "crop" && mode === "anchor" && (
           <AnchorGrid value={anchor} onChange={setAnchor} />
         )}
-        {mode === "rect" && (
+        {action === "crop" && mode === "rect" && (
           <RectSelector src={sourceAsset?.url} rect={rect} onChange={setRect} />
         )}
 
@@ -226,7 +284,7 @@ export function SizePicker({
         <div className="mt-3 flex items-center gap-3 border-t border-line pt-3">
           <span className="text-xs text-fg-dim">已选 {chosen.size} 个尺寸</span>
           <Button className="ml-auto" size="sm" disabled={chosen.size === 0 || running} onClick={run}>
-            {running ? "处理中…" : "开始裁剪"}
+            {running ? "处理中…" : action === "adapt" ? "开始适配" : "开始裁剪"}
           </Button>
         </div>
       </DialogContent>

@@ -90,6 +90,12 @@ func run() error {
 		generation.NewProvider(cfg.ImageBackup),
 	)
 	genSvc := generation.NewService(gen, st, broker, cfg.AssetDir, id.New)
+	// Wire the crop service into generation so platform adaptation can use the
+	// deterministic crop fast path (ratio-match) and the size catalog. Adaptation
+	// is reached only through the conversation agent's adapt_to_platform tool (so
+	// the LLM understands the image + intent before any repaint) — there is no
+	// direct HTTP endpoint that would bypass the model.
+	genSvc.SetCropper(cropSvc)
 
 	// Image-to-video service (happyhorse). The provider fetches the source image
 	// by public URL, so video requires a COS uploader to publish the local frame
@@ -185,6 +191,13 @@ func run() error {
 				text = "[reference assets: " + strings.Join(refs, ", ") + "] " + text
 			} else if msg.Ref != "" {
 				text = "[asset " + msg.Ref + "] " + text
+			}
+			// Platform-adaptation size ids picked in the size selector: surfaced to
+			// the agent as a hidden hint (never shown in the user's bubble) so the
+			// model calls adapt_to_platform with the exact ids — keeping raw ids and
+			// tool names out of the conversation UI.
+			if len(msg.SizeIDs) > 0 {
+				text = "[adapt sizes: " + strings.Join(msg.SizeIDs, ", ") + "] " + text
 			}
 			// Lossless compression defaults to on; an explicit false disables it.
 			lossless := msg.Lossless == nil || *msg.Lossless

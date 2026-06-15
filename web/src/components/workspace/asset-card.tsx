@@ -139,7 +139,7 @@ export function AssetCard({
       </ContextMenuTrigger>
       <ContextMenuContent>
         <ContextMenuItem onSelect={() => onPreview(asset)}>放大预览</ContextMenuItem>
-        {!isVideo && <ContextMenuItem onSelect={() => onCrop(asset)}>切尺寸</ContextMenuItem>}
+        {!isVideo && <ContextMenuItem onSelect={() => onCrop(asset)}>适配尺寸</ContextMenuItem>}
         {!isVideo && <ContextMenuItem onSelect={() => onPreview(asset)}>二次调整</ContextMenuItem>}
         {!isVideo && <ContextMenuItem onSelect={() => onVideo(asset)}>生成视频</ContextMenuItem>}
         {/* 视频裁剪/抽帧暂禁用（功能待完善）；onVideoOps 透传链保留，完善后去掉 disabled 即恢复 */}

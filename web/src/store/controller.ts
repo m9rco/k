@@ -447,7 +447,7 @@ export function useAppController() {
   // sendNow performs the actual WS send for one user message: it appends the
   // user bubble, shows the loading state, and emits the user_message frame with
   // the current asset display order. Callers gate on `thinking` before calling.
-  const sendNow = React.useCallback((value: string, ref?: string | string[]) => {
+  const sendNow = React.useCallback((value: string, ref?: string | string[], sizeIds?: string[]) => {
     const ws = wsRef.current;
     if (!ws || ws.readyState !== WebSocket.OPEN) {
       toast("连接尚未就绪，请稍候");
@@ -464,6 +464,9 @@ export function useAppController() {
     } else if (ref) {
       payload.ref = ref;
     }
+    // Hidden platform-adaptation size ids: sent to the agent, not shown in the
+    // bubble (the displayed text already names the sizes in human terms).
+    if (sizeIds && sizeIds.length) payload.sizeIds = sizeIds;
     ws.send(JSON.stringify(payload));
     // Sticky-last-output: consume the explicit selection now that it is captured
     // in the payload. The next turn defaults to the produced output (auto-selected
@@ -502,7 +505,7 @@ export function useAppController() {
     if (next) {
       setState((s) => ({ ...s, queue: s.queue.slice(1) }));
       // Defer so the thinking=false / queue update lands before the next send.
-      setTimeout(() => sendNow(next.text, next.ref), 0);
+      setTimeout(() => sendNow(next.text, next.ref, next.sizeIds), 0);
     }
   }, [clearLoading, flushTyper, finishPendingTools, refreshContext, setChat, sendNow]);
 
@@ -619,14 +622,14 @@ export function useAppController() {
   // ============ actions ============
   // sendMessage routes a user input: when a turn is in flight it joins the
   // pending queue (auto-flushed on turn_end); otherwise it sends immediately.
-  const sendMessage = React.useCallback((text: string, ref?: string | string[]) => {
+  const sendMessage = React.useCallback((text: string, ref?: string | string[], sizeIds?: string[]) => {
     const value = text.trim();
     if (!value) return;
     if (stateRef.current.thinking) {
-      setState((s) => ({ ...s, queue: [...s.queue, { id: uid("q"), text: value, ref }] }));
+      setState((s) => ({ ...s, queue: [...s.queue, { id: uid("q"), text: value, ref, sizeIds }] }));
       return;
     }
-    sendNow(value, ref);
+    sendNow(value, ref, sizeIds);
   }, [sendNow]);
 
   // promoteQueued moves a queued message to the front so it is the next to send.

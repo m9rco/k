@@ -29,6 +29,12 @@ type Inbound struct {
 	// "图N → asset_id" numbering map injected into the agent context, so the
 	// model understands user references like "图2/图3".
 	AssetOrder []string `json:"assetOrder,omitempty"`
+	// SizeIDs carries platform size ids the user picked in the size selector for
+	// a platform-adaptation request. They are NOT shown in the chat bubble; the
+	// server surfaces them to the agent as a hidden hint so the model calls
+	// adapt_to_platform with the exact ids without the user seeing raw ids/tool
+	// names. Empty for ordinary messages.
+	SizeIDs []string `json:"sizeIds,omitempty"`
 	// Lossless toggles program-side PNG lossless optimization of image products.
 	// Pointer so an omitted field defaults to enabled while an explicit false
 	// disables it.

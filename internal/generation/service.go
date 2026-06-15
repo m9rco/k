@@ -3,6 +3,7 @@ package generation
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"image"
 	"log"
@@ -48,6 +49,9 @@ type Service struct {
 	// completes successfully. Used by the orchestrator to track the last produced
 	// asset so follow-up turns default to editing it.
 	onAsset func(sessionID, assetID string)
+	// cropper backs platform adaptation: catalog lookup (route + prompt slots) and
+	// the deterministic crop fast path. Wired via SetCropper; nil disables adapt.
+	cropper Cropper
 
 	// params caches each task's request so a failed product can be retried
 	// without the caller re-supplying inputs (short-term in-memory store, D7).
@@ -120,6 +124,17 @@ type GenerateParams struct {
 	// task fixes its provider at Start, so switching models mid-flight does not
 	// affect an in-progress task.
 	ProviderOverride *config.ImageProviderConfig
+	// --- platform adaptation (Slots.Kind == EditAdaptPlatform) ---
+	// AdaptChannelID / AdaptSizeID record the target placement so the product's
+	// Meta carries the same channel/size attribution as a pure crop (packaging +
+	// dedup parity). AdaptWidth / AdaptHeight are the exact target platform size:
+	// the provider output is converged (contain) down to them after generation,
+	// same范式 as icon. All zero/empty for non-adaptation tasks.
+	AdaptChannelID string
+	AdaptSizeID    string
+	AdaptSizeName  string
+	AdaptWidth     int
+	AdaptHeight    int
 }
 
 // primaryAndExtras resolves the effective reference list: the primary asset id
@@ -304,6 +319,15 @@ func (s *Service) run(ctx context.Context, taskID string, p GenerateParams) {
 		}
 		wantW, wantH = iconW, iconH
 	}
+	// 平台适配：目标是平台尺寸（provider 会 snap 到支持的 enum，产物之后再由 crop
+	// 收敛到精确平台尺寸，同 icon 范式）。请求里携带目标平台宽高引导构图比例。
+	adaptW, adaptH := 0, 0
+	if p.Slots.Kind == EditAdaptPlatform {
+		adaptW, adaptH = p.Slots.TargetWidth, p.Slots.TargetHeight
+		if adaptW > 0 && adaptH > 0 {
+			wantW, wantH = adaptW, adaptH
+		}
+	}
 	// Source-less generation (text-to-image) has no source dimensions to inherit;
 	// use the explicit target size from the request when provided.
 	if wantW == 0 && wantH == 0 {
@@ -354,6 +378,18 @@ func (s *Service) run(ctx context.Context, taskID string, p GenerateParams) {
 		}
 	}
 
+	// adapt_platform: same convergence范式 as icon — the provider snaps to its
+	// supported size enum, so contain-converge the product down to the exact
+	// target platform size (subject preserved, no crop, padded). Final persisted
+	// product is then precisely the requested placement size.
+	if p.Slots.Kind == EditAdaptPlatform && adaptW > 0 && adaptH > 0 {
+		if conv, err := crop.CropBytesWithOptions(out.Data, adaptW, adaptH, crop.Options{Mode: crop.ModeContain}); err != nil {
+			log.Printf("gen.run: task=%s adapt converge to %dx%d FAILED: %v (keeping provider output)", taskID, adaptW, adaptH, err)
+		} else {
+			out.Data = conv.Data
+		}
+	}
+
 	// Persist the product.
 	assetID := s.newID("asset")
 	if err := os.MkdirAll(s.assetDir, 0o755); err != nil {
@@ -370,6 +406,21 @@ func (s *Service) run(ctx context.Context, taskID string, p GenerateParams) {
 	// Record the produced image's actual dimensions so二次调整产物尺寸可追溯。
 	outW, outH := decodeDimensions(outData)
 	now := s.now()
+	// Platform-adaptation products carry channel/size attribution in Meta, in the
+	// same shape as crop products (crop.CropMeta), so packaging organizes both by
+	// 渠道/尺寸 without distinguishing the path, and session-level dedup can match
+	// (sourceAssetId, sizeId). Via=ai marks the repaint path.
+	meta := ""
+	if p.Slots.Kind == EditAdaptPlatform && p.AdaptSizeID != "" {
+		b, _ := json.Marshal(crop.CropMeta{
+			ChannelID:     p.AdaptChannelID,
+			SizeID:        p.AdaptSizeID,
+			SizeName:      p.AdaptSizeName,
+			SourceAssetID: primaryID,
+			Via:           crop.ViaAI,
+		})
+		meta = string(b)
+	}
 	if err := s.store.InsertAsset(store.AssetRecord{
 		ID:        assetID,
 		SessionID: p.SessionID,
@@ -380,6 +431,7 @@ func (s *Service) run(ctx context.Context, taskID string, p GenerateParams) {
 		Height:    outH,
 		Provider:  out.Provider,
 		ParentID:  primaryID,
+		Meta:      meta,
 		CreatedAt: now,
 	}); err != nil {
 		s.fail(taskID, p.SessionID, fmt.Sprintf("persist: %v", err))

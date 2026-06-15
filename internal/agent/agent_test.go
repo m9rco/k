@@ -123,10 +123,10 @@ func TestToolsBuildWhitelist(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// edit_image, crop_to_sizes, list_platform_sizes, clarify_intent, generate_icon
-	// (video and crawl are gated behind configured providers, absent here).
-	if len(tools) != 5 {
-		t.Fatalf("expected 5 whitelist tools, got %d", len(tools))
+	// edit_image, crop_to_sizes, list_platform_sizes, clarify_intent, generate_icon,
+	// adapt_to_platform (video and crawl are gated behind configured providers, absent here).
+	if len(tools) != 6 {
+		t.Fatalf("expected 6 whitelist tools, got %d", len(tools))
 	}
 	names := map[string]bool{}
 	for _, tl := range tools {
@@ -141,6 +141,9 @@ func TestToolsBuildWhitelist(t *testing.T) {
 	}
 	if !names["generate_icon"] {
 		t.Error("generate_icon tool not registered")
+	}
+	if !names["adapt_to_platform"] {
+		t.Error("adapt_to_platform tool not registered")
 	}
 }
 
@@ -517,4 +520,3 @@ func TestOrchestratorLastProduced(t *testing.T) {
 		t.Errorf("s1 last produced should update to asset_z, got %q", got)
 	}
 }
-

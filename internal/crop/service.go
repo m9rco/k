@@ -29,10 +29,17 @@ type Service struct {
 	byID map[string]sizeRef
 }
 
-// sizeRef is a catalog size plus the id of the channel it belongs to.
+// sizeRef is a catalog size plus the channel/asset-type it belongs to. The
+// human-readable channel and asset-type names — plus the asset-type key
+// (screenshot/icon/cover/banner/…) — are carried alongside so the platform-
+// adaptation prompt can describe the target placement and apply use-specific
+// composition guidance without a second catalog walk.
 type sizeRef struct {
-	size      config.Size
-	channelID string
+	size          config.Size
+	channelID     string
+	channelName   string
+	assetTypeKey  string
+	assetTypeName string
 }
 
 // NewService constructs a crop service over the channel catalog.
@@ -51,7 +58,7 @@ func NewService(channels []config.Channel, assetDir string, st *store.Store, new
 				if sz.ID == "" {
 					continue
 				}
-				s.byID[sz.ID] = sizeRef{size: sz, channelID: ch.ID}
+				s.byID[sz.ID] = sizeRef{size: sz, channelID: ch.ID, channelName: ch.Name, assetTypeKey: at.Type, assetTypeName: at.Name}
 			}
 		}
 	}
@@ -79,12 +86,67 @@ type CropResult struct {
 	Bytes int `json:"bytes"`
 }
 
+// Via values record which path produced an adaptation/crop product, stored on
+// CropMeta.Via and used by platform-adaptation dedup and packaging.
+const (
+	ViaCrop = "crop" // deterministic fast path / manual fallback
+	ViaAI   = "ai"   // platform-adaptation repaint
+)
+
 // CropMeta is the JSON payload stored on a cropped asset's Meta field so
-// downstream features (zip packaging) can organize products by channel/size.
+// downstream features (zip packaging) can organize products by channel/size,
+// and so platform adaptation can dedup by (source asset, target size).
 type CropMeta struct {
 	ChannelID string `json:"channelId"`
 	SizeID    string `json:"sizeId"`
 	SizeName  string `json:"sizeName"`
+	// SourceAssetID is the asset this product was derived from. Platform
+	// adaptation keys its session-level dedup on (SourceAssetID, SizeID). Empty
+	// on legacy products (treated as a plain crop with no dedup identity).
+	SourceAssetID string `json:"sourceAssetId,omitempty"`
+	// Via records which path produced this product: "crop" (deterministic fast
+	// path / manual fallback) or "ai" (platform-adaptation repaint). Empty on
+	// legacy products.
+	Via string `json:"via,omitempty"`
+}
+
+// SizeSpec describes a catalog size resolved by its unique id, with the owning
+// channel/asset-type names attached. Platform adaptation uses it to decide the
+// fast-path-vs-AI route and to fill the adaptation prompt's placement slots.
+type SizeSpec struct {
+	ChannelID     string
+	ChannelName   string
+	AssetTypeKey  string
+	AssetTypeName string
+	SizeID        string
+	SizeName      string
+	Width         int
+	Height        int
+	Orientation   string
+	Note          string
+	Producible    bool
+}
+
+// SizeSpec looks up a single size by its globally-unique id. ok is false when
+// no size carries that id.
+func (s *Service) SizeSpec(sizeID string) (SizeSpec, bool) {
+	ref, ok := s.byID[sizeID]
+	if !ok {
+		return SizeSpec{}, false
+	}
+	return SizeSpec{
+		ChannelID:     ref.channelID,
+		ChannelName:   ref.channelName,
+		AssetTypeKey:  ref.assetTypeKey,
+		AssetTypeName: ref.assetTypeName,
+		SizeID:        ref.size.ID,
+		SizeName:      ref.size.Name,
+		Width:         ref.size.Width,
+		Height:        ref.size.Height,
+		Orientation:   ref.size.Orientation,
+		Note:          ref.size.Note,
+		Producible:    ref.size.Producible,
+	}, true
 }
 
 // CropToSizes crops the source asset to each requested size id, persisting every
@@ -133,7 +195,7 @@ func (s *Service) CropToSizes(sessionID, sourceAssetID string, sizeIDs []string,
 			return nil, fmt.Errorf("write crop file: %w", err)
 		}
 		now := s.now()
-		meta, _ := json.Marshal(CropMeta{ChannelID: ref.channelID, SizeID: sz.ID, SizeName: sz.Name})
+		meta, _ := json.Marshal(CropMeta{ChannelID: ref.channelID, SizeID: sz.ID, SizeName: sz.Name, SourceAssetID: sourceAssetID, Via: ViaCrop})
 		if err := s.store.InsertAsset(store.AssetRecord{
 			ID:        id,
 			SessionID: sessionID,

@@ -36,6 +36,7 @@ export interface QueuedMessage {
   id: string;
   text: string;
   ref?: string | string[];
+  sizeIds?: string[];
 }
 
 export interface AppState {

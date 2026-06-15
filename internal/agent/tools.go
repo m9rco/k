@@ -539,6 +539,61 @@ func (d ToolDeps) newListSizesTool() (tool.InvokableTool, error) {
 	)
 }
 
+// --- adapt_to_platform -------------------------------------------------------
+
+type adaptArgs struct {
+	SourceAssetID     string   `json:"source_asset_id" jsonschema:"description=ID of the workspace image to adapt"`
+	ReferenceAssetIDs []string `json:"reference_asset_ids,omitempty" jsonschema:"description=Optional extra reference images (up to 6). First is primary when source_asset_id is omitted."`
+	SizeIDs           []string `json:"size_ids" jsonschema:"description=Unique platform size ids to adapt to (e.g. taptap.banner.1120x280). Use list_platform_sizes first."`
+}
+
+type adaptOutcomeItem struct {
+	SizeID  string `json:"size_id"`
+	Via     string `json:"via"`
+	AssetID string `json:"asset_id,omitempty"`
+	TaskID  string `json:"task_id,omitempty"`
+}
+
+// adaptResult wraps the per-size outcomes plus a status so asyncMarshal can
+// suppress a duplicate same-turn call (like the other async tools).
+type adaptResult struct {
+	Status   string             `json:"status,omitempty"`
+	Outcomes []adaptOutcomeItem `json:"outcomes,omitempty"`
+}
+
+func (d ToolDeps) newAdaptTool() (tool.InvokableTool, error) {
+	return utils.InferTool(
+		"adapt_to_platform",
+		"平台适配：把工作区图片适配到一个或多个平台广告位尺寸，在保留主体与核心宣发意图的前提下重新组织构图。"+
+			"触发词：切尺寸/裁剪/适配尺寸/按某平台/各平台/广告位/按渠道出图/宣发图适配。"+
+			"智能路由：宽高比一致时走确定性裁剪快路径（免费即时）；横竖翻转或比例差异大时调用图生图模型补全画面而非裁切主体。"+
+			"同一会话内相同源图+尺寸只请求一次（后续复用产物）。"+
+			"Use list_platform_sizes first to get valid size_ids. "+
+			"Fast-path sizes return asset_id immediately; AI-repaint sizes return task_id (progress over SSE).",
+		func(ctx context.Context, a adaptArgs) (adaptResult, error) {
+			sourceID := a.SourceAssetID
+			if sourceID == "" && len(a.ReferenceAssetIDs) > 0 {
+				sourceID = a.ReferenceAssetIDs[0]
+			}
+			log.Printf("adapt_to_platform: source=%q sizes=%v", sourceID, a.SizeIDs)
+			if !d.dedup.firstSeen("adapt_to_platform|" + sourceID + "|" + strings.Join(a.SizeIDs, ",")) {
+				log.Printf("adapt_to_platform: duplicate same-turn call suppressed")
+				return adaptResult{Status: statusDuplicate}, nil
+			}
+			outcomes, err := d.Generation.AdaptToPlatform(ctx, d.SessionID, sourceID, a.SizeIDs, d.Lossless, d.ImageOverride)
+			if err != nil {
+				return adaptResult{}, err
+			}
+			items := make([]adaptOutcomeItem, 0, len(outcomes))
+			for _, o := range outcomes {
+				items = append(items, adaptOutcomeItem{SizeID: o.SizeID, Via: o.Via, AssetID: o.AssetID, TaskID: o.TaskID})
+			}
+			return adaptResult{Outcomes: items}, nil
+		},
+		utils.WithMarshalOutput(asyncMarshal("好的，正在为你适配各平台尺寸，产物会陆续出现在左侧工作区。")),
+	)
+}
+
 // --- image_to_video --------------------------------------------------------
 
 type videoArgs struct {
@@ -818,6 +873,11 @@ func (d ToolDeps) Tools() ([]tool.BaseTool, error) {
 		return nil, fmt.Errorf("icon tool: %w", err)
 	}
 	tools := []tool.BaseTool{edit, cropTool, listSizes, clarify, icon}
+	adaptTool, err := d.newAdaptTool()
+	if err != nil {
+		return nil, fmt.Errorf("adapt tool: %w", err)
+	}
+	tools = append(tools, adaptTool)
 	if d.TextToImage != nil {
 		t2i, err := d.newTextToImageTool()
 		if err != nil {
@@ -856,6 +916,7 @@ func AsyncTaskTools() map[string]struct{} {
 		"edit_image":               {},
 		"generate_icon":            {},
 		"generate_image_from_text": {},
+		"adapt_to_platform":        {},
 		"image_to_video":           {},
 		"search_images":            {},
 		// clarify_intent ends the turn; result must not feed back to model.

@@ -26,6 +26,12 @@ const (
 	// EditTextToImage generates a brand-new image purely from a text description
 	// (no source image). Used by the text-to-image capability (wan/qwen).
 	EditTextToImage EditKind = "text_to_image"
+	// EditAdaptPlatform re-composes a source image to fit a target platform size
+	// (横竖翻转 / 比例差异大时由智能路由选中)。It is NOT a pure crop: the model
+	// repaints/extends the scene to the new aspect ratio while preserving the
+	// subject and core marketing intent. Output is converged to the exact target
+	// size after generation (see service.run, same范式 as EditIcon).
+	EditAdaptPlatform EditKind = "adapt_platform"
 )
 
 // DefaultIconSize is the icon edge length used when the user gives no size.
@@ -51,6 +57,21 @@ type Slots struct {
 	TextToImageDesc string
 	// ReuseComposition requests preserving the reference image's composition.
 	ReuseComposition bool
+	// --- platform adaptation (EditAdaptPlatform) ---
+	// These describe the target placement so the template can express the
+	// platform-adaptation intent in model-agnostic terms. ChannelName /
+	// AssetTypeName / SizeNote are catalog-sourced strings; they are Sanitized
+	// before templating (they originate from server config, not user free text,
+	// but sanitizing keeps the template uniformly injection-safe). AdaptDesc is
+	// the optional user hint and is always Sanitized.
+	ChannelName   string
+	AssetTypeKey  string // catalog type key: icon / cover / banner / screenshot / video / h5 / …
+	AssetTypeName string
+	Orientation   string // landscape / portrait / square
+	TargetWidth   int
+	TargetHeight  int
+	SizeNote      string // e.g. 无文案 / 仅 logo / 圆角 / 透明底 / 安全区
+	AdaptDesc     string // optional user description for the adaptation
 }
 
 // injectionPatterns match attempts to override system behavior. Matches are
@@ -154,6 +175,32 @@ func BuildPrompt(slots Slots, palette []PaletteColor) (string, error) {
 		b.WriteString(desc)
 		b.WriteString(". Coherent composition, balanced lighting, polished and production-ready.")
 		return b.String(), nil
+	case EditAdaptPlatform:
+		b.WriteString("Adapt this marketing image for a new platform placement. ")
+		b.WriteString("Keep the main subject/characters and the core marketing intent fully intact — do NOT crop the subject out, omit, or alter the key visual message. ")
+		// Per-asset-type composition guidance so the model generates the RIGHT
+		// kind of asset, not just a resized version of the source.
+		if guide := assetTypeGuide(slots.AssetTypeKey); guide != "" {
+			b.WriteString(guide)
+			b.WriteString(" ")
+		}
+		if placement := buildPlacementPhrase(slots); placement != "" {
+			b.WriteString("Recompose for ")
+			b.WriteString(placement)
+			b.WriteString(". ")
+		}
+		b.WriteString("Re-frame and extend/repaint the scene and background to fill the new aspect ratio naturally, rather than cropping; reposition the subject for a balanced composition at the target proportions. ")
+		if note := Sanitize(slots.SizeNote); note != "" {
+			b.WriteString("Respect this placement constraint: ")
+			b.WriteString(note)
+			b.WriteString(". ")
+		}
+		if hint := Sanitize(slots.AdaptDesc); hint != "" {
+			b.WriteString("Additional direction: ")
+			b.WriteString(hint)
+			b.WriteString(". ")
+		}
+		b.WriteString("Production-ready, polished result.")
 	default:
 		return "", fmt.Errorf("unsupported edit kind %q", slots.Kind)
 	}
@@ -176,4 +223,48 @@ func BuildPrompt(slots Slots, palette []PaletteColor) (string, error) {
 	b.WriteString(" ")
 	b.WriteString(harmonyConstraint)
 	return b.String(), nil
+}
+
+// buildPlacementPhrase composes the sanitized "<orientation> WxH <channel>
+// <assetType> placement" fragment for the platform-adaptation template. Every
+// piece is optional and Sanitized; missing pieces are simply omitted so the
+// phrase stays well-formed (e.g. with only dimensions: "a 1080×1920 placement").
+func buildPlacementPhrase(slots Slots) string {
+	var parts []string
+	if o := Sanitize(slots.Orientation); o != "" {
+		parts = append(parts, o)
+	}
+	if slots.TargetWidth > 0 && slots.TargetHeight > 0 {
+		parts = append(parts, fmt.Sprintf("%d×%d", slots.TargetWidth, slots.TargetHeight))
+	}
+	if ch := Sanitize(slots.ChannelName); ch != "" {
+		parts = append(parts, ch)
+	}
+	if at := Sanitize(slots.AssetTypeName); at != "" {
+		parts = append(parts, at)
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return "a " + strings.Join(parts, " ") + " placement"
+}
+
+// assetTypeGuide returns composition instructions specific to the asset type so
+// the image model produces the RIGHT kind of asset — not just a resized source.
+// Keys match the catalog's AssetType.Type values (channels.json).
+func assetTypeGuide(key string) string {
+	switch key {
+	case "icon":
+		return "Generate a clean app/game icon: center the main subject with balanced padding, bold and instantly recognizable at small sizes, simple or transparent background, icon-style composition."
+	case "cover":
+		return "Generate a cover image: place the focal subject prominently in the upper-center area leaving breathing room, leave the lower portion for potential title/copy overlay, cinematic framing."
+	case "banner":
+		return "Generate a horizontal banner: wide promotional composition, subject on one side with open space for copy on the other, strong visual hierarchy, suitable for advertising placement."
+	case "screenshot":
+		return "Generate a screenshot-style promotional image: show the key game scene or UI moment clearly, realistic in-game framing, highlight the core gameplay or visual appeal."
+	case "video":
+		return "Generate a video thumbnail/cover: strong focal subject, high contrast, thumbnail-optimized composition that reads well at small sizes."
+	default:
+		return ""
+	}
 }
