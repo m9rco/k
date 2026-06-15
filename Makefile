@@ -40,8 +40,9 @@ kill-port:
 run: build kill-port
 	./bin/server
 
-deploy:
+deploy: web
 	GOOS=linux GOARCH=amd64 go build -o $(BINARY) ./cmd/server
+	rsync -av configs $(TARGET)/
 	rsync -av $(BINARY) $(TARGET)
 # 	ssh $(TARGET_HOST) "cd $(TARGET_PATH) && supervisorctl restart checkersvrd"
 

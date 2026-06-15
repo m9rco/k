@@ -17,8 +17,10 @@ const (
 var AllScenes = []ModelScene{SceneChat, SceneImage, SceneTextToImage, SceneVideo}
 
 // CatalogEntry is one selectable model in the catalog. Provider is the adapter
-// selection key (openai/anthropic/gemini/dashscope/veo/happyhorse); IconKey maps
-// to a built-in vendor brand SVG on the frontend.
+// selection key (openai/taiji/anthropic/gemini/dashscope/veo/happyhorse); IconKey
+// maps to a built-in vendor brand SVG on the frontend. taiji shares the
+// OpenAI-compatible transport with "openai" but carries the openai_infer quirk
+// via its ProviderProfile (see provider.go).
 //
 // ID is the stable logical key: it is what the frontend offers, what a session's
 // preference stores, and how an entry is looked up. Model is the provider-facing
@@ -40,6 +42,31 @@ type CatalogEntry struct {
 	// e.g. Veo lives at the OpenAI-style ".../v1" host while happyhorse (same video
 	// scene) lives under ".../alibailian". Empty means "use the scene credential".
 	BaseURL string `json:"-"`
+	// Aliases are additional provider wire names that map back to this same entry.
+	// A single logical model is often exposed under several wire names — taiji's
+	// DeepSeek V4 Flash ships as -Online-16k / -Online-32k context variants that
+	// are the same catalog model. Listing them here lets catalogIDForModel reverse
+	// a configured wire name (e.g. CHAT_PRIMARY_MODEL=...-16k) back to this id, so
+	// the frontend's "default" badge matches regardless of which variant is set.
+	// WireModel (the name actually SENT to the API) is unaffected — it stays the
+	// canonical Model/ID; aliases only widen reverse lookup.
+	Aliases []string `json:"-"`
+}
+
+// matchesWire reports whether model names this entry by any of its identifiers:
+// the canonical wire name, the stable id, or a configured alias. Used by reverse
+// lookup (configured wire name -> catalog id) so context-size variants of one
+// logical model all resolve to the same entry.
+func (e CatalogEntry) matchesWire(model string) bool {
+	if model == e.WireModel() || model == e.ID {
+		return true
+	}
+	for _, a := range e.Aliases {
+		if model == a {
+			return true
+		}
+	}
+	return false
 }
 
 // WireModel returns the provider-facing model name to send to the API: the
@@ -56,12 +83,12 @@ func (e CatalogEntry) WireModel() string {
 // configured. Adding a model here (plus its credentials) makes it selectable.
 var modelCatalog = []CatalogEntry{
 	// 逻辑推理 (chat)
+	{ID: "deepseek-v4-flash-tencent", DisplayName: "DeepSeek WOA（太极）", Scene: SceneChat, Vendor: "DeepSeek", IconKey: "deepseek", Provider: "taiji", Model: "DeepSeek-V4-Flash-Online-32k", Aliases: []string{"DeepSeek-V4-Flash-Online-16k"}},
 	{ID: "deepseek-v4-flash", DisplayName: "DeepSeek V4 Flash", Scene: SceneChat, Vendor: "DeepSeek", IconKey: "deepseek", Provider: "openai"},
 	{ID: "gpt-5.4", DisplayName: "GPT-5.4", Scene: SceneChat, Vendor: "OpenAI", IconKey: "openai", Provider: "openai"},
 	{ID: "doubao-seed-2-0-mini-260428", DisplayName: "Doubao Seed 2.0 mini", Scene: SceneChat, Vendor: "Doubao", IconKey: "doubao", Provider: "openai"},
 	{ID: "claude-haiku-4-5-20251001", DisplayName: "Claude Haiku 4.5", Scene: SceneChat, Vendor: "Anthropic", IconKey: "anthropic", Provider: "anthropic"},
 	{ID: "claude-sonnet-4-6", DisplayName: "Claude Sonnet 4.6", Scene: SceneChat, Vendor: "Anthropic", IconKey: "anthropic", Provider: "anthropic"},
-	{ID: "deepseek-v4-flash-tencent", DisplayName: "DeepSeek WOA（太极）", Scene: SceneChat, Vendor: "DeepSeek", IconKey: "deepseek", Provider: "openai", Model: "DeepSeek-V4-Flash-Online-32k"},
 
 	// 图生图 (image)
 	{ID: "gpt-image-2", DisplayName: "GPT Image 2", Scene: SceneImage, Vendor: "OpenAI", IconKey: "openai", Provider: "openai"},
@@ -80,9 +107,53 @@ var modelCatalog = []CatalogEntry{
 	{ID: "veo_3_1_components_vip", DisplayName: "Veo 3.1", Scene: SceneVideo, Vendor: "Google", IconKey: "google", Provider: "veo", Model: "veo-3.1", BaseURL: "https://yunwu.ai"},
 }
 
-// sceneCredential returns the configured credential backing a scene (base_url +
-// api_key). All catalog models for a scene share these via the COMMON fallback;
-// switching a model only changes provider+model, not the credential.
+// endpointCred is a resolved base_url + api_key pair for one chat gateway.
+type endpointCred struct {
+	baseURL string
+	apiKey  string
+}
+
+// chatCredentialFor resolves the gateway credential a chat catalog ENTRY should
+// use, based on its provider — not on a single per-scene credential. This is what
+// lets one chat scene mix gateways: a taiji entry hits taiji while openai/
+// anthropic entries hit the shared yunwu gateway.
+//
+// Resolution order:
+//  1. provider matches ChatPrimary's provider AND ChatPrimary has a key — use it
+//     (the primary IS this provider, so its credential is authoritative);
+//  2. a dedicated <PROVIDER>_* credential is configured — use it;
+//  3. standalone providers (taiji) stop here: they must NOT fall back to the
+//     common/yunwu gateway (which can't serve their models), so an unconfigured
+//     standalone provider yields no credential and the entry is filtered out;
+//  4. the shared/common (yunwu) credential — preferring an explicitly resolved
+//     COMMON_*/YUNWU_* credential, and otherwise reusing ChatPrimary's credential
+//     when the primary itself is a shared-gateway (non-standalone) provider, which
+//     is the typical single-gateway deployment where primary==common.
+//
+// Returns ok=false when no usable credential exists for the entry.
+func (c *Config) chatCredentialFor(provider string) (cred endpointCred, ok bool) {
+	p := strings.ToLower(strings.TrimSpace(provider))
+	primaryProv := strings.ToLower(strings.TrimSpace(c.ChatPrimary.Provider))
+	if p == primaryProv && c.ChatPrimary.APIKey != "" {
+		return endpointCred{baseURL: c.ChatPrimary.BaseURL, apiKey: c.ChatPrimary.APIKey}, true
+	}
+	if dc, has := c.chatDedicated[p]; has && dc.apiKey != "" {
+		return dc, true
+	}
+	if ProfileForProvider(provider).Standalone {
+		return endpointCred{}, false // never proxy a standalone provider via yunwu
+	}
+	if c.chatCommon.apiKey != "" {
+		return c.chatCommon, true
+	}
+	// No separate common credential configured: when the primary is itself a
+	// shared-gateway provider, its credential doubles as the common one.
+	if c.ChatPrimary.APIKey != "" && !ProfileForProvider(c.ChatPrimary.Provider).Standalone {
+		return endpointCred{baseURL: c.ChatPrimary.BaseURL, apiKey: c.ChatPrimary.APIKey}, true
+	}
+	return endpointCred{}, false
+}
+
 func (c *Config) sceneCredential(scene ModelScene) (baseURL, apiKey string) {
 	switch scene {
 	case SceneChat:
@@ -108,7 +179,7 @@ func catalogIDForModel(scene ModelScene, model string) string {
 		return ""
 	}
 	for _, e := range modelCatalog {
-		if e.Scene == scene && (e.WireModel() == model || e.ID == model) {
+		if e.Scene == scene && e.matchesWire(model) {
 			return e.ID
 		}
 	}
@@ -155,11 +226,27 @@ func (c *Config) SceneDefaults() map[ModelScene]string {
 func (c *Config) AvailableModels() []CatalogEntry {
 	out := make([]CatalogEntry, 0, len(modelCatalog))
 	for _, e := range modelCatalog {
-		if _, key := c.sceneCredential(e.Scene); key != "" {
+		if _, ok := c.entryCredential(e); ok {
 			out = append(out, e)
 		}
 	}
 	return out
+}
+
+// entryCredential resolves the base_url + api_key a specific catalog entry would
+// use. Chat entries resolve per-provider (so a scene can mix taiji + yunwu);
+// image-like scenes keep the single per-scene credential (one gateway per scene).
+// ok=false means the entry has no usable credential and must be hidden/rejected.
+func (c *Config) entryCredential(e CatalogEntry) (endpointCred, bool) {
+	if e.Scene == SceneChat {
+		cred, ok := c.chatCredentialFor(e.Provider)
+		return cred, ok
+	}
+	base, key := c.sceneCredential(e.Scene)
+	if key == "" {
+		return endpointCred{}, false
+	}
+	return endpointCred{baseURL: base, apiKey: key}, true
 }
 
 // AvailableModelsByScene groups AvailableModels by scene for the API/UI.
@@ -185,28 +272,41 @@ func catalogEntry(scene ModelScene, modelID string) (CatalogEntry, bool) {
 // IsModelAvailable reports whether modelID is a valid, configured choice for the
 // scene. Used to reject selections of unknown/unconfigured models.
 func (c *Config) IsModelAvailable(scene ModelScene, modelID string) bool {
-	if _, ok := catalogEntry(scene, modelID); !ok {
+	e, ok := catalogEntry(scene, modelID)
+	if !ok {
 		return false
 	}
-	_, key := c.sceneCredential(scene)
-	return key != ""
+	_, credOK := c.entryCredential(e)
+	return credOK
 }
 
-// ResolveChatModel builds the ModelConfig for a chat-scene selection, reusing
-// the configured chat credential and overriding provider+model from the catalog.
-// Returns false when the id is not a valid/available chat model.
+// ResolveChatModel builds the ModelConfig for a chat-scene selection, resolving
+// the gateway credential PER PROVIDER (catalog.entryCredential) and overriding
+// provider+model from the catalog. Returns false when the id is not a
+// valid/available chat model. Per-provider resolution is what lets a session
+// switch between a taiji model and a yunwu model in the same scene without one's
+// credential leaking onto the other (the bug where ChatPrimary=taiji routed every
+// selected chat model through taiji's gateway).
 func (c *Config) ResolveChatModel(modelID string) (ModelConfig, bool) {
 	e, ok := catalogEntry(SceneChat, modelID)
-	if !ok || !c.IsModelAvailable(SceneChat, modelID) {
+	if !ok {
 		return ModelConfig{}, false
 	}
-	base, key := c.sceneCredential(SceneChat)
+	cred, ok := c.chatCredentialFor(e.Provider)
+	if !ok {
+		return ModelConfig{}, false
+	}
 	return ModelConfig{
 		Provider: e.Provider,
 		Model:    e.WireModel(),
-		BaseURL:  base,
-		APIKey:   key,
+		BaseURL:  cred.baseURL,
+		APIKey:   cred.apiKey,
 		Thinking: c.ChatPrimary.Thinking,
+		// openai_infer follows the provider (taiji => true), so selecting the
+		// taiji-hosted entry at runtime enables function-calling the same way the
+		// server-default path does. Without this, a runtime switch to taiji would
+		// silently lose tool_calls.
+		OpenAIInfer: ProfileForProvider(e.Provider).OpenAIInfer,
 	}, true
 }
 

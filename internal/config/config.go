@@ -29,6 +29,17 @@ type ModelConfig struct {
 	// some model ids reject the thinking field or change tool-calling behavior
 	// when it is set, so it must be opted into explicitly.
 	Thinking bool
+	// OpenAIInfer injects the taiji-private "openai_infer": true field into the
+	// chat-completions body. taiji's DeepSeek-*-Online models otherwise route
+	// every "needs external data" turn through their built-in web search and
+	// never emit tool_calls, which breaks our tool-driven agent; this flag flips
+	// them onto the standard OpenAI function-calling protocol. It is a
+	// non-standard field and some gateways (e.g. yunwu) hang when they receive it,
+	// so it must only be set for taiji-backed models. The default is derived from
+	// the provider (see ProviderProfile / ProfileForProvider): provider "taiji"
+	// turns it on, every other provider leaves it off. An env override
+	// (CHAT_*_OPENAI_INFER) can force either way per deployment.
+	OpenAIInfer bool
 }
 
 // ImageProviderConfig describes one image-generation backend (gpt-image-1).
@@ -132,6 +143,19 @@ type Config struct {
 	ChatTest ModelConfig
 	// UseTestModel switches the agent to ChatTest when true.
 	UseTestModel bool
+
+	// chatCommon is the shared (yunwu/common) chat gateway credential. Catalog
+	// chat models whose provider is NOT standalone (openai/anthropic/deepseek —
+	// all proxied by yunwu) resolve their base_url/api_key from here, so they stay
+	// usable regardless of which model ChatPrimary points at. Resolved once in
+	// Load from COMMON_*/YUNWU_*; unexported because it's an internal routing
+	// detail, not a server-facing knob.
+	chatCommon endpointCred
+	// chatDedicated holds per-provider chat credentials keyed by lowercased
+	// provider name, populated from dedicated <PROVIDER>_API_KEY/_BASE_URL env
+	// vars (e.g. TAIJI_API_KEY). A standalone provider (taiji) that is not the
+	// primary model still becomes selectable when its dedicated credential is set.
+	chatDedicated map[string]endpointCred
 
 	// ImagePrimary and ImageBackup are the two gpt-image-1 providers.
 	ImagePrimary ImageProviderConfig
@@ -326,13 +350,17 @@ func Load(platformsPath string) (*Config, error) {
 			BaseURL:  chatPrimary.baseURL,
 			APIKey:   chatPrimary.apiKey,
 			Thinking: envBool("CHAT_PRIMARY_THINKING", false),
+			// Default comes from the provider profile (taiji => true) so picking the
+			// provider is enough; the env var stays an explicit per-deployment override.
+			OpenAIInfer: envBool("CHAT_PRIMARY_OPENAI_INFER", ProfileForProvider(chatPrimary.provider).OpenAIInfer),
 		},
 		ChatTest: ModelConfig{
-			Provider: chatTest.provider,
-			Model:    chatTest.model,
-			BaseURL:  chatTest.baseURL,
-			APIKey:   chatTest.apiKey,
-			Thinking: envBool("CHAT_TEST_THINKING", false),
+			Provider:    chatTest.provider,
+			Model:       chatTest.model,
+			BaseURL:     chatTest.baseURL,
+			APIKey:      chatTest.apiKey,
+			Thinking:    envBool("CHAT_TEST_THINKING", false),
+			OpenAIInfer: envBool("CHAT_TEST_OPENAI_INFER", ProfileForProvider(chatTest.provider).OpenAIInfer),
 		},
 		UseTestModel: envBool("USE_TEST_MODEL", false),
 
@@ -388,6 +416,20 @@ func Load(platformsPath string) (*Config, error) {
 		AssetRetentionHours: envInt("ASSET_RETENTION_HOURS", 0),
 
 		ContextTokenBudget: envInt("CONTEXT_TOKEN_BUDGET", 8000),
+	}
+
+	// Per-provider chat credentials. chatCommon is the shared yunwu/common gateway
+	// that proxies the standard providers (openai/anthropic/deepseek); standalone
+	// providers (taiji) get a dedicated credential so they stay selectable even
+	// when they aren't the primary chat model. Resolving these here lets a single
+	// chat scene mix gateways (catalog.chatCredentialFor) instead of forcing every
+	// chat model onto ChatPrimary's single credential.
+	cfg.chatCommon = endpointCred{baseURL: common.baseURL, apiKey: common.apiKey}
+	cfg.chatDedicated = map[string]endpointCred{
+		"taiji": {
+			baseURL: env("TAIJI_BASE_URL", ""),
+			apiKey:  env("TAIJI_API_KEY", ""),
+		},
 	}
 
 	path := platformsPath

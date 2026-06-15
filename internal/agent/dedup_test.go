@@ -141,6 +141,34 @@ func TestVideoToolDistinctCallsBothRun(t *testing.T) {
 	drainTasks(t, st)
 }
 
+// TestVideoToolDedupIgnoresAwaitResult is the regression guard for the reported
+// "生图发多个请求 + 确认话术重复两次" bug: the model emits the SAME generation
+// twice in one turn, differing only in await_result (a chaining/delivery hint,
+// not part of the produced artifact). The duplicate must still be suppressed —
+// argSig drops await_result so both collapse to one signature.
+func TestVideoToolDedupIgnoresAwaitResult(t *testing.T) {
+	deps, st := newVideoDeps(t)
+	vt, err := deps.newVideoTool()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Same source + motion; only await_result differs between the two calls.
+	if _, err := vt.InvokableRun(context.Background(), `{"source_asset_id":"src","motion":"走","await_result":true}`); err != nil {
+		t.Fatalf("first call: %v", err)
+	}
+	second, err := vt.InvokableRun(context.Background(), `{"source_asset_id":"src","motion":"走","await_result":false}`)
+	if err != nil {
+		t.Fatalf("second call: %v", err)
+	}
+	if second != "" {
+		t.Errorf("call differing only in await_result must be deduped (empty ack), got %q", second)
+	}
+	if n := countTasks(t, st); n != 1 {
+		t.Errorf("expected exactly 1 task (await_result-only difference is a duplicate), got %d", n)
+	}
+	drainTasks(t, st)
+}
+
 func TestTurnCallGuardFirstSeen(t *testing.T) {
 	g := newTurnCallGuard()
 	if !g.firstSeen("a") {

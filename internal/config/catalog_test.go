@@ -8,6 +8,11 @@ func baseConfig() *Config {
 		ImagePrimary: ImageProviderConfig{BaseURL: "https://i/v1", APIKey: "sk-img"},
 		TextToImage:  ImageProviderConfig{BaseURL: "https://t/v1", APIKey: ""}, // not configured
 		Video:        ImageProviderConfig{BaseURL: "https://v/v1", APIKey: "sk-vid", Model: "happyhorse-1.0-r2v"},
+		// chatCommon mirrors a single-gateway deployment where the shared (yunwu)
+		// credential is the same one ChatPrimary uses; taiji has its own dedicated
+		// credential so the standalone taiji entry stays selectable.
+		chatCommon:    endpointCred{baseURL: "https://c/v1", apiKey: "sk-chat"},
+		chatDedicated: map[string]endpointCred{"taiji": {baseURL: "http://taiji/openapi", apiKey: "sk-taiji"}},
 	}
 }
 

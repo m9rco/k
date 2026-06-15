@@ -94,17 +94,29 @@ func (g *turnCallGuard) firstSeen(sig string) bool {
 const statusDuplicate = "duplicate"
 
 // argSig builds a stable signature for a tool's args struct so two identical
-// same-turn calls collapse to one. It marshals to JSON (field order is stable
-// per struct). Calls that differ in any arg (including await_result) get
-// distinct signatures and both run — only byte-identical args are treated as a
-// duplicate, which is exactly the reported failure (the model emitting the same
-// call twice).
+// same-turn calls collapse to one. It marshals to JSON, then drops fields that
+// don't change WHAT the call produces (only how its result is delivered), so a
+// model that emits the same generation twice — differing only in such a hint —
+// is still deduped. Today that means await_result: it toggles wait-and-return
+// vs fire-and-forget for chaining, but both start the exact same task, so two
+// calls differing only there are a duplicate, not a distinct request. Calls that
+// differ in any SEMANTIC arg get distinct signatures and both run (e.g. two
+// different motions / intents in one turn — the intended batch case).
 func argSig(a any) string {
 	b, err := json.Marshal(a)
 	if err != nil {
 		return fmt.Sprintf("%#v", a)
 	}
-	return string(b)
+	var m map[string]any
+	if err := json.Unmarshal(b, &m); err != nil {
+		return string(b) // non-object args: sign the raw JSON
+	}
+	delete(m, "await_result")     // delivery hint, not part of the produced artifact
+	canon, err := json.Marshal(m) // map keys marshal in sorted order: deterministic
+	if err != nil {
+		return string(b)
+	}
+	return string(canon)
 }
 
 // ClarifyOption is one selectable answer to a clarify_intent question. Label is

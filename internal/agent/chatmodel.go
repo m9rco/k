@@ -306,6 +306,14 @@ func (m *chatModel) openAIBody(input []*schema.Message) map[string]any {
 		"model":    m.cfg.Model,
 		"messages": msgs,
 	}
+	// taiji's DeepSeek-*-Online models only honor OpenAI function-calling when this
+	// private field is set; without it they answer via built-in web search and
+	// never emit tool_calls (which silently disables this tool-driven agent). It is
+	// opt-in per model (config) because standard OpenAI gateways don't recognize it
+	// and some (e.g. yunwu) hang when they receive it.
+	if m.cfg.OpenAIInfer {
+		body["openai_infer"] = true
+	}
 	if len(m.tools) > 0 {
 		tools := make([]oaTool, 0, len(m.tools))
 		for _, t := range m.tools {
