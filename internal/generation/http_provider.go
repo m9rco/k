@@ -78,10 +78,13 @@ func (p *HTTPProvider) Generate(ctx context.Context, req Request) (Output, error
 		return Output{}, fmt.Errorf("provider %s: request: %w", p.name, err)
 	}
 	defer resp.Body.Close()
-	body, _ := io.ReadAll(resp.Body)
+	body, readErr := io.ReadAll(resp.Body)
 
 	if resp.StatusCode != http.StatusOK {
 		return Output{}, fmt.Errorf("provider %s: status %d: %s", p.name, resp.StatusCode, truncate(string(body), 300))
+	}
+	if readErr != nil {
+		return Output{}, fmt.Errorf("provider %s: read response body: %w", p.name, readErr)
 	}
 	var parsed imageAPIResponse
 	if err := json.Unmarshal(body, &parsed); err != nil {

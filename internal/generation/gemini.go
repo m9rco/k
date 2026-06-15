@@ -141,9 +141,12 @@ func (p *GeminiProvider) Generate(ctx context.Context, req Request) (Output, err
 		return Output{}, fmt.Errorf("provider %s: request: %w", p.name, err)
 	}
 	defer resp.Body.Close()
-	raw, _ := io.ReadAll(resp.Body)
+	raw, readErr := io.ReadAll(resp.Body)
 	if resp.StatusCode != http.StatusOK {
 		return Output{}, fmt.Errorf("provider %s: status %d: %s", p.name, resp.StatusCode, truncate(string(raw), 300))
+	}
+	if readErr != nil {
+		return Output{}, fmt.Errorf("provider %s: read response body: %w", p.name, readErr)
 	}
 
 	var parsed geminiResponse
