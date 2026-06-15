@@ -1,0 +1,28 @@
+# 依赖目录
+node_modules/
+bun.lockb
+pnpm-lock.yaml
+package-lock.json
+yarn.lock
+
+# 编译产物与缓存
+dist/
+build/
+.next/
+.nuxt/
+.cache/
+*.pyc
+
+# 媒体文件与二进制文件
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.mp4
+*.zip
+*.tar.gz
+
+# 数据库与日志
+*.log
+*.sqlite
+.env*
