@@ -98,8 +98,13 @@ function NodeBody({
   onVideoOps: (a: Asset, op?: "trim" | "frame") => void;
 }) {
   if (node.state === "done") {
+    // Crop nodes keep all products in a single scrollable row so a batch of
+    // platform sizes doesn't push subsequent timeline entries far down.
+    const isCrop = node.kind === "crop";
     return (
-      <div className="grid grid-cols-[repeat(auto-fill,minmax(120px,1fr))] gap-2">
+      <div className={isCrop
+        ? "flex gap-2 overflow-x-auto pb-1"
+        : "grid grid-cols-[repeat(auto-fill,minmax(120px,1fr))] gap-2"}>
         {node.assets.map((a) => (
           <AssetCard
             key={a.id}
