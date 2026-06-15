@@ -355,6 +355,15 @@ func (o *Orchestrator) Handle(ctx context.Context, sessionID, userText string, l
 	if prefix := BuildIntentHint(hint); prefix != "" {
 		turnText = prefix + " " + userText
 	}
+	// Feedback-driven remediation: when the user reports that a previous operation
+	// never actually produced anything AND the previous assistant turn in fact
+	// called no tool (the fake-exec pattern), inject an advisory hint nudging the
+	// model to really call the tool this turn instead of confirming in prose again.
+	// Checked against the live window BEFORE appending this turn's user message.
+	if looksLikeMissingOutputComplaint(userText) && !prevTurnHadToolCall(w.Messages()) {
+		log.Printf("agent: session=%s missing-output complaint after a zero-tool turn, injecting remediation hint", sessionID)
+		turnText = BuildRemediationHint(hint) + " " + turnText
+	}
 	w.Append(schema.UserMessage(turnText))
 
 	ctx = withSession(ctx, sessionID)
@@ -432,26 +441,33 @@ func (o *Orchestrator) Handle(ctx context.Context, sessionID, userText string, l
 		return "", fmt.Errorf("build react agent: %w", err)
 	}
 
-	// Tool-execution callback: surface each tool's completion (success/error)
-	// so the frontend can stop the spinner and show the action trajectory.
-	toolCB := o.toolCallbackHandler(sessionID)
+	// Tool-execution callback: records every tool that ACTUALLY executes
+	// (authoritative count, see toolExecTracker) and surfaces tool_call/tool_result
+	// events so the frontend can show the action trajectory.
+	tracker := &toolExecTracker{}
+	toolCB := o.toolCallbackHandler(sessionID, tracker)
 
 	baseMsgs := w.Messages()
 	var (
 		reply     string
-		turnCalls []turnToolCall
 		cancelled bool
 	)
 	var serr error
 	// Self-correcting retry loop: a weak model sometimes "confirms" an action in
-	// prose without emitting the tool call (looksLikeFakeExecAck). When that
+	// prose without ever calling the tool (looksLikeFakeExecAck). When that
 	// happens we re-run once with a stern correction appended, instead of leaving
 	// the workspace empty. maxAttempts=2 bounds this to a single correction so we
 	// never amplify latency/cost (see fakeack.go).
+	//
+	// "Did this attempt call a tool?" is judged from the tracker (real executions),
+	// NOT from the output stream: eino never surfaces the model's tool_calls message
+	// at END, so a stream-derived count is always zero and would misfire the retry
+	// — re-running a tool that already ran and producing duplicate artifacts.
 	const maxAttempts = 2
 	attemptMsgs := baseMsgs
+	prevExec := 0
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
-		reply, turnCalls, serr = o.streamOnce(ctx, ra, sessionID, attemptMsgs, toolCB)
+		reply, serr = o.streamOnce(ctx, ra, sessionID, attemptMsgs, toolCB)
 		if serr != nil {
 			o.emitTurnEnd(sessionID, turnEndInfo{replyEmpty: true})
 			return "", fmt.Errorf("agent stream: %w", serr)
@@ -459,9 +475,16 @@ func (o *Orchestrator) Handle(ctx context.Context, sessionID, userText string, l
 		if ctx.Err() != nil {
 			break // cancelled: stop retrying
 		}
-		if !shouldRetryFakeAck(attempt, maxAttempts, len(turnCalls), reply) {
+		attemptExec := len(tracker.snapshot()) - prevExec // tools this attempt ran
+		prevExec += attemptExec
+		if !shouldRetryFakeAck(attempt, maxAttempts, attemptExec, reply) {
 			break
 		}
+		// This attempt streamed a fake-exec ack to the frontend already (done:false
+		// increments). Tell the frontend to discard those increments before we
+		// re-run, otherwise the retry's output would append to the stale fake text
+		// and surface as duplicated confirmation prose (the exact bug we fix).
+		o.emit(sessionID, transport.Event{Type: transport.EventTurnReset, SessionID: sessionID})
 		// Append the faked ack + a stern correction so the next attempt actually
 		// calls the tool rather than repeating the prose confirmation.
 		log.Printf("agent: session=%s fake-exec ack detected (attempt %d), self-correcting", sessionID, attempt)
@@ -471,6 +494,9 @@ func (o *Orchestrator) Handle(ctx context.Context, sessionID, userText string, l
 		)
 	}
 	cancelled = ctx.Err() != nil
+	// Authoritative tool-execution list for the whole turn (drives window structure,
+	// remediation, and turn_end metadata).
+	turnCalls := tracker.snapshot()
 
 	log.Printf("agent: session=%s turn done toolCalls=%d replyLen=%d capsule=%t cancelled=%t", sessionID, len(turnCalls), len(reply), capsuleAsked, cancelled)
 
@@ -493,12 +519,19 @@ func (o *Orchestrator) Handle(ctx context.Context, sessionID, userText string, l
 	// Remediation fallback: the model still made zero tool calls after retries.
 	// Use the deterministic pre-classification to recover instead of leaving the
 	// turn empty or wrong (see remediationAction).
-	switch remediationAction(len(turnCalls), cancelled, capsuleAsked, replyEmpty, hint) {
+	switch remediationAction(len(turnCalls), cancelled, capsuleAsked, replyEmpty, reply, hint) {
 	case remediateClarify:
 		q, opts := remediationClarify(hint)
 		clarify(q, opts)
 	case remediateRefuse:
 		reply = RefusalMessage()
+		replyEmpty = false
+	case remediateHonestFail:
+		// A fake-exec ack survived the retry budget: the model promised work but
+		// never called a tool. Do not let the false confirmation pose as a real
+		// reply — replace it with honest feedback (see fakeack.go).
+		log.Printf("agent: session=%s fake-exec ack survived retries, honest-fail remediation", sessionID)
+		reply = honestFailMessage
 		replyEmpty = false
 	}
 	// Record this turn into the window with its REAL structure: when the model
@@ -535,19 +568,23 @@ func (o *Orchestrator) Handle(ctx context.Context, sessionID, userText string, l
 }
 
 // streamOnce runs one pass of the react agent over msgs, consuming the stream and
-// emitting reasoning / tool-call / incremental message events as they arrive
-// (this drives the typewriter UI). It returns the accumulated reply text and the
-// number of tool calls the model requested. The caller decides whether the turn
-// is final and emits the terminal done:true frame; streamOnce never emits one.
-func (o *Orchestrator) streamOnce(ctx context.Context, ra *react.Agent, sessionID string, msgs []*schema.Message, toolCB callbacks.Handler) (string, []turnToolCall, error) {
+// emitting reasoning / incremental message events as they arrive (this drives the
+// typewriter UI). It returns the accumulated reply text. Tool calls are NOT
+// derived from the stream here: eino routes either the final model text or a
+// ReturnDirectly tool result to END, so the assistant message carrying tool_calls
+// never appears in this terminal stream — counting it would report zero even when
+// a tool really ran. The authoritative tool-execution record comes from the
+// tool-node callbacks (toolExecTracker), so tool_call events and the turn's tool
+// list are produced there, not here. The caller decides whether the turn is final
+// and emits the terminal done:true frame; streamOnce never emits one.
+func (o *Orchestrator) streamOnce(ctx context.Context, ra *react.Agent, sessionID string, msgs []*schema.Message, toolCB callbacks.Handler) (string, error) {
 	stream, err := ra.Stream(ctx, msgs, agentOption(toolCB))
 	if err != nil {
-		return "", nil, err
+		return "", err
 	}
 	defer stream.Close()
 
 	var sb strings.Builder
-	var calls []turnToolCall
 	chunks := 0
 	for {
 		chunk, err := stream.Recv()
@@ -570,28 +607,6 @@ func (o *Orchestrator) streamOnce(ctx context.Context, ra *react.Agent, sessionI
 				Data:      map[string]any{"text": chunk.ReasoningContent},
 			})
 		}
-		for _, tc := range chunk.ToolCalls {
-			if tc.Function.Name == "" {
-				continue
-			}
-			// Capture each tool call so the turn can be recorded into the window /
-			// store with its real assistant{tool_calls}→tool structure (rather than
-			// collapsing to a bare text ack, which reverse-trains the model).
-			calls = append(calls, turnToolCall{
-				ID:   tc.ID,
-				Name: tc.Function.Name,
-				Args: tc.Function.Arguments,
-			})
-			o.emit(sessionID, transport.Event{
-				Type:      transport.EventToolCall,
-				SessionID: sessionID,
-				Data: map[string]string{
-					"id":        tc.ID,
-					"name":      tc.Function.Name,
-					"arguments": truncate(tc.Function.Arguments, 400),
-				},
-			})
-		}
 		if chunk.Content != "" {
 			sb.WriteString(chunk.Content)
 			o.emit(sessionID, transport.Event{
@@ -601,8 +616,8 @@ func (o *Orchestrator) streamOnce(ctx context.Context, ra *react.Agent, sessionI
 			})
 		}
 	}
-	log.Printf("agent: session=%s stream attempt done toolCalls=%d replyLen=%d chunks=%d", sessionID, len(calls), sb.Len(), chunks)
-	return sb.String(), calls, nil
+	log.Printf("agent: session=%s stream attempt done replyLen=%d chunks=%d", sessionID, sb.Len(), chunks)
+	return sb.String(), nil
 }
 
 // persist writes one conversation message to the store (best-effort: a failure
@@ -789,6 +804,41 @@ func (o *Orchestrator) emit(sessionID string, ev transport.Event) {
 }
 
 // agentOption wraps a callbacks handler as a react agent option.
+// toolExecTracker records the tools that ACTUALLY executed during one turn,
+// observed via the tool-node callbacks (OnStart/OnEnd). This is the authoritative
+// count of tool usage — NOT the count of tool_calls seen in the agent's output
+// stream. The two differ: eino's react agent routes either the final model text
+// or a ReturnDirectly tool's result message to END, so the model's assistant
+// message carrying tool_calls never appears in ra.Stream()'s terminal output.
+// Counting stream chunks therefore reports zero tool calls even when a generation
+// tool really ran, which previously misfired the fake-exec retry (re-running the
+// tool → duplicate artifacts) and the honest-fail remediation. Observing the
+// callbacks instead reflects what truly happened.
+//
+// Concurrency-safe: the react framework may dispatch parallel tool calls on
+// separate goroutines.
+type toolExecTracker struct {
+	mu    sync.Mutex
+	calls []turnToolCall
+}
+
+// record appends one observed tool execution. id may be empty if the framework
+// did not expose a tool-call id in this context.
+func (t *toolExecTracker) record(id, name, args string) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.calls = append(t.calls, turnToolCall{ID: id, Name: name, Args: args})
+}
+
+// snapshot returns a copy of the executions observed so far.
+func (t *toolExecTracker) snapshot() []turnToolCall {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	out := make([]turnToolCall, len(t.calls))
+	copy(out, t.calls)
+	return out
+}
+
 func agentOption(h callbacks.Handler) einoagent.AgentOption {
 	return einoagent.WithComposeOptions(compose.WithCallbacks(h))
 }
@@ -852,10 +902,37 @@ func taskIDFromResponse(resp string) string {
 	return parsed.TaskID
 }
 
-// toolCallbackHandler builds a handler that emits a tool_result event whenever
-// a tool finishes (success or error), so the UI can complete the action card.
-func (o *Orchestrator) toolCallbackHandler(sessionID string) callbacks.Handler {
+// toolCallbackHandler builds a handler that (1) records each tool that actually
+// executes into tracker — the authoritative tool-usage count for this turn (see
+// toolExecTracker) — and emits a tool_call event when it starts, and (2) emits a
+// tool_result event when it finishes (success or error), so the UI can show the
+// action trajectory and complete the action card.
+func (o *Orchestrator) toolCallbackHandler(sessionID string, tracker *toolExecTracker) callbacks.Handler {
 	return utilcb.NewHandlerHelper().Tool(&utilcb.ToolCallbackHandler{
+		OnStart: func(ctx context.Context, info *callbacks.RunInfo, input *tool.CallbackInput) context.Context {
+			name := ""
+			if info != nil {
+				name = info.Name
+			}
+			args := ""
+			if input != nil {
+				args = input.ArgumentsInJSON
+			}
+			id := compose.GetToolCallID(ctx)
+			// Authoritative record of a real execution (drives retry / remediation /
+			// window structure), independent of what the output stream reports.
+			tracker.record(id, name, args)
+			o.emit(sessionID, transport.Event{
+				Type:      transport.EventToolCall,
+				SessionID: sessionID,
+				Data: map[string]string{
+					"id":        id,
+					"name":      name,
+					"arguments": truncate(args, 400),
+				},
+			})
+			return ctx
+		},
 		OnEnd: func(ctx context.Context, info *callbacks.RunInfo, output *tool.CallbackOutput) context.Context {
 			name := ""
 			if info != nil {

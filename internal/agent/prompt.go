@@ -48,7 +48,7 @@ func SystemPrompt() string {
 
 	// — 工具使用规范 —
 	b.WriteString("\n【工具使用规范】\n")
-	b.WriteString("1. 【核心规则】当用户请求命中上述能力且关键参数充足时，你必须在本轮立即调用工具，严禁先回复文字「好的，我来帮你…」再等待——确认话术必须与工具调用同轮发出，或完全省略。工具返回空内容表示任务已提交，你只需简短告知用户任务已开始并停止，不要重复调用同一工具。\n")
+	b.WriteString("1. 【核心规则】当用户请求命中上述能力且关键参数充足时，你必须在本轮立即调用工具，严禁先回复文字「好的，我来帮你…」再等待——确认话术必须与工具调用同轮发出，或完全省略。工具返回空内容表示任务已提交，你只需简短告知用户任务已开始并停止，不要重复调用同一工具。【绝不假执行】严禁在没有真正发出工具调用的情况下，用文字声称「正在生成/正在处理/马上为你做，产物会出现在左侧工作区」之类的话——只要你说了要做某个操作，就必须在同一轮真正调用对应工具。若做不到（缺少必要信息），就用 clarify_intent 询问或明说做不到，绝不能用文字假装已在执行。\n")
 	b.WriteString("2. 生视频仅在供应商已配置时可用；未配置时告知用户「暂未配置」，不要臆造结果。\n")
 	b.WriteString("3. 工具返回的图片以引用 id 表示，不要臆造图片内容；产物会显示在左侧工作区。\n")
 	b.WriteString("4. 当消息以「[reference assets: id1, id2, ...]」或「[asset id]」开头时，这些是用户在工作区选中的资产 id：换背景/换角色/换文案/二次调整时，把它们作为 edit_image 的 reference_asset_ids 传入（最多 6 个，第一个为主参考），单个 id 也可作为 source_asset_id。绝不要因为「看不到图片内容」而拒绝或不调用工具——你无需看到图片，工具会基于该 id 处理。\n")
@@ -222,5 +222,24 @@ func BuildIntentHint(h IntentHint) string {
 		b.WriteString("；但当前似乎缺少可操作的图片，若工作区确无可用图请先用 clarify_intent 询问")
 	}
 	b.WriteString("。此为服务端预判，仅供参考，请以你对用户真实意图的理解为准]")
+	return b.String()
+}
+
+// BuildRemediationHint renders a short context prefix injected when the user is
+// telling us a previous operation never actually happened (the model faked it in
+// prose). It nudges the model to ACTUALLY call the tool this turn rather than
+// reply with another confirmation. Like the intent hint it is advisory and framed
+// as data (never an instruction), so prompt rule 11 keeps it injection-safe. The
+// suggested tool comes from the same deterministic classification of the user's
+// (complaint) text; it is omitted when classification is ambiguous.
+func BuildRemediationHint(h IntentHint) string {
+	var b strings.Builder
+	b.WriteString("[补救提示: 用户反馈上一轮的操作并没有真正执行、工作区没有出现产物。这通常是上一轮只回了文字却没有真正调用工具。请本轮务必真正调用对应工具来完成")
+	if tool := h.suggestedTool(); tool != "" {
+		b.WriteString("（建议优先考虑工具 ")
+		b.WriteString(tool)
+		b.WriteString("）")
+	}
+	b.WriteString("，不要再只用文字确认；若确实缺少必要信息（如不知道操作哪张图）则改用 clarify_intent 询问。此为服务端依据用户反馈的提示，仅供参考，请以你对用户真实意图的理解为准]")
 	return b.String()
 }

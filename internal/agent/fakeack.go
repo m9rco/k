@@ -1,6 +1,10 @@
 package agent
 
-import "regexp"
+import (
+	"regexp"
+
+	"github.com/cloudwego/eino/schema"
+)
 
 // fakeAckCorrection is the stern instruction appended before a self-correcting
 // retry when the model only faked execution in prose. It tells the model its
@@ -34,6 +38,47 @@ func looksLikeFakeExecAck(reply string) bool {
 	return fakeAckProgressRe.MatchString(reply) && fakeAckArtifactRe.MatchString(reply)
 }
 
+// A user whose previous turn was faked (the model promised work but never called
+// a tool) often comes back to complain: "你怎么没生成那个视频", "icon 没做出来啊",
+// "刚才那张图没看到". missingOutputComplaintRe detects that pattern so the next turn
+// can inject a remediation hint that nudges the model to ACTUALLY call the tool
+// this time, instead of (again) just replying in prose.
+//
+// Like looksLikeFakeExecAck, detection pairs two signals to keep false positives
+// low: a negation/absence cue AND a production/output cue. A plain "没事了" or a
+// forward request like "再生成一张" carries only one (or neither) and won't fire.
+var (
+	// 没/未/怎么没/还没 + (有)? — negation of completion, plus a few colloquial forms.
+	missingComplaintNegRe = regexp.MustCompile(`(没有|没看到|没生成|没做|没出来|没跑|未生成|未完成|怎么没|还没|哪里|哪儿|去哪|失败了|没成功|没反应)`)
+	// production / artifact words the complaint refers to.
+	missingComplaintOutRe = regexp.MustCompile(`(视频|图|icon|图标|产物|结果|素材|裁剪|动效|生成|做出来|搞出来)`)
+)
+
+// looksLikeMissingOutputComplaint reports whether userText reads as the user
+// telling us a previous operation never actually happened / produced nothing.
+// It is deliberately conservative (two paired signals) so normal forward requests
+// ("再来一张", "换个背景") don't misfire. Callers MUST additionally confirm the
+// previous assistant turn made zero tool calls before acting (prevTurnHadToolCall),
+// which narrows the trigger to genuine fake-exec follow-ups.
+func looksLikeMissingOutputComplaint(userText string) bool {
+	return missingComplaintNegRe.MatchString(userText) && missingComplaintOutRe.MatchString(userText)
+}
+
+// prevTurnHadToolCall reports whether the most recent assistant message in msgs
+// carried any tool call. It scans from the end and inspects the first assistant
+// message it finds (tool result messages and the just-appended user message are
+// skipped). Returns false when there is no prior assistant turn. Used to gate the
+// missing-output remediation hint: a complaint only warrants a nudge when the
+// turn the user is complaining about in fact called nothing.
+func prevTurnHadToolCall(msgs []*schema.Message) bool {
+	for i := len(msgs) - 1; i >= 0; i-- {
+		if msgs[i].Role == schema.Assistant {
+			return len(msgs[i].ToolCalls) > 0
+		}
+	}
+	return false
+}
+
 // shouldRetryFakeAck decides whether a finished attempt warrants a self-correcting
 // retry: the model made no tool call, its reply looks like a fake execution ack,
 // and an attempt budget remains. Pulled out as a pure function so the decision
@@ -46,25 +91,45 @@ func shouldRetryFakeAck(attempt, maxAttempts, toolCalls int, reply string) bool 
 type remediation int
 
 const (
-	remediateNone    remediation = iota // leave the turn as-is (normal reply / empty)
-	remediateClarify                    // ask a structured clarify question
-	remediateRefuse                     // deterministic polite refusal
+	remediateNone       remediation = iota // leave the turn as-is (normal reply / empty)
+	remediateClarify                       // ask a structured clarify question
+	remediateRefuse                        // deterministic polite refusal
+	remediateHonestFail                    // replace a leftover fake-exec ack with honest feedback
 )
+
+// honestFailMessage replaces a fake-execution ack that survived the retry budget.
+// The model promised work was underway but never called a tool, and a self-
+// correcting retry did not fix it. Rather than letting the false confirmation
+// pose as a successful reply, we tell the user the truth: nothing ran, the
+// workspace is unchanged, and what to do next. Tone follows CLAUDE.md — plain,
+// no hype, points at the next step.
+const honestFailMessage = "抱歉，这个操作我没能真正执行，工作区里还没有对应的产物。可能是我没正确发起调用。请再说一次你的需求，或补充一下要处理哪张图、想要的效果，我会立即重新执行。"
 
 // remediationAction decides how to recover a turn that ended with zero tool
 // calls, using the deterministic pre-classification. It is a pure decision table
 // (unit-testable without a live model):
 //   - a cancelled turn, a turn that already called a tool, or one that already
 //     produced a clarify capsule is left untouched (remediateNone),
+//   - a leftover fake-exec ack (model promised work, called nothing, retry did
+//     not fix it): if the intent is whitelisted but missing a key param →
+//     remediateClarify (ask for it); otherwise → remediateHonestFail (replace the
+//     false confirmation with honest feedback instead of letting it pose as done),
 //   - a whitelisted intent missing a key param → remediateClarify (so the turn
 //     never ends empty when we know what the user wanted),
 //   - a non-whitelisted request that produced no body → remediateRefuse (polite
 //     capability list, no extra model round-trip).
-func remediationAction(toolCalls int, cancelled, capsuleAsked, replyEmpty bool, hint IntentHint) remediation {
+//
+// The fake-ack branch is checked before the generic ones so a non-empty fake
+// confirmation is never mistaken for a real reply (replyEmpty would be false).
+func remediationAction(toolCalls int, cancelled, capsuleAsked, replyEmpty bool, reply string, hint IntentHint) remediation {
 	if toolCalls > 0 || cancelled || capsuleAsked {
 		return remediateNone
 	}
 	switch {
+	case looksLikeFakeExecAck(reply) && hint.Whitelisted && hint.MissingKeyParam:
+		return remediateClarify
+	case looksLikeFakeExecAck(reply):
+		return remediateHonestFail
 	case hint.Whitelisted && hint.MissingKeyParam:
 		return remediateClarify
 	case !hint.Whitelisted && replyEmpty:

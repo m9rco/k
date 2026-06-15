@@ -296,6 +296,28 @@ export function useAppController() {
     setChat((c) => c.filter((it) => it.kind !== "loading"));
   }, [clearWaitTimer, setChat]);
 
+  // turn_reset: the backend is about to re-produce this turn from a clean slate
+  // (a self-correcting retry after the model faked execution in prose). DROP the
+  // in-flight assistant bubble and reasoning block entirely — unlike flushTyper /
+  // collapseReasoning we do NOT keep their text, since the retry's output would
+  // otherwise append to the discarded fake-ack prose and surface as duplicated
+  // confirmation text (the bug this fixes). Already-landed tool cards and assets
+  // are left untouched; we return to the wait state for the fresh increments.
+  const onTurnReset = React.useCallback(() => {
+    if (tickRef.current != null) {
+      window.clearInterval(tickRef.current);
+      tickRef.current = null;
+    }
+    const tId = typer.current.id;
+    const rId = reasoner.current.id;
+    typer.current = { id: "", target: "", shown: 0, done: false };
+    reasoner.current = { id: "", target: "", shown: 0 };
+    if (tId || rId) {
+      setChat((c) => c.filter((it) => !(it.kind === "assistant" && it.id === tId) && !(it.kind === "reasoning" && it.id === rId)));
+    }
+    showLoading();
+  }, [setChat, showLoading]);
+
   const onAssistantDelta = React.useCallback((text: string, done: boolean) => {
     clearLoading();
     collapseReasoning();
@@ -476,6 +498,11 @@ export function useAppController() {
         case "turn_end":
           onTurnEnd(sid, d);
           break;
+        case "turn_reset":
+          // Backend discarded this turn's faked-ack increments before a retry;
+          // drop the in-flight bubble so the retry output doesn't duplicate it.
+          onTurnReset();
+          break;
         case "capsule":
           producedRef.current = true;
           onCapsule(d);
@@ -522,7 +549,7 @@ export function useAppController() {
           break;
       }
     };
-  }, [onAssistantDelta, onReasoning, onToolCall, onToolResult, ensureTaskPlaceholder, finishPendingTools, refreshContext, toast, showLoading, escalateWait, onTurnEnd, onCapsule, clearLoading]);
+  }, [onAssistantDelta, onReasoning, onToolCall, onToolResult, ensureTaskPlaceholder, finishPendingTools, refreshContext, toast, showLoading, escalateWait, onTurnEnd, onCapsule, clearLoading, onTurnReset]);
 
   // ============ actions ============
   // sendMessage routes a user input: when a turn is in flight it joins the

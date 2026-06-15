@@ -44,6 +44,19 @@ const (
 	// the loading state and refresh the context indicator.
 	EventTurnEnd EventType = "turn_end"
 
+	// EventTurnReset asks the frontend to discard the CURRENT in-flight reply and
+	// reasoning increments of this turn and return to the wait (loading) state,
+	// because the turn is about to re-produce them from a clean slate. It is
+	// emitted before a self-correcting retry (the model only faked execution in
+	// prose without a tool call): without it, the discarded fake-ack text would
+	// stay accumulated on the frontend and the retry's output would append to it,
+	// surfacing as duplicated confirmation text.
+	//
+	// Unlike turn_end it does NOT end the turn — fresh increments follow. It is
+	// additive: clients that do not recognize it ignore it (per "unknown event
+	// types must not error"), degrading only to the prior duplicate behavior.
+	EventTurnReset EventType = "turn_reset"
+
 	// EventFollowUp is emitted after a turn that produced workspace assets, as a
 	// proactive suggestion for the user's next action.
 	EventFollowUp EventType = "follow_up"

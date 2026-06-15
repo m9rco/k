@@ -26,6 +26,7 @@ func TestSystemPromptDirectives(t *testing.T) {
 		"markdown rendered":   "前端会渲染",
 		"intent hint advice":  "意图提示",
 		"intent hint as data": "仅供参考",
+		"no fake execution":   "绝不假执行",
 	}
 	for name, want := range checks {
 		if !strings.Contains(p, want) {
