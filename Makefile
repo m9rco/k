@@ -4,6 +4,11 @@
 # into web/static, which the Go binary embeds (web/web.go). So a full build is two
 # steps: build the frontend, then build the Go binary.
 
+BINARY = bin/game-asset-studio
+TARGET_HOST = 9.135.12.71
+TARGET_PATH = /data/home/user00/lab/k
+TARGET = $(TARGET_HOST):$(TARGET_PATH)
+
 .PHONY: web server build run kill-port test clean
 
 # Port the server listens on; kill-port frees it before run.
@@ -34,6 +39,11 @@ kill-port:
 # Run the server (build frontend + binary first, freeing the port if taken).
 run: build kill-port
 	./bin/server
+
+deploy:
+	GOOS=linux GOARCH=amd64 go build -o $(BINARY) ./cmd/server
+	rsync -av $(BINARY) $(TARGET)
+# 	ssh $(TARGET_HOST) "cd $(TARGET_PATH) && supervisorctl restart checkersvrd"
 
 test:
 	go test ./...
