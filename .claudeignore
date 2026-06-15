@@ -26,3 +26,6 @@ build/
 *.log
 *.sqlite
 .env*
+
+# 提案目录
+openspec/changes/archive/
