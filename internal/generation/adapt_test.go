@@ -178,46 +178,35 @@ func TestAdaptSquareTakesAIPath(t *testing.T) {
 	}
 }
 
-func TestAdaptSessionLevelDedup(t *testing.T) {
+// TestAdaptReRequestRegenerates verifies that re-requesting the same (source,
+// size) in the same session does NOT reuse the prior product but generates a
+// fresh one. Session-level dedup was removed: a re-request means the user wants
+// a new product (the prior dedup silently skipped generation, leaving the
+// workspace seemingly empty — the bug this guards against).
+func TestAdaptReRequestRegenerates(t *testing.T) {
 	svc, st, _, _ := newAdaptService(t)
 	// First request: AI path (landscape→portrait flip).
 	outcomes1, err := svc.AdaptToPlatform(context.Background(), "s", "src", []string{"flip.portrait.720x1280"}, false, nil)
 	if err != nil || outcomes1[0].Via != AdaptViaAI {
 		t.Fatalf("first: want AI path, err=%v via=%s", err, outcomes1[0].Via)
 	}
-	_ = waitTask(t, st, "s", outcomes1[0].TaskID)
+	rec1 := waitTask(t, st, "s", outcomes1[0].TaskID)
 
-	// Second request (same session, same source, same size): must reuse.
+	// Second request (same session, same source, same size): must regenerate,
+	// NOT reuse — a new AI task with a distinct product.
 	outcomes2, err := svc.AdaptToPlatform(context.Background(), "s", "src", []string{"flip.portrait.720x1280"}, false, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if outcomes2[0].Via != AdaptViaReused {
-		t.Errorf("expected reused, got via=%q", outcomes2[0].Via)
+	if outcomes2[0].Via != AdaptViaAI {
+		t.Errorf("re-request must regenerate via AI, got via=%q", outcomes2[0].Via)
 	}
-	if outcomes2[0].AssetID != outcomes1[0].AssetID {
-		// AssetID in first outcome was empty (only taskID); reused outcome should
-		// match the asset the task produced.
-		rec, _ := st.GetTask("s", outcomes1[0].TaskID)
-		if rec == nil || outcomes2[0].AssetID != rec.AssetID {
-			t.Errorf("reused assetID %q doesn't match original task's asset %v", outcomes2[0].AssetID, rec)
-		}
+	if outcomes2[0].TaskID == outcomes1[0].TaskID {
+		t.Error("re-request reused the same task id; expected a fresh task")
 	}
-}
-
-func TestAdaptDifferentSizeNotDeduped(t *testing.T) {
-	svc, st, _, _ := newAdaptService(t)
-	// Produce an adapt to portrait.
-	outcomes1, _ := svc.AdaptToPlatform(context.Background(), "s", "src", []string{"flip.portrait.720x1280"}, false, nil)
-	_ = waitTask(t, st, "s", outcomes1[0].TaskID)
-
-	// A different size must NOT be deduped.
-	outcomes2, err := svc.AdaptToPlatform(context.Background(), "s", "src", []string{"flip.square.512x512"}, false, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if outcomes2[0].Via == AdaptViaReused {
-		t.Error("different size must not be reused from another size's product")
+	rec2 := waitTask(t, st, "s", outcomes2[0].TaskID)
+	if rec2.AssetID == rec1.AssetID {
+		t.Error("re-request produced the same asset id; expected a fresh product")
 	}
 }
 

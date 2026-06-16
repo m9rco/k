@@ -116,3 +116,74 @@ func TestCompressNoOrphanToolMessage(t *testing.T) {
 		break
 	}
 }
+
+// TestCompressPreservesToolExchange is the regression guard for the
+// reverse-few-shot drift bug: when the session has called tools before,
+// compressLocked must retain at least one complete assistant{tool_calls}→
+// role:tool pair in recent so the model keeps its structural few-shot anchor.
+func TestCompressPreservesToolExchange(t *testing.T) {
+	// Use large messages so the 256 minimum budget is exceeded quickly.
+	bigMsg := strings.Repeat("x", 300)
+	w := NewWindow("sys", 512, 2, func(_ []*schema.Message) string { return "sum" })
+
+	toolCall := func(id, name string) *schema.Message {
+		return schema.AssistantMessage("", []schema.ToolCall{
+			{ID: id, Function: schema.FunctionCall{Name: name, Arguments: `{}`}},
+		})
+	}
+	toolRes := func(id string) *schema.Message {
+		m := schema.ToolMessage("[done]", id)
+		m.ToolName = "edit_image"
+		return m
+	}
+
+	// Build enough history to trigger compression.
+	w.Append(schema.UserMessage(bigMsg))
+	w.Append(toolCall("tc1", "edit_image"))
+	w.Append(toolRes("tc1"))
+	w.Append(schema.UserMessage(bigMsg))
+	w.Append(toolCall("tc2", "edit_image"))
+	w.Append(toolRes("tc2"))
+	w.Append(schema.UserMessage(bigMsg)) // final user, triggers compression
+
+	if !w.Compressed() {
+		t.Skip("compression did not trigger; increase message size or check budget")
+	}
+
+	msgs := w.Messages()
+	if !recentHasToolExchange(msgs) {
+		t.Errorf("after compression, recent has no tool exchange: roles=%s", roleSeq(msgs))
+	}
+}
+
+// TestCompressChatOnlyNoConstraint verifies that a session that never called
+// any tools is not subject to the tool-exchange preservation constraint — the
+// window should compress freely even if no tool pair exists in recent.
+// Budget must be ≥256 (NewWindow minimum); use large messages to force compression.
+func TestCompressChatOnlyNoConstraint(t *testing.T) {
+	// "x"*300 = 300 ASCII chars → (300+3)/4=75 tokens + 4 = 79 tokens per msg.
+	// 5 (system) + 2*(79+79) = 5+316=321 > 256: compression fires after 2 pairs.
+	bigMsg := strings.Repeat("x", 300)
+	w := NewWindow("sys", 512, 1, func(_ []*schema.Message) string { return "sum" })
+	for i := 0; i < 5; i++ {
+		w.Append(schema.UserMessage(bigMsg))
+		w.Append(schema.AssistantMessage(bigMsg, nil))
+	}
+	if !w.Compressed() {
+		t.Error("expected compression to have run for pure-chat window")
+	}
+	// No panic or infinite loop = also passed.
+}
+
+// roleSeq returns a comma-separated role sequence for test failure messages.
+func roleSeq(msgs []*schema.Message) string {
+	parts := make([]string, 0, len(msgs))
+	for _, m := range msgs {
+		role := string(m.Role)
+		if m.Role == schema.Assistant && len(m.ToolCalls) > 0 {
+			role = "assistant[tc]"
+		}
+		parts = append(parts, role)
+	}
+	return strings.Join(parts, ",")
+}

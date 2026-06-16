@@ -2,7 +2,6 @@ package generation
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"math"
 
@@ -31,9 +30,8 @@ func (s *Service) SetCropper(c Cropper) { s.cropper = c }
 
 // AdaptVia labels how one size's adaptation was produced.
 const (
-	AdaptViaCrop   = "crop"   // deterministic fast path (ratio match)
-	AdaptViaAI     = "ai"     // image-model repaint (ratio reshape)
-	AdaptViaReused = "reused" // session-level dedup hit (no new work)
+	AdaptViaCrop = "crop" // deterministic fast path (ratio match)
+	AdaptViaAI   = "ai"   // image-model repaint (ratio reshape)
 )
 
 // AdaptOutcome is the result of adapting one source image to one target size.
@@ -90,13 +88,7 @@ func (s *Service) AdaptToPlatform(ctx context.Context, sessionID, sourceAssetID 
 
 	outcomes := make([]AdaptOutcome, 0, len(specs))
 	for _, spec := range specs {
-		// 1) Session-level dedup: reuse an existing product for this (source,size).
-		if assetID, ok := s.findAdapted(sessionID, sourceAssetID, spec.SizeID); ok {
-			outcomes = append(outcomes, AdaptOutcome{SizeID: spec.SizeID, Via: AdaptViaReused, AssetID: assetID})
-			continue
-		}
-
-		// 2) Route: ratio match → deterministic crop; else AI repaint.
+		// Route: ratio match → deterministic crop; else AI repaint.
 		if aspectClose(src.Width, src.Height, spec.Width, spec.Height) {
 			results, err := s.cropper.CropToSizes(sessionID, sourceAssetID, []string{spec.SizeID}, lossless, crop.Options{Mode: crop.ModeCover})
 			if err != nil {
@@ -137,30 +129,6 @@ func (s *Service) AdaptToPlatform(ctx context.Context, sessionID, sourceAssetID 
 		outcomes = append(outcomes, AdaptOutcome{SizeID: spec.SizeID, Via: AdaptViaAI, TaskID: taskID})
 	}
 	return outcomes, nil
-}
-
-// findAdapted reports an existing product for (sourceAssetID, sizeID) in this
-// session, keyed on the persisted CropMeta. Both crop and AI products stamp
-// ParentID = source and Meta.SizeID = target, so either path's product is a
-// dedup hit. Returns the asset id and true on a match.
-func (s *Service) findAdapted(sessionID, sourceAssetID, sizeID string) (string, bool) {
-	assets, err := s.store.ListAssets(sessionID)
-	if err != nil {
-		return "", false
-	}
-	for _, a := range assets {
-		if a.ParentID != sourceAssetID || a.Meta == "" {
-			continue
-		}
-		var m crop.CropMeta
-		if json.Unmarshal([]byte(a.Meta), &m) != nil {
-			continue
-		}
-		if m.SizeID == sizeID {
-			return a.ID, true
-		}
-	}
-	return "", false
 }
 
 // aspectClose reports whether the source and target aspect ratios match within

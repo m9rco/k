@@ -40,22 +40,6 @@ TBD - created by archiving change add-platform-adaptation. Update Purpose after 
 - **THEN** 系统对各尺寸分别选择快路径或 AI 路径
 - **AND** 用户视角为一致的一次适配，各产物以相同形态回填工作区
 
-### Requirement: 会话级适配去重
-系统 SHALL 以 `(源图资产 id, 目标尺寸 id)` 为键，在**同一会话内**对平台适配去重：当该会话已存在「同源图 + 同目标尺寸」的成功适配产物时，系统 SHALL 直接复用该产物、**SHALL NOT** 重复发起图生图请求。去重 SHALL 基于已持久化的产物（而非仅进程内状态），以覆盖跨轮复用并在进程重启后仍生效。
-
-#### Scenario: 同源图同尺寸不重复调用
-- **WHEN** 用户在同一会话内再次请求把同一张源图适配到同一平台尺寸
-- **THEN** 系统复用已存在的适配产物，不发起新的图生图任务
-- **AND** 用户视角为该尺寸已就绪
-
-#### Scenario: 不同尺寸或不同源图各自独立
-- **WHEN** 用户把同一源图适配到不同尺寸，或把不同源图适配到同一尺寸
-- **THEN** 系统分别发起各自的适配，互不复用
-
-#### Scenario: 跨轮复用
-- **WHEN** 某张源图到某尺寸的适配已在先前轮次完成，用户在后续轮次再次提及该适配
-- **THEN** 系统复用先前产物而非重新生成
-
 ### Requirement: 适配尺寸精确收敛
 当图生图供应商仅支持固定尺寸枚举、不能直接产出目标平台尺寸时，系统 SHALL 以供应商合法尺寸出图后，由纯图像处理收敛到精确的目标平台尺寸（缺省以不裁主体的方式留白补齐）。用户视角 SHALL 为一次性产出精确的目标平台尺寸。
 
@@ -76,4 +60,21 @@ TBD - created by archiving change add-platform-adaptation. Update Purpose after 
 - **WHEN** 一次适配产出的文件数超过 6
 - **THEN** 前端在执行前提示将打包下载
 - **AND** 完成后按 渠道/尺寸 分目录打包为 zip 供下载
+
+### Requirement: 平台适配 AI 重绘的请求级模型路由
+系统 SHALL 在执行 `adapt_to_platform` 的 AI 重绘路径时，固定使用 `gemini-3-pro-image` 作为本次重绘的图生图模型，作用域 SHALL 仅限本次适配请求。会话已选的 image 场景模型 SHALL NOT 受影响；其他图生图操作（如 `edit_image`）SHALL NOT 受影响；模型设置面板的会话 image 选择 SHALL NOT 改变。当 `gemini-3-pro-image` 在 image 场景下不可用（其凭证未配置）时，系统 SHALL 优雅回退到会话当前 image 模型或服务默认 provider，不使适配失败。
+
+#### Scenario: AI 重绘使用 Gemini 3 Pro Image
+- **WHEN** 用户发起 AI 平台适配且目标尺寸需要 AI 重绘（比例或方向差异超容差）
+- **THEN** 重绘任务使用 `gemini-3-pro-image` 生图，与会话 image 场景的用户选择无关
+- **AND** 产物回填工作区
+
+#### Scenario: 普通图生图不受适配路由影响
+- **WHEN** 用户发起非适配的图生图操作（换角色/换背景/换文案等 `edit_image` 路径）
+- **THEN** 使用会话已选的 image 模型（或服务默认），不使用 Gemini 适配路由
+
+#### Scenario: Gemini 不可用时优雅回退
+- **WHEN** `gemini-3-pro-image` 在当前部署的 image 场景下凭证未配置（不可用）
+- **THEN** 适配 AI 重绘回退到会话 image override 或服务默认 provider 继续执行
+- **AND** 适配任务正常完成，不向用户报错"模型不可用"
 

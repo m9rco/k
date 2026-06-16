@@ -50,6 +50,12 @@ type ToolDeps struct {
 	ImageOverride       *config.ImageProviderConfig
 	TextToImageOverride *config.ImageProviderConfig
 	VideoOverride       *config.ImageProviderConfig
+	// AdaptModelOverride, when non-nil, is used by adapt_to_platform's AI
+	// repaint path instead of ImageOverride. Request-scoped: only this one
+	// tool uses it; edit_image and other image tools keep using ImageOverride.
+	// Nil falls back to ImageOverride (or service default). Injected by the
+	// orchestrator to fix-route AI platform adaptation to gemini-3-pro-image.
+	AdaptModelOverride *config.ImageProviderConfig
 	// Clarify, when set, is invoked by the clarify_intent tool to surface a
 	// structured clarifying question (capsule) to the user. Injected by the
 	// orchestrator so tools.go stays free of the transport layer (design D1).
@@ -561,6 +567,16 @@ type adaptResult struct {
 	Outcomes []adaptOutcomeItem `json:"outcomes,omitempty"`
 }
 
+// adaptProvider returns the image provider config for adapt_to_platform's AI
+// repaint path: AdaptModelOverride when set, else ImageOverride (session
+// selection). Nil means the generation service uses its default provider.
+func adaptProvider(d ToolDeps) *config.ImageProviderConfig {
+	if d.AdaptModelOverride != nil {
+		return d.AdaptModelOverride
+	}
+	return d.ImageOverride
+}
+
 func (d ToolDeps) newAdaptTool() (tool.InvokableTool, error) {
 	return utils.InferTool(
 		"adapt_to_platform",
@@ -580,7 +596,7 @@ func (d ToolDeps) newAdaptTool() (tool.InvokableTool, error) {
 				log.Printf("adapt_to_platform: duplicate same-turn call suppressed")
 				return adaptResult{Status: statusDuplicate}, nil
 			}
-			outcomes, err := d.Generation.AdaptToPlatform(ctx, d.SessionID, sourceID, a.SizeIDs, d.Lossless, d.ImageOverride)
+			outcomes, err := d.Generation.AdaptToPlatform(ctx, d.SessionID, sourceID, a.SizeIDs, d.Lossless, adaptProvider(d))
 			if err != nil {
 				return adaptResult{}, err
 			}

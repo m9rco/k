@@ -428,6 +428,15 @@ func (o *Orchestrator) Handle(ctx context.Context, sessionID, userText string, l
 	if pc, ok := o.models.ImageModel(sessionID, config.SceneVideo); ok {
 		deps.VideoOverride = &pc
 	}
+	// Request-scoped routing: adapt_to_platform's AI repaint path fixes on
+	// gemini-3-pro-image regardless of the session's image-scene selection.
+	// ResolveImageModel returns ok only when the model is available (its scene
+	// credential is configured), so a missing key never injects a broken
+	// override — it falls through to AdaptModelOverride=nil (== ImageOverride).
+	// edit_image and other image tools are unaffected (they use ImageOverride).
+	if pc, ok := o.cfg.ResolveImageModel(config.SceneImage, "gemini-3-pro-image"); ok {
+		deps.AdaptModelOverride = &pc
+	}
 	tools, err := deps.Tools()
 	if err != nil {
 		o.emitTurnEnd(sessionID, turnEndInfo{replyEmpty: true})
@@ -523,7 +532,16 @@ func (o *Orchestrator) Handle(ctx context.Context, sessionID, userText string, l
 	// remediation, and turn_end metadata).
 	turnCalls := tracker.snapshot()
 
-	log.Printf("agent: session=%s turn done toolCalls=%d replyLen=%d capsule=%t cancelled=%t", sessionID, len(turnCalls), len(reply), capsuleAsked, cancelled)
+	// Diagnostic log: captures model id, compression state, and whether the
+	// window still contains a complete tool exchange (few-shot anchor). Use
+	// baseMsgs (what the model actually saw) to audit the post-compression state.
+	turnModelID := turnModel.cfg.Model
+	if turnModelID == "" {
+		turnModelID = turnModel.cfg.Provider
+	}
+	log.Printf("agent: session=%s turn done model=%s compressed=%t has_tool_exchange=%t toolCalls=%d replyLen=%d capsule=%t cancelled=%t",
+		sessionID, turnModelID, w.Compressed(), recentHasToolExchange(baseMsgs),
+		len(turnCalls), len(reply), capsuleAsked, cancelled)
 
 	if cancelled {
 		// Interrupted mid-turn: persist whatever text was produced (keeps context

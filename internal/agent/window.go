@@ -136,6 +136,12 @@ type Window struct {
 	// summary (summary-asset-anchor). Either side may be empty when only one is
 	// recoverable from the window.
 	lastAssetOp assetOp
+	// hasEverCalledTool is true once any assistant message with tool_calls is
+	// appended. compressLocked uses it to enforce the tool-primed invariant:
+	// keep ≥1 complete assistant{tool_calls}→role:tool exchange in recent so
+	// the model's few-shot signal for tool use is never erased by compression.
+	// Reset naturally when a new Window is created (e.g. after ResetContext).
+	hasEverCalledTool bool
 }
 
 // assetOp is the source→output lineage of one edit operation. SourceID comes
@@ -240,8 +246,34 @@ func NewWindow(system string, tokenBudget, keepRecent int, summarize Summarizer)
 func (w *Window) Append(m *schema.Message) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
+	if len(m.ToolCalls) > 0 {
+		w.hasEverCalledTool = true
+	}
 	w.recent = append(w.recent, m)
 	w.compressLocked()
+}
+
+// recentHasToolExchange reports whether msgs contains at least one complete
+// assistant{tool_calls}→role:tool exchange — a structural few-shot anchor
+// that keeps the model calling tools rather than drifting to prose replies.
+func recentHasToolExchange(msgs []*schema.Message) bool {
+	for i, m := range msgs {
+		if m.Role == schema.Assistant && len(m.ToolCalls) > 0 {
+			if i+1 < len(msgs) && msgs[i+1].Role == schema.Tool {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// HasToolExchange reports whether the current recent window contains at least
+// one complete assistant{tool_calls}→role:tool exchange. Used in diagnostic
+// logging to verify the tool-primed invariant holds after each compression.
+func (w *Window) HasToolExchange() bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return recentHasToolExchange(w.recent)
 }
 
 // AppendToolRef appends a tool result as a compact reference instead of its raw
@@ -269,6 +301,20 @@ func (w *Window) compressLocked() {
 		}
 		if foldCount >= len(w.recent) {
 			break // cannot split cleanly; skip this compression cycle
+		}
+		// Tool-primed back-off: when the session has ever called a tool, prefer
+		// a foldCount that leaves recent with at least one complete tool exchange
+		// (the model's few-shot anchor). Walk foldCount backward; if no such
+		// position exists (foldCount reaches 0) restore the original value and
+		// compress normally — compressing is always better than blocking forever.
+		if w.hasEverCalledTool && !recentHasToolExchange(w.recent[foldCount:]) {
+			orig := foldCount
+			for foldCount > 0 && !recentHasToolExchange(w.recent[foldCount:]) {
+				foldCount--
+			}
+			if foldCount == 0 {
+				foldCount = orig // best-effort: no valid position, compress anyway
+			}
 		}
 		older := w.recent[:foldCount]
 
