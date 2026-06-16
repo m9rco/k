@@ -2,19 +2,23 @@ package agent
 
 import (
 	"context"
+	"crypto/md5"
 	"encoding/json"
 	"fmt"
+	"os"
 	"strings"
 	"sync"
 	"time"
 
 	"gameasset/internal/config"
+	"gameasset/internal/cos"
 	"gameasset/internal/crawl"
 	"gameasset/internal/crop"
 	"gameasset/internal/generation"
 	applog "gameasset/internal/log"
 	"gameasset/internal/store"
 	"gameasset/internal/video"
+	"gameasset/internal/vision"
 	"gameasset/internal/websearch"
 
 	"github.com/cloudwego/eino/components/tool"
@@ -61,6 +65,18 @@ type ToolDeps struct {
 	// structured clarifying question (capsule) to the user. Injected by the
 	// orchestrator so tools.go stays free of the transport layer (design D1).
 	Clarify CapsuleEmitter
+	// RefPublisher, when non-nil, uploads source images to COS (md5-deduped) so
+	// the vision analyzer can read them by public URL. Nil disables the
+	// publish → analyze pre-stage (adapt falls back to no theme report).
+	RefPublisher *cos.Uploader
+	// VisionAnalyzer, when non-nil and Configured, runs grok-4-fast marketing
+	// analysis over the published URLs to produce a theme report injected into
+	// the AI-repaint prompt. Nil/unconfigured disables analysis (graceful).
+	VisionAnalyzer *vision.Analyzer
+	// Notify, when set, pushes a chat-visible stage message: done=false for
+	// streaming chunks (analysis report), done=true to finalize a message.
+	// Injected by the orchestrator so tools.go stays transport-free.
+	Notify func(text string, done bool)
 	// dedup guards against the model emitting the SAME async-task tool call twice
 	// in one turn (parallel tool_calls), which would otherwise start two
 	// duplicate tasks and concatenate two identical acknowledgments into one
@@ -206,10 +222,10 @@ type editArgs struct {
 	Intent string `json:"intent" jsonschema:"description=The edit intent. change_character REPLACES the existing main character with a new one; add_character ADDS a new character while KEEPING the existing subject(s) (use this when the user says 增加/添加/多加一个角色/在旁边加一个人); change_background; change_text,enum=change_character,enum=add_character,enum=change_background,enum=change_text"`
 	// SourceAssetID is the existing asset to edit. Empty for a fresh generation.
 	SourceAssetID string `json:"source_asset_id,omitempty" jsonschema:"description=The base image to EDIT ON TOP OF (被编辑底图). Set this when the user says '把X放进图Z' or '在图Z基础上修改' — Z is the source. Leave EMPTY when generating a brand-new image purely from references."`
-	// ReferenceAssetIDs lists up to 6 reference assets to reuse composition/style
-	// from. The first is the primary reference. Takes precedence over
+	// ReferenceAssetIDs lists up to 16 reference assets to reuse composition/style
+	// from. The first is the primary (anchor) reference. Takes precedence over
 	// source_asset_id when provided.
-	ReferenceAssetIDs []string `json:"reference_asset_ids,omitempty" jsonschema:"description=IDs of up to 6 assets used as REFERENCES (参照物 for style/character/composition). First is primary. For '根据图X图Y生成新图' put X and Y here and leave source_asset_id empty; for '把图X放进图Z' put X here and Z in source_asset_id."`
+	ReferenceAssetIDs []string `json:"reference_asset_ids,omitempty" jsonschema:"description=IDs of up to 16 assets used as REFERENCES (参照物 for style/character/composition). First is the anchor (primary). For '根据图X图Y生成新图' put X and Y here and leave source_asset_id empty; for '把图X放进图Z' put X here and Z in source_asset_id."`
 	// CharacterDesc/BackgroundDesc/TextContent carry the per-intent payload.
 	CharacterDesc  string `json:"character_desc,omitempty" jsonschema:"description=Description of the character (the NEW one to replace with for change_character, or the one to ADD for add_character)"`
 	BackgroundDesc string `json:"background_desc,omitempty" jsonschema:"description=Description of the new background (for change_background)"`
@@ -547,7 +563,7 @@ func (d ToolDeps) newListSizesTool() (tool.InvokableTool, error) {
 
 type adaptArgs struct {
 	SourceAssetID     string   `json:"source_asset_id" jsonschema:"description=ID of the workspace image to adapt"`
-	ReferenceAssetIDs []string `json:"reference_asset_ids,omitempty" jsonschema:"description=Optional extra reference images (up to 6). First is primary when source_asset_id is omitted."`
+	ReferenceAssetIDs []string `json:"reference_asset_ids,omitempty" jsonschema:"description=Optional extra reference images (up to 16). First is the anchor (primary) when source_asset_id is omitted."`
 	SizeIDs           []string `json:"size_ids" jsonschema:"description=Unique platform size ids to adapt to (e.g. taptap.banner.1120x280). Use list_platform_sizes first."`
 }
 
@@ -575,6 +591,69 @@ func adaptProvider(d ToolDeps) *config.ImageProviderConfig {
 	return d.ImageOverride
 }
 
+// visionThemeReport runs the publish → analyze pre-stage for platform adaptation
+// and returns the marketing theme report to anchor the AI repaint. Returns "" —
+// and the caller proceeds with the standard harness — whenever COS/vision are
+// unconfigured, the source can't be read, or any step fails. Stage progress is
+// surfaced to chat via d.Notify (the analysis report streams as chunks).
+func visionThemeReport(ctx context.Context, d ToolDeps, sourceID string) string {
+	if d.RefPublisher == nil || d.VisionAnalyzer == nil || !d.VisionAnalyzer.Configured() || d.Store == nil {
+		return ""
+	}
+	asset, err := d.Store.GetAsset(d.SessionID, sourceID)
+	if err != nil || asset == nil {
+		return ""
+	}
+	data, err := os.ReadFile(asset.Path)
+	if err != nil {
+		return ""
+	}
+
+	// Check the vision report cache first — skip grok-4-fast for identical images.
+	sum := md5.Sum(data)
+	imgMD5 := fmt.Sprintf("%x", sum)
+	if cached, err := d.Store.GetVisionReport(imgMD5); err == nil && cached != "" {
+		applog.From(ctx).Info().Str("event", "adapt.analysis_cache_hit").Str("md5", imgMD5).Msg("vision report cache hit")
+		if d.Notify != nil {
+			d.Notify("⚡ 已有分析摘要，直接使用\n\n"+cached, true)
+		}
+		return cached
+	}
+
+	if d.Notify != nil {
+		d.Notify("⏫ 正在分析参考图的宣发要素，请稍候…\n\n", false)
+	}
+	url, err := d.RefPublisher.UploadIfAbsent(ctx, data, asset.Mime, d.Store)
+	if err != nil {
+		applog.From(ctx).Warn().Str("event", "adapt.publish_failed").Err(err).Msg("ref publish failed; skipping analysis")
+		if d.Notify != nil {
+			d.Notify("（参考图发布暂不可用，按默认适配）", true)
+		}
+		return ""
+	}
+	report, err := d.VisionAnalyzer.Analyze(ctx, []string{url}, func(chunk string) {
+		if d.Notify != nil {
+			d.Notify(chunk, false)
+		}
+	})
+	if err != nil {
+		applog.From(ctx).Warn().Str("event", "adapt.analysis_failed").Err(err).Msg("vision analysis failed; skipping theme report")
+		if d.Notify != nil {
+			d.Notify("（主题分析暂不可用，按默认适配）", true)
+		}
+		return ""
+	}
+	if d.Notify != nil {
+		d.Notify("", true)
+	}
+	// Persist the report so the same image never triggers grok-4-fast again.
+	if err := d.Store.InsertVisionReport(imgMD5, report); err != nil {
+		applog.From(ctx).Warn().Str("event", "adapt.analysis_cache_miss").Err(err).Msg("failed to cache vision report")
+	}
+	applog.From(ctx).Info().Str("event", "adapt.analysis_ok").Str("md5", imgMD5).Int("report_len", len(report)).Msg("vision theme report produced and cached")
+	return report
+}
+
 func (d ToolDeps) newAdaptTool() (tool.InvokableTool, error) {
 	return utils.InferTool(
 		"adapt_to_platform",
@@ -593,7 +672,14 @@ func (d ToolDeps) newAdaptTool() (tool.InvokableTool, error) {
 				applog.From(ctx).Warn().Str("event", "tool.duplicate_suppressed").Str("tool", "adapt_to_platform").Str("source", sourceID).Msg("duplicate same-turn call suppressed")
 				return adaptResult{Status: statusDuplicate}, nil
 			}
-			outcomes, err := d.Generation.AdaptToPlatform(ctx, d.SessionID, sourceID, a.SizeIDs, d.Lossless, adaptProvider(d))
+			// Vision pre-stage (proposal add-vision-guided-adaptation): publish the
+			// source image to COS (md5-deduped) → analyze its marketing elements →
+			// inject the resulting theme report into the AI-repaint prompt so each
+			// adapted size stays anchored to the analyzed subject/intent. Gracefully
+			// skipped (themeReport stays "") when COS/vision are unconfigured or any
+			// step fails — adaptation still runs with the standard harness.
+			themeReport := visionThemeReport(ctx, d, sourceID)
+			outcomes, err := d.Generation.AdaptToPlatform(ctx, d.SessionID, sourceID, a.SizeIDs, d.Lossless, adaptProvider(d), themeReport)
 			if err != nil {
 				return adaptResult{}, err
 			}

@@ -33,6 +33,7 @@ import (
 	"gameasset/internal/store"
 	"gameasset/internal/transport"
 	"gameasset/internal/video"
+	"gameasset/internal/vision"
 	"gameasset/internal/websearch"
 	"gameasset/internal/workspace"
 	"gameasset/web"
@@ -104,6 +105,9 @@ func run() error {
 		generation.NewProvider(cfg.ImageBackup),
 	)
 	genSvc := generation.NewService(gen, st, broker, cfg.AssetDir, id.New)
+	// Record the primary image adapter's config so prompt assembly can detect
+	// capabilities (e.g. transparent-background support) for size-note rewrites.
+	genSvc.SetDefaultImageProvider(cfg.ImagePrimary)
 	// Wire the crop service into generation so platform adaptation can use the
 	// deterministic crop fast path (ratio-match) and the size catalog. Adaptation
 	// is reached only through the conversation agent's adapt_to_platform tool (so
@@ -187,6 +191,19 @@ func run() error {
 	}
 	orch.SetWebSearch(webSearchSvc)
 	log.Printf("web-search: DDG text + Bing images enabled (no API key)")
+	// Vision pre-stage for platform adaptation: publish refs to COS (md5-deduped)
+	// then analyze with grok-4-fast to produce a theme report injected into the
+	// AI-repaint prompt. Both capabilities are optional; nil disables gracefully.
+	visionBase, visionKey := cfg.VisionCredential()
+	if visionAnalyzer := vision.New(visionBase, visionKey, "grok-4-fast"); visionAnalyzer != nil {
+		orch.SetVisionAnalyzer(visionAnalyzer)
+		log.Printf("vision: grok-4-fast analysis enabled (base=%s)", visionBase)
+	} else {
+		log.Printf("vision: yunwu/common credentials not configured, vision analysis disabled")
+	}
+	if cosUploader != nil {
+		orch.SetRefPublisher(cosUploader)
+	}
 	hub.SetHandler(func(ctx context.Context, sessionID string, msg transport.Inbound) {
 		switch msg.Type {
 		case "user_message":
@@ -197,10 +214,11 @@ func run() error {
 			if numbering := buildNumbering(st, sessionID, msg.AssetOrder, msg.Refs, msg.Ref, orch.LastProduced(sessionID)); numbering != "" {
 				text = numbering + " " + text
 			} else if len(msg.Refs) > 0 {
-				// Fallback (no display order supplied): surface up to 6 reference ids.
+				// Fallback (no display order supplied): surface up to 16 reference ids
+				// (matches generation.MaxReferenceImages).
 				refs := msg.Refs
-				if len(refs) > 6 {
-					refs = refs[:6]
+				if len(refs) > 16 {
+					refs = refs[:16]
 				}
 				text = "[reference assets: " + strings.Join(refs, ", ") + "] " + text
 			} else if msg.Ref != "" {

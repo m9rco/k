@@ -573,3 +573,9 @@ func slug(s string) string {
 	repl := strings.NewReplacer(" ", "-", ":", "-", "/", "-", "_", "-")
 	return repl.Replace(s)
 }
+
+// VisionCredential returns the base URL and API key for the vision analysis
+// service (grok-4-fast via yunwu common gateway).
+func (c *Config) VisionCredential() (baseURL, apiKey string) {
+	return c.chatCommon.baseURL, c.chatCommon.apiKey
+}

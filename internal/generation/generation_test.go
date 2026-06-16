@@ -14,8 +14,11 @@ import (
 	"testing"
 	"time"
 
+	"gameasset/internal/config"
 	"gameasset/internal/store"
 	"gameasset/internal/transport"
+
+	"github.com/rs/zerolog"
 )
 
 func solidPNG(t *testing.T, w, h int, c color.RGBA) []byte {
@@ -88,7 +91,7 @@ func TestBuildPromptIncludesHarmonyAndPalette(t *testing.T) {
 	if !strings.Contains(prompt, "#112233") {
 		t.Error("prompt missing palette hex")
 	}
-	if !strings.Contains(prompt, "jarring color contrast") {
+	if !strings.Contains(prompt, "jarring contrast") {
 		t.Error("prompt missing harmony constraint")
 	}
 }
@@ -454,9 +457,9 @@ func TestServiceMultiReferenceForwarded(t *testing.T) {
 	now := time.Now().UTC()
 	_ = st.UpsertSession(store.SessionRecord{ID: "s", Fingerprint: "fp", CreatedAt: now, LastSeenAt: now})
 
-	// Seed 8 reference assets (more than MaxReferenceImages).
+	// Seed 18 reference assets (more than MaxReferenceImages=16).
 	var ids []string
-	for i := 0; i < 8; i++ {
+	for i := 0; i < 18; i++ {
 		id := "ref" + strconv.Itoa(i)
 		p := filepath.Join(dir, id+".png")
 		if err := os.WriteFile(p, solidPNG(t, 8, 8, color.RGBA{uint8(i), 0, 0, 255}), 0o644); err != nil {
@@ -543,8 +546,8 @@ func TestBuildPromptIconNoHintRequired(t *testing.T) {
 	if !strings.Contains(prompt, "icon") {
 		t.Errorf("prompt missing icon framing: %q", prompt)
 	}
-	if !strings.Contains(prompt, harmonyConstraint) {
-		t.Error("prompt missing harmony constraint")
+	if !strings.Contains(prompt, "color tone") {
+		t.Error("prompt missing harmony (color tone) clause")
 	}
 }
 
@@ -610,8 +613,8 @@ func TestBuildPromptAdaptPlatformCoversSemantics(t *testing.T) {
 	if !strings.Contains(prompt, "#aabbcc") {
 		t.Errorf("palette hex missing: %q", prompt)
 	}
-	if !strings.Contains(prompt, harmonyConstraint) {
-		t.Errorf("harmony constraint missing: %q", prompt)
+	if !strings.Contains(prompt, "color tone") {
+		t.Errorf("harmony (color tone) clause missing: %q", prompt)
 	}
 }
 
@@ -779,5 +782,177 @@ func TestServiceIconDefaultSize(t *testing.T) {
 	asset, _ := st.GetAsset("s", rec.AssetID)
 	if asset == nil || asset.Width != DefaultIconSize || asset.Height != DefaultIconSize {
 		t.Errorf("recorded icon dimensions = %v, want %dx%d", asset, DefaultIconSize, DefaultIconSize)
+	}
+}
+
+// --- low-divergence harness (design D3) ---
+
+// TestBuildPromptHarnessFourSegments verifies every image-edit intent is wrapped
+// in the CONTEXT / PRESERVE / MODIFY / AVOID skeleton with the game-marketing
+// framing and the anti-fabrication fence.
+func TestBuildPromptHarnessFourSegments(t *testing.T) {
+	prompt, err := BuildPrompt(Slots{Kind: EditBackground, BackgroundDesc: "forest"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, seg := range []string{"CONTEXT:", "PRESERVE:", "MODIFY:", "AVOID:"} {
+		if !strings.Contains(prompt, seg) {
+			t.Errorf("prompt missing %q segment: %q", seg, prompt)
+		}
+	}
+	// Game-marketing context + anti-fabrication.
+	if !strings.Contains(prompt, "existing video game") {
+		t.Error("CONTEXT missing game-marketing framing")
+	}
+	if !strings.Contains(prompt, "Do NOT invent gameplay") {
+		t.Error("CONTEXT missing anti-fabrication clause")
+	}
+	if !strings.Contains(prompt, "AVOID: inventing new subjects") {
+		t.Error("AVOID missing negative fence")
+	}
+}
+
+// TestBuildPromptAnchorClauseOnMultiImage verifies the anchor-role clause appears
+// only when ≥2 references are in play (design D2).
+func TestBuildPromptAnchorClauseOnMultiImage(t *testing.T) {
+	single, _ := BuildPrompt(Slots{Kind: EditBackground, BackgroundDesc: "x", RefCount: 1}, nil)
+	if strings.Contains(single, "FIRST reference image is the anchor") {
+		t.Errorf("single-reference prompt should not declare the multi-image anchor role: %q", single)
+	}
+	multi, _ := BuildPrompt(Slots{Kind: EditBackground, BackgroundDesc: "x", RefCount: 3}, nil)
+	if !strings.Contains(multi, "FIRST reference image is the anchor") {
+		t.Errorf("multi-reference prompt missing anchor clause: %q", multi)
+	}
+}
+
+// TestBuildPromptTransparencyRewrite verifies a 透明底 size note is rewritten for
+// adapters that can't produce transparency (gpt-image-2) and passed through for
+// those that can (design D4).
+func TestBuildPromptTransparencyRewrite(t *testing.T) {
+	base := Slots{Kind: EditAdaptPlatform, TargetWidth: 340, TargetHeight: 160, SizeNote: "透明背景"}
+
+	noTransp := base
+	noTransp.ProviderSupportsTransparency = false
+	p1, _ := BuildPrompt(noTransp, nil)
+	if strings.Contains(p1, "透明背景") {
+		t.Errorf("透明背景 should be rewritten for non-transparent adapter: %q", p1)
+	}
+	if !strings.Contains(p1, "便于后期抠图") {
+		t.Errorf("missing clean-cutout rewrite: %q", p1)
+	}
+
+	withTransp := base
+	withTransp.ProviderSupportsTransparency = true
+	p2, _ := BuildPrompt(withTransp, nil)
+	if !strings.Contains(p2, "透明背景") {
+		t.Errorf("透明背景 should pass through for transparent-capable adapter: %q", p2)
+	}
+}
+
+// TestBuildPromptTextToImageNoPreserve verifies source-less generation gets the
+// lighter CONTEXT framing but no PRESERVE/anchor segment (no anchor to preserve).
+func TestBuildPromptTextToImageNoPreserve(t *testing.T) {
+	prompt, err := BuildPrompt(Slots{Kind: EditTextToImage, TextToImageDesc: "a neon city"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(prompt, "CONTEXT:") {
+		t.Errorf("text-to-image missing CONTEXT: %q", prompt)
+	}
+	if strings.Contains(prompt, "PRESERVE:") {
+		t.Errorf("text-to-image should not have PRESERVE: %q", prompt)
+	}
+}
+
+// TestProviderSupportsTransparency verifies capability detection by provider key.
+func TestProviderSupportsTransparency(t *testing.T) {
+	if !providerSupportsTransparency(config.ImageProviderConfig{Provider: "gemini"}) {
+		t.Error("gemini should support transparency")
+	}
+	if providerSupportsTransparency(config.ImageProviderConfig{Provider: "openai"}) {
+		t.Error("openai/gpt-image should not support transparency")
+	}
+	if providerSupportsTransparency(config.ImageProviderConfig{}) {
+		t.Error("default (empty) should not support transparency")
+	}
+}
+
+// TestServiceHarnessLogEmitted verifies the gen.harness trace surfaces the new
+// low-divergence harness decisions (design D1/D2/D4): reference count + anchor
+// split, provider/transparency capability, and (for adaptation) the
+// target→generation size mapping. Without this the harness work is invisible in
+// the logs.
+func TestServiceHarnessLogEmitted(t *testing.T) {
+	svc, st, _, dir := newGenService(t)
+	now := time.Now().UTC()
+	_ = st.UpsertSession(store.SessionRecord{ID: "s", Fingerprint: "fp", CreatedAt: now, LastSeenAt: now})
+	// Seed a source asset so the edit has a primary (anchor) reference (ref_count=1).
+	srcPath := filepath.Join(dir, "src.png")
+	_ = os.WriteFile(srcPath, solidPNG(t, 8, 8, color.RGBA{1, 1, 1, 255}), 0o644)
+	_ = st.InsertAsset(store.AssetRecord{ID: "src", SessionID: "s", Kind: "upload", Path: srcPath, Mime: "image/png", Width: 8, Height: 8, CreatedAt: now})
+
+	// Bind a buffer-backed logger to the context so From(ctx) writes there.
+	var buf bytes.Buffer
+	logger := zerolog.New(&buf).With().Timestamp().Logger()
+	ctx := logger.WithContext(context.Background())
+
+	taskID, err := svc.Start(ctx, GenerateParams{
+		SessionID:     "s",
+		SourceAssetID: "src",
+		Slots:         Slots{Kind: EditBackground, BackgroundDesc: "a forest"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec := waitTask(t, st, "s", taskID)
+	if rec.Status != "done" {
+		t.Fatalf("task not done: %q %q", rec.Status, rec.Error)
+	}
+
+	out := buf.String()
+	if !strings.Contains(out, `"event":"gen.harness"`) {
+		t.Fatalf("gen.harness event not logged: %s", out)
+	}
+	for _, want := range []string{`"ref_count":1`, `"multi_image_anchor":false`, `"provider":"openai"`, `"supports_transparency":false`} {
+		if !strings.Contains(out, want) {
+			t.Errorf("harness log missing %s in: %s", want, out)
+		}
+	}
+}
+
+// TestServiceHarnessLogAdaptSizeMapping verifies an adaptation task logs the
+// target→generation size mapping (the gpt-image-2 resolver output).
+func TestServiceHarnessLogAdaptSizeMapping(t *testing.T) {
+	svc, st, _, _ := newGenService(t)
+	now := time.Now().UTC()
+	_ = st.UpsertSession(store.SessionRecord{ID: "s", Fingerprint: "fp", CreatedAt: now, LastSeenAt: now})
+
+	var buf bytes.Buffer
+	logger := zerolog.New(&buf).With().Timestamp().Logger()
+	ctx := logger.WithContext(context.Background())
+
+	taskID, err := svc.Start(ctx, GenerateParams{
+		SessionID: "s",
+		Slots: Slots{
+			Kind:         EditAdaptPlatform,
+			TargetWidth:  1280,
+			TargetHeight: 720,
+		},
+		AdaptWidth:  1280,
+		AdaptHeight: 720,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rec := waitTask(t, st, "s", taskID); rec.Status != "done" {
+		t.Fatalf("task not done: %q %q", rec.Status, rec.Error)
+	}
+
+	out := buf.String()
+	if !strings.Contains(out, `"target_size":"1280x720"`) {
+		t.Errorf("harness log missing target_size: %s", out)
+	}
+	if !strings.Contains(out, `"gen_size":"`) {
+		t.Errorf("harness log missing gen_size mapping: %s", out)
 	}
 }

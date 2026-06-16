@@ -72,6 +72,24 @@ type Slots struct {
 	TargetHeight  int
 	SizeNote      string // e.g. 无文案 / 仅 logo / 圆角 / 透明底 / 安全区
 	AdaptDesc     string // optional user description for the adaptation
+	// --- harness inputs set by the service (not user free text) ---
+	// RefCount is how many reference images this generation feeds the model
+	// (anchor + auxiliaries). When ≥2 the prompt adds an explicit anchor-role
+	// clause so the model treats the first image as the sole source of truth and
+	// the rest as style/element hints only (design D2/D3). 0/1 omits it.
+	RefCount int
+	// ProviderSupportsTransparency reports whether the resolved image adapter can
+	// produce a real transparent background. gpt-image-2 cannot, so a 透明底 size
+	// note is rewritten to a clean-cutout phrasing instead of being injected
+	// verbatim (which would make the model "paint" a fake checkerboard). Gemini
+	// and similar adapters set this true and keep the constraint as-is (design D4).
+	ProviderSupportsTransparency bool
+	// ThemeReport is a server-generated marketing analysis report (produced by
+	// the vision analysis stage). When set, a THEME segment is injected between
+	// PRESERVE and MODIFY so the image model can anchor to the analyzed subject
+	// and must-preserve elements. The report is Sanitized before templating.
+	// Only set for adapt_platform when COS upload + vision analysis are available.
+	ThemeReport string
 }
 
 // injectionPatterns match attempts to override system behavior. Matches are
@@ -110,14 +128,61 @@ func Sanitize(s string) string {
 	return strings.TrimSpace(s)
 }
 
-// harmonyConstraint is the fixed color-adaptation clause (design D6). It is
-// always appended so products stay tonally coherent regardless of the edit.
-const harmonyConstraint = "Keep the overall color tone coherent with the source image; avoid abrupt or jarring color contrast. Match lighting and saturation to the original."
+// The low-divergence prompt harness (design D3) wraps every image-edit intent in
+// four server-controlled segments so "stay in the game, stay harmonious, do not
+// hallucinate" is encoded as a checklist the model executes rather than relying on
+// scattered phrasing. CONTEXT / PRESERVE / AVOID are fixed text and never accept
+// user input (injection-safe); MODIFY carries the per-intent instruction plus the
+// sanitized user slot.
+const (
+	// contextClause front-loads the marketing domain so the model treats the
+	// reference as authentic game key art to extend — not a blank canvas to
+	// reinvent. Directly targets "脱离游戏本身 / 虚构游戏画面".
+	contextClause = "CONTEXT: This is a promotional marketing asset for an existing video game. The reference image(s) are authentic key art / in-game visuals from that game. Stay strictly within the game's established art style, world, characters and tone. Do NOT invent gameplay, UI, scenes, characters or worlds not present in the references, and do NOT turn it into generic fantasy or stock illustration."
+
+	// preserveClause locks the anchor's identity and core message.
+	preserveClause = "PRESERVE: Keep the main subject/characters' identity (appearance, outfit, signature features), the core marketing message, and the key visual elements faithful to the reference; stay true to its intent."
+
+	// anchorClause is appended to PRESERVE only with ≥2 references, naming the
+	// first image as the single source of truth (design D2).
+	anchorClause = "The FIRST reference image is the anchor — the single source of truth for subject and intent; the other references contribute style, palette and element inspiration only and must NOT replace the anchor's subject."
+
+	// avoidClause is the negative fence against the known divergence modes of
+	// multi-image edits.
+	avoidClause = "AVOID: inventing new subjects, scenes or anything not in the game; changing the characters' identity; adding text, watermarks or logos absent from the anchor; letting auxiliary references override the anchor subject. Keep the overall color tone, lighting and saturation coherent with the reference; avoid abrupt or jarring contrast."
+
+	// textToImageContext is the lighter domain framing for source-less generation
+	// (no anchor to preserve, so no PRESERVE/anchor clause).
+	textToImageContext = "CONTEXT: Produce a promotional marketing illustration for a video game. Keep it coherent and production-ready; do not add unrequested text, watermarks or logos."
+)
+
+// transparencyRewrite replaces a 透明底/透明背景 size note when the resolved
+// adapter cannot produce real transparency (gpt-image-2). Asking such a model for
+// a transparent background makes it paint a fake one; a clean-cutout phrasing is
+// honored instead, and the exact transparency is the post-processing step's job.
+const transparencyRewrite = "纯净中性单色背景，主体边缘干净清晰便于后期抠图"
+
+// rewriteSizeNote applies capability-aware rewrites to a catalog size note before
+// it is injected. Currently only the transparent-background case (design D4); all
+// other notes (无文案/仅 logo/圆角/安全区) pass through unchanged.
+func rewriteSizeNote(note string, supportsTransparency bool) string {
+	if note == "" {
+		return ""
+	}
+	if !supportsTransparency && (strings.Contains(note, "透明底") || strings.Contains(note, "透明背景")) {
+		return transparencyRewrite
+	}
+	return note
+}
 
 // BuildPrompt assembles the final generation prompt from sanitized slots and
 // the extracted palette. The template is fully server-controlled; user text is
-// only ever inserted as a sanitized descriptive fragment.
+// only ever inserted as a sanitized descriptive fragment. Image-edit intents are
+// wrapped in the four-segment low-divergence harness (CONTEXT/PRESERVE/MODIFY/
+// AVOID); text-to-image gets only the lighter CONTEXT framing.
 func BuildPrompt(slots Slots, palette []PaletteColor) (string, error) {
+	// modify accumulates the per-intent instruction (the MODIFY segment); the
+	// surrounding CONTEXT/PRESERVE/AVOID segments are added once at the end.
 	var b strings.Builder
 
 	switch slots.Kind {
@@ -166,15 +231,18 @@ func BuildPrompt(slots Slots, palette []PaletteColor) (string, error) {
 		}
 	case EditTextToImage:
 		// Text-to-image: a brand-new image from a sanitized scene description. No
-		// source image, so no palette/harmony clause is appended below.
+		// source image, so only the lighter CONTEXT framing is added (no anchor to
+		// preserve, no palette/harmony clause).
 		desc := Sanitize(slots.TextToImageDesc)
 		if desc == "" {
 			return "", fmt.Errorf("text-to-image description required")
 		}
-		b.WriteString("Create a high-quality marketing illustration based on this description: ")
-		b.WriteString(desc)
-		b.WriteString(". Coherent composition, balanced lighting, polished and production-ready.")
-		return b.String(), nil
+		var t strings.Builder
+		t.WriteString(textToImageContext)
+		t.WriteString(" Create a high-quality marketing illustration based on this description: ")
+		t.WriteString(desc)
+		t.WriteString(". Coherent composition, balanced lighting, polished and production-ready.")
+		return t.String(), nil
 	case EditAdaptPlatform:
 		b.WriteString("Adapt this marketing image for a new platform placement. ")
 		b.WriteString("Keep the main subject/characters and the core marketing intent fully intact — do NOT crop the subject out, omit, or alter the key visual message. ")
@@ -190,7 +258,7 @@ func BuildPrompt(slots Slots, palette []PaletteColor) (string, error) {
 			b.WriteString(". ")
 		}
 		b.WriteString("Re-frame and extend/repaint the scene and background to fill the new aspect ratio naturally, rather than cropping; reposition the subject for a balanced composition at the target proportions. ")
-		if note := Sanitize(slots.SizeNote); note != "" {
+		if note := rewriteSizeNote(Sanitize(slots.SizeNote), slots.ProviderSupportsTransparency); note != "" {
 			b.WriteString("Respect this placement constraint: ")
 			b.WriteString(note)
 			b.WriteString(". ")
@@ -209,7 +277,7 @@ func BuildPrompt(slots Slots, palette []PaletteColor) (string, error) {
 		b.WriteString(" Reuse the reference image's composition and base elements; adapt the background to suit the new character.")
 	}
 
-	// Palette constraint.
+	// Palette constraint (anchor-derived colors to harmonize with).
 	if len(palette) > 0 {
 		hexes := make([]string, 0, len(palette))
 		for _, c := range palette {
@@ -220,9 +288,17 @@ func BuildPrompt(slots Slots, palette []PaletteColor) (string, error) {
 		b.WriteString(".")
 	}
 
-	b.WriteString(" ")
-	b.WriteString(harmonyConstraint)
-	return b.String(), nil
+	// Wrap the per-intent MODIFY body in the four-segment harness. PRESERVE gains
+	// the anchor-role clause when multiple references are in play.
+	preserve := preserveClause
+	if slots.RefCount >= 2 {
+		preserve = preserveClause + " " + anchorClause
+	}
+	theme := ""
+	if t := Sanitize(slots.ThemeReport); t != "" {
+		theme = "\nTHEME: " + t
+	}
+	return contextClause + "\n" + preserve + theme + "\nMODIFY: " + b.String() + "\n" + avoidClause, nil
 }
 
 // buildPlacementPhrase composes the sanitized "<orientation> WxH <channel>

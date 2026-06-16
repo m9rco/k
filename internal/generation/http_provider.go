@@ -110,7 +110,7 @@ func (p *HTTPProvider) buildGenerateRequest(ctx context.Context, req Request) (*
 		"prompt": req.Prompt,
 		"n":      1,
 	}
-	if sz := sizeParam(req.Width, req.Height); sz != "" {
+	if sz := resolveGptImage2Size(req.Width, req.Height); sz != "" {
 		payload["size"] = sz
 	}
 	buf, _ := json.Marshal(payload)
@@ -128,9 +128,12 @@ func (p *HTTPProvider) buildEditRequest(ctx context.Context, req Request) (*http
 	_ = mw.WriteField("model", p.model)
 	_ = mw.WriteField("prompt", req.Prompt)
 	_ = mw.WriteField("n", "1")
-	if sz := sizeParam(req.Width, req.Height); sz != "" {
+	if sz := resolveGptImage2Size(req.Width, req.Height); sz != "" {
 		_ = mw.WriteField("size", sz)
 	}
+	// NOTE: input_fidelity is intentionally NOT sent. gpt-image-2 processes every
+	// input image at high fidelity automatically and rejects the parameter; this
+	// auto-fidelity is the harness's main lever against subject drift (design D4).
 	fw, err := mw.CreateFormFile("image", "source.png")
 	if err != nil {
 		return nil, err
@@ -164,32 +167,29 @@ func (p *HTTPProvider) buildEditRequest(ctx context.Context, req Request) (*http
 	return r, nil
 }
 
-// genSize is one of the image API's legal output dimensions, with its precomputed
-// aspect ratio. gpt-image-2 only accepts this fixed enum: any other requested size
-// is snapped to the model's nearest default. We therefore pick the legal size whose
-// aspect ratio is closest to the target, so the generated composition is as close to
-// the target proportions as possible before the convergence step trims it to exact.
+// genSize is one of the legacy fixed-enum output dimensions, with its precomputed
+// aspect ratio. Used by the fixed-enum adapters (DashScope wan/qwen): any other
+// requested size is snapped to the nearest legal default. gpt-image-2 does NOT use
+// this — it accepts near-arbitrary sizes via resolveGptImage2Size below.
 type genSize struct {
 	label string
 	ratio float64 // width/height
 }
 
-// legalGenSizes is the gpt-image-2 supported size enum (square, landscape 3:2,
-// portrait 2:3). Kept as data so the mapping is centralized, pre-configurable, and
-// unit-testable.
+// legalGenSizes is the legacy fixed-size enum (square, landscape 3:2, portrait
+// 2:3) used by DashScope-style adapters. Kept as data so the mapping is
+// centralized, pre-configurable, and unit-testable. gpt-image-2's resolver is
+// separate (resolveGptImage2Size).
 var legalGenSizes = []genSize{
 	{label: "1024x1024", ratio: 1.0},             // 1:1
 	{label: "1536x1024", ratio: 1536.0 / 1024.0}, // 3:2 landscape
 	{label: "1024x1536", ratio: 1024.0 / 1536.0}, // 2:3 portrait
 }
 
-// sizeParam maps requested dimensions to the gpt-image-2 size enum by NEAREST
-// ASPECT RATIO (log-distance, so landscape/portrait are symmetric) rather than a
-// coarse orientation三分类 — this keeps 3:2 and 4:1 targets on the closest legal
-// proportion instead of collapsing both to the same landscape value. Empty means
-// "let the provider decide". We never pass "auto": auto lets the model pick the
-// size, making the output ratio unpredictable and the convergence step unable to
-// estimate padding/crop; an explicit legal enum keeps it deterministic.
+// sizeParam maps requested dimensions to the legacy fixed enum by NEAREST ASPECT
+// RATIO (log-distance, so landscape/portrait are symmetric) rather than a coarse
+// orientation三分类. Used by fixed-enum adapters (DashScope). Empty means "let the
+// provider decide". gpt-image-2 uses resolveGptImage2Size instead.
 func sizeParam(w, h int) string {
 	if w == 0 || h == 0 {
 		return ""
@@ -212,6 +212,80 @@ func nearestGenSize(w, h int) string {
 		}
 	}
 	return best.label
+}
+
+// gpt-image-2 size constraints (OpenAI image-generation docs, 2026): longest edge
+// ≤3840, both edges multiples of 16, long:short ratio ≤3:1, total pixels within
+// [655360, 8294400]; >3686400px (>2K) is experimental.
+const (
+	gptImage2MaxEdge      = 3840
+	gptImage2MinPixels    = 655360
+	gptImage2MaxPixels    = 8294400
+	gptImage2MaxRatio     = 3.0
+	gptImage2SizeMultiple = 16
+	// gptImage2ExperimentalPixels is the boundary (1920×1920) above which output
+	// is "experimental" per the docs; we keep generation at or below it.
+	gptImage2ExperimentalPixels = 3686400
+	// gptImage2GenBudget targets ~3MP: close to but under the 2K experimental
+	// boundary (3686400px) for quality headroom, with margin for 16px rounding.
+	// We always generate at this budget — catalog sizes below it (57% of the
+	// catalog) downsample to exact afterward (sharper small images), and the few
+	// >2K sizes (iOS 2732×2048) upsample to exact — avoiding the experimental
+	// tier by default (design D1/D5).
+	gptImage2GenBudget = 3_000_000.0
+)
+
+// resolveGptImage2Size returns the gpt-image-2 `size` value: a legal generation
+// size that matches the target aspect ratio (clamped to ≤3:1 for extreme banners)
+// at a ~3MP budget. The exact catalog size is produced by the downstream
+// convergence step, not here — this only fixes the generation proportions so that
+// convergence is a clean rescale/crop rather than a blind reshape (design D1).
+// Returns "" when either dimension is 0 (source-less generation → provider auto).
+func resolveGptImage2Size(dstW, dstH int) string {
+	if dstW <= 0 || dstH <= 0 {
+		return ""
+	}
+	// Generation aspect ratio = target ratio, clamped into the ≤3:1 band. Extreme
+	// banners (4:1, 6:1) generate at 3:1 and are cover-cropped to exact later.
+	ar := float64(dstW) / float64(dstH) // w/h
+	if maxAR := gptImage2MaxRatio; ar > maxAR {
+		ar = maxAR
+	} else if minAR := 1.0 / gptImage2MaxRatio; ar < minAR {
+		ar = minAR
+	}
+	// Solve W,H from ratio + pixel budget: w = ar·h, w·h = budget → h = √(budget/ar).
+	h := math.Sqrt(gptImage2GenBudget / ar)
+	w := ar * h
+	wi := roundTo16(w)
+	hi := roundTo16(h)
+	// Clamp the longest edge ≤ max, scaling both to keep the ratio, then re-round.
+	if longest := maxInt(wi, hi); longest > gptImage2MaxEdge {
+		scale := float64(gptImage2MaxEdge) / float64(longest)
+		wi = roundTo16(float64(wi) * scale)
+		hi = roundTo16(float64(hi) * scale)
+	}
+	// Floor each edge to one grid step so neither collapses to 0.
+	wi = maxInt(wi, gptImage2SizeMultiple)
+	hi = maxInt(hi, gptImage2SizeMultiple)
+	// Belt-and-suspenders pixel-floor guard (a 3MP budget never trips it, but the
+	// contract is that the output always satisfies gpt-image-2's [min,max] range).
+	for wi*hi < gptImage2MinPixels {
+		wi += gptImage2SizeMultiple
+		hi += gptImage2SizeMultiple
+	}
+	return fmt.Sprintf("%dx%d", wi, hi)
+}
+
+// roundTo16 rounds v to the nearest multiple of 16 (gpt-image-2's size grid).
+func roundTo16(v float64) int {
+	return int(math.Round(v/gptImage2SizeMultiple)) * gptImage2SizeMultiple
+}
+
+func maxInt(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
 }
 
 func truncate(s string, n int) string {

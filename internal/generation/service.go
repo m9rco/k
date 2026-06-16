@@ -9,6 +9,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -54,6 +55,12 @@ type Service struct {
 	// the deterministic crop fast path. Wired via SetCropper; nil disables adapt.
 	cropper Cropper
 
+	// defaultImageProvider is the primary image adapter's config, used only for
+	// capability detection (e.g. transparent-background support) when assembling
+	// the prompt and no per-task override is set. Wired via SetDefaultImageProvider;
+	// the zero value (empty Provider) is treated as the OpenAI-compatible adapter.
+	defaultImageProvider config.ImageProviderConfig
+
 	// params caches each task's request so a failed product can be retried
 	// without the caller re-supplying inputs (short-term in-memory store, D7).
 	mu     sync.Mutex
@@ -81,6 +88,34 @@ func (s *Service) SetAnnouncer(a TaskAnnouncer) { s.announce = a }
 // last-produced asset for context continuity. Safe to leave unset.
 func (s *Service) SetAssetCallback(fn func(sessionID, assetID string)) { s.onAsset = fn }
 
+// SetDefaultImageProvider records the primary image adapter's config for prompt
+// capability detection (e.g. whether the adapter can produce a transparent
+// background). Optional; the zero value behaves like the OpenAI-compatible
+// adapter (no transparency).
+func (s *Service) SetDefaultImageProvider(cfg config.ImageProviderConfig) {
+	s.defaultImageProvider = cfg
+}
+
+// providerSupportsTransparency reports whether an image adapter can produce a
+// real transparent background. gpt-image-2 (the OpenAI-compatible default) cannot;
+// Gemini image models can. Used to decide whether a 透明底 size note is injected
+// verbatim or rewritten to a clean-cutout phrasing (design D4).
+func providerSupportsTransparency(cfg config.ImageProviderConfig) bool {
+	return strings.ToLower(strings.TrimSpace(cfg.Provider)) == "gemini"
+}
+
+// providerKind returns the adapter selection key for logging (openai/gemini/
+// dashscope). Empty config reports "openai" (the default adapter). Mirrors the
+// switch in NewProvider so trace logs name the same adapter that runs.
+func providerKind(cfg config.ImageProviderConfig) string {
+	switch k := strings.ToLower(strings.TrimSpace(cfg.Provider)); k {
+	case "gemini", "dashscope":
+		return k
+	default:
+		return "openai"
+	}
+}
+
 // NewService constructs a generation service.
 func NewService(gen generator, st *store.Store, broker *transport.TaskBroker, assetDir string, newID func(string) string) *Service {
 	return &Service{
@@ -96,7 +131,9 @@ func NewService(gen generator, st *store.Store, broker *transport.TaskBroker, as
 }
 
 // MaxReferenceImages bounds how many reference images one generation accepts.
-const MaxReferenceImages = 6
+// gpt-image-2 accepts a multi-image array in one edit call; 16 matches the
+// product cap (anchor + up to 15 auxiliaries). Excess is truncated (design D2).
+const MaxReferenceImages = 16
 
 // GenerateParams describes one generation request initiated by the agent.
 type GenerateParams struct {
@@ -224,6 +261,11 @@ func (s *Service) Retry(ctx context.Context, sessionID, taskID string) error {
 	if err := s.store.UpdateTask(*rec); err != nil {
 		return err
 	}
+	// Clear the prior attempt's SSE history + terminal flag so the re-run streams
+	// on a fresh task stream. Otherwise the stream stays terminal (from the old
+	// task_failed) and the retry's live events never reach the client — the UI
+	// would freeze on the old failure even though the re-run actually executes.
+	s.broker.Reset(taskID)
 	s.broker.Publish(taskID, transport.EventTaskQueued, sessionID, map[string]string{"intent": string(p.Slots.Kind), "retry": "true"})
 
 	runCtx, cancel := context.WithCancel(context.WithoutCancel(ctx))
@@ -303,11 +345,46 @@ func (s *Service) run(ctx context.Context, taskID string, p GenerateParams) {
 	}
 	s.progress(taskID, p.SessionID, 30)
 
+	// Harness inputs (design D2/D3/D4), set on the slots just before templating so
+	// BuildPrompt can add the anchor-role clause for multi-image edits and rewrite
+	// capability-bound size notes (e.g. 透明底) for adapters that can't honor them.
+	refCount := len(extraImages)
+	if primaryID != "" {
+		refCount++
+	}
+	p.Slots.RefCount = refCount
+	effectiveCfg := s.defaultImageProvider
+	if p.ProviderOverride != nil {
+		effectiveCfg = *p.ProviderOverride
+	}
+	p.Slots.ProviderSupportsTransparency = providerSupportsTransparency(effectiveCfg)
+
 	prompt, err := BuildPrompt(p.Slots, palette)
 	if err != nil {
 		s.fail(taskID, p.SessionID, err.Error())
 		return
 	}
+
+	// Surface the harness decisions (design D1/D2/D4) so the new behavior is
+	// visible in the trace, not just the prompt length: how many references and
+	// their anchor/auxiliary split, whether a 透明底 note was rewritten because the
+	// adapter can't honor it, and (for adaptation) the target→generation size
+	// mapping that keeps gpt-image-2 on the right proportions.
+	transparencyRewritten := !p.Slots.ProviderSupportsTransparency &&
+		(strings.Contains(p.Slots.SizeNote, "透明底") || strings.Contains(p.Slots.SizeNote, "透明背景"))
+	harnessLog := applog.From(ctx).Info().Str("event", "gen.harness").Str("task", taskID).
+		Str("kind", string(p.Slots.Kind)).
+		Int("ref_count", refCount).
+		Bool("multi_image_anchor", refCount >= 2).
+		Str("provider", providerKind(effectiveCfg)).
+		Bool("supports_transparency", p.Slots.ProviderSupportsTransparency).
+		Bool("transparency_rewritten", transparencyRewritten)
+	if p.Slots.Kind == EditAdaptPlatform && p.Slots.TargetWidth > 0 && p.Slots.TargetHeight > 0 {
+		harnessLog = harnessLog.
+			Str("target_size", fmt.Sprintf("%dx%d", p.Slots.TargetWidth, p.Slots.TargetHeight)).
+			Str("gen_size", resolveGptImage2Size(p.Slots.TargetWidth, p.Slots.TargetHeight))
+	}
+	harnessLog.Msg("assembled low-divergence prompt")
 	s.progress(taskID, p.SessionID, 45)
 
 	// Desired output dimensions: 普通二次调整继承源图原尺寸；generate_icon 则使用目标
@@ -332,6 +409,15 @@ func (s *Service) run(ctx context.Context, taskID string, p GenerateParams) {
 		if adaptW > 0 && adaptH > 0 {
 			wantW, wantH = adaptW, adaptH
 		}
+		// Honest "no silent caps": a target above gpt-image-2's 2K experimental
+		// boundary is generated at the clamped ~2K budget and upsampled to exact
+		// during convergence (design D1/D5). Surface it so the size choice isn't
+		// invisible.
+		if adaptW*adaptH > gptImage2ExperimentalPixels {
+			applog.From(ctx).Info().Str("event", "gen.adapt_above_2k").Str("task", taskID).
+				Int("target_w", adaptW).Int("target_h", adaptH).
+				Msg("adapt target exceeds gpt-image-2 2K boundary; generating at clamped budget then upsampling to exact")
+		}
 	}
 	// Source-less generation (text-to-image) has no source dimensions to inherit;
 	// use the explicit target size from the request when provided.
@@ -340,8 +426,18 @@ func (s *Service) run(ctx context.Context, taskID string, p GenerateParams) {
 	}
 
 	genStart := time.Now()
-	log.Printf("gen.run: task=%s calling provider.Generate (prompt %d chars, refs=%d)", taskID, len(prompt), len(extraImages))
-	applog.From(ctx).Info().Str("event", "gen.provider_call").Str("task", taskID).Int("prompt_len", len(prompt)).Int("refs", len(extraImages)).Msg("calling provider.Generate")
+	// Log the full prompt sent to the image model so interactions are auditable.
+	// Also log the resolved generation size: for gpt-image-2 this is the legal
+	// enum snapped from the target dims (e.g. 200×200 icon → 1728×1728 gen size,
+	// then downsampled in the convergence step — verifying "small ≠ blurry").
+	applog.From(ctx).Info().
+		Str("event", "gen.provider_call").
+		Str("task", taskID).
+		Str("kind", string(p.Slots.Kind)).
+		Int("gen_w", wantW).Int("gen_h", wantH).
+		Int("refs", len(extraImages)).
+		Str("prompt", prompt).
+		Msg("calling provider.Generate")
 	// Pick the generator: a per-session model override fixes a specific provider
 	// for this task; otherwise use the Service default. Resolved here at run time
 	// so the choice is fixed for the task's lifetime.
@@ -379,10 +475,17 @@ func (s *Service) run(ctx context.Context, taskID string, p GenerateParams) {
 	// icon 尺寸。用 contain 收敛到精确尺寸——保留完整主体、不裁切，多余区域留白
 	// （透明），保证最终落库即是请求的 icon 尺寸。
 	if p.Slots.Kind == EditIcon && iconW > 0 && iconH > 0 {
+		genW, genH := decodeDimensions(out.Data)
 		if conv, err := crop.CropBytesWithOptions(out.Data, iconW, iconH, crop.Options{Mode: crop.ModeContain}); err != nil {
 			log.Printf("gen.run: task=%s icon converge to %dx%d FAILED: %v (keeping provider output)", taskID, iconW, iconH, err)
 		} else {
 			out.Data = conv.Data
+			applog.From(ctx).Info().Str("event", "gen.converge").Str("task", taskID).
+				Str("kind", "icon").
+				Int("gen_w", genW).Int("gen_h", genH).
+				Int("dst_w", iconW).Int("dst_h", iconH).
+				Str("mode", "contain").
+				Msg("icon converged to target size")
 		}
 	}
 
@@ -399,6 +502,12 @@ func (s *Service) run(ctx context.Context, taskID string, p GenerateParams) {
 			log.Printf("gen.run: task=%s adapt converge to %dx%d (%s) FAILED: %v (keeping provider output)", taskID, adaptW, adaptH, mode, err)
 		} else {
 			out.Data = conv.Data
+			applog.From(ctx).Info().Str("event", "gen.converge").Str("task", taskID).
+				Str("kind", "adapt").
+				Int("gen_w", genW).Int("gen_h", genH).
+				Int("dst_w", adaptW).Int("dst_h", adaptH).
+				Str("mode", string(mode)).
+				Msg("adapt converged to target size")
 		}
 	}
 

@@ -7,6 +7,7 @@ package cos
 import (
 	"bytes"
 	"context"
+	"crypto/md5"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -67,4 +68,46 @@ func (u *Uploader) Upload(ctx context.Context, name string, data []byte, content
 		return "", fmt.Errorf("cos: put %q: %w", key, err)
 	}
 	return u.publicURL + "/" + key, nil
+}
+
+// UploadStore is the minimal store interface required by UploadIfAbsent for
+// the global md5→url deduplication cache.
+type UploadStore interface {
+	GetCOSUpload(md5 string) (string, error)
+	InsertCOSUpload(md5, url, contentType string) error
+}
+
+// UploadIfAbsent uploads data to COS using its md5 hex as the object name
+// (refs/{md5}{ext}), first checking the global dedup cache so identical content
+// is never re-uploaded. Returns the public URL.
+func (u *Uploader) UploadIfAbsent(ctx context.Context, data []byte, contentType string, st UploadStore) (string, error) {
+	sum := md5.Sum(data)
+	hex := fmt.Sprintf("%x", sum)
+
+	if cached, err := st.GetCOSUpload(hex); err == nil && cached != "" {
+		return cached, nil
+	}
+
+	ext := extFromContentType(contentType)
+	pubURL, err := u.Upload(ctx, "refs/"+hex+ext, data, contentType)
+	if err != nil {
+		return "", err
+	}
+	_ = st.InsertCOSUpload(hex, pubURL, contentType)
+	return pubURL, nil
+}
+
+func extFromContentType(ct string) string {
+	switch ct {
+	case "image/png":
+		return ".png"
+	case "image/jpeg", "image/jpg":
+		return ".jpg"
+	case "image/webp":
+		return ".webp"
+	case "image/gif":
+		return ".gif"
+	default:
+		return ".bin"
+	}
 }

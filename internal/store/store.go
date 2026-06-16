@@ -82,6 +82,24 @@ CREATE TABLE IF NOT EXISTS preferences (
 	value       TEXT NOT NULL DEFAULT '',
 	created_at  DATETIME NOT NULL
 );
+
+-- Global content-addressed COS upload cache. Maps an image's MD5 (hex) to its
+-- public URL so identical content is never re-uploaded. Cross-session: any
+-- session that published the same bytes can reuse the cached URL.
+CREATE TABLE IF NOT EXISTS cos_uploads (
+	md5          TEXT PRIMARY KEY,
+	url          TEXT NOT NULL,
+	content_type TEXT NOT NULL DEFAULT '',
+	created_at   DATETIME NOT NULL
+);
+
+-- Vision analysis report cache. Maps image content MD5 to the marketing
+-- theme report so identical images are never re-analysed by grok-4-fast.
+CREATE TABLE IF NOT EXISTS vision_reports (
+	md5        TEXT PRIMARY KEY,
+	report     TEXT NOT NULL,
+	created_at DATETIME NOT NULL
+);
 `
 
 // Open opens (creating if needed) the SQLite database at dbPath and applies the
@@ -473,4 +491,62 @@ func (s *Store) GetPreferences(sessionID string) (map[string]string, error) {
 		out[k] = v
 	}
 	return out, rows.Err()
+}
+
+// --- COS upload cache ---
+
+// GetCOSUpload returns the cached public URL for the given content MD5, or ""
+// when not yet uploaded.
+func (s *Store) GetCOSUpload(md5 string) (string, error) {
+	var url string
+	err := s.db.QueryRow(`SELECT url FROM cos_uploads WHERE md5 = ?`, md5).Scan(&url)
+	if err == sql.ErrNoRows {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("get cos upload: %w", err)
+	}
+	return url, nil
+}
+
+// InsertCOSUpload records a successful upload so subsequent callers can skip it.
+func (s *Store) InsertCOSUpload(md5, url, contentType string) error {
+	_, err := s.db.Exec(`
+		INSERT INTO cos_uploads (md5, url, content_type, created_at)
+		VALUES (?, ?, ?, ?)
+		ON CONFLICT(md5) DO NOTHING`,
+		md5, url, contentType, time.Now().UTC())
+	if err != nil {
+		return fmt.Errorf("insert cos upload: %w", err)
+	}
+	return nil
+}
+
+// --- Vision report cache ---
+
+// GetVisionReport returns the cached analysis report for the given image MD5,
+// or "" when not yet analysed.
+func (s *Store) GetVisionReport(md5 string) (string, error) {
+	var report string
+	err := s.db.QueryRow(`SELECT report FROM vision_reports WHERE md5 = ?`, md5).Scan(&report)
+	if err == sql.ErrNoRows {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("get vision report: %w", err)
+	}
+	return report, nil
+}
+
+// InsertVisionReport stores a completed analysis report keyed by image MD5.
+func (s *Store) InsertVisionReport(md5, report string) error {
+	_, err := s.db.Exec(`
+		INSERT INTO vision_reports (md5, report, created_at)
+		VALUES (?, ?, ?)
+		ON CONFLICT(md5) DO UPDATE SET report = excluded.report`,
+		md5, report, time.Now().UTC())
+	if err != nil {
+		return fmt.Errorf("insert vision report: %w", err)
+	}
+	return nil
 }

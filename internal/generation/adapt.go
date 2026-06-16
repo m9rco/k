@@ -54,7 +54,7 @@ type AdaptOutcome struct {
 // new work starts (covers cross-turn re-requests; backed by persisted assets so
 // it survives restarts). The crop fast path is synchronous (asset ready on
 // return); the AI path returns a task id whose progress streams over SSE.
-func (s *Service) AdaptToPlatform(ctx context.Context, sessionID, sourceAssetID string, sizeIDs []string, lossless bool, override *config.ImageProviderConfig) ([]AdaptOutcome, error) {
+func (s *Service) AdaptToPlatform(ctx context.Context, sessionID, sourceAssetID string, sizeIDs []string, lossless bool, override *config.ImageProviderConfig, themeReport string) ([]AdaptOutcome, error) {
 	if s.cropper == nil {
 		return nil, fmt.Errorf("platform adaptation unavailable: crop service not wired")
 	}
@@ -122,6 +122,7 @@ func (s *Service) AdaptToPlatform(ctx context.Context, sessionID, sourceAssetID 
 				TargetWidth:   spec.Width,
 				TargetHeight:  spec.Height,
 				SizeNote:      spec.Note,
+				ThemeReport:   themeReport,
 			},
 		})
 		if err != nil {

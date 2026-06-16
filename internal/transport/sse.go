@@ -105,6 +105,22 @@ func (b *TaskBroker) unsubscribe(taskID string, ch chan Event) {
 	delete(s.subs, ch)
 }
 
+// Reset clears a task stream's event history and terminal flag so the same task
+// id can be re-run (a retry) on a fresh stream. Without this the stream stays
+// terminal: a new subscriber would replay the stale task_failed event and never
+// register for the retry's live events, freezing the UI on the old failure.
+// Live subscribers are preserved (a client that re-subscribed before Reset keeps
+// receiving), and Seq restarts at 1 so reconnecting clients replay only the new
+// attempt. Safe to call on an unknown task (creates an empty stream).
+func (b *TaskBroker) Reset(taskID string) {
+	s := b.stream(taskID)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.events = nil
+	s.terminal = false
+	s.updatedAt = b.now()
+}
+
 // ServeSSE handles GET /api/tasks/{id}/events. It replays history after the
 // client's Last-Event-ID, then streams live events until the task is terminal
 // or the client disconnects.

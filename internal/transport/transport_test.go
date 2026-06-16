@@ -57,6 +57,49 @@ func TestBrokerTerminalReplayNoLiveChannel(t *testing.T) {
 	}
 }
 
+// TestBrokerResetReopensTerminalStream verifies a retry (same task id) gets a
+// fresh stream: after Reset, a new subscriber is live (not terminal), the stale
+// failure is gone from replay, and the retry's events are delivered. Without
+// Reset the stream stays terminal and the retry's progress never reaches clients.
+func TestBrokerResetReopensTerminalStream(t *testing.T) {
+	b := NewTaskBroker()
+	b.Publish("t1", EventTaskQueued, "s", nil)
+	b.Publish("t1", EventTaskFailed, "s", map[string]string{"error": "boom"})
+
+	// Sanity: the stream is terminal before reset.
+	if _, _, terminal := b.subscribe("t1", 0); !terminal {
+		t.Fatal("expected terminal before reset")
+	}
+
+	// Retry: reset, then re-run publishes fresh events.
+	b.Reset("t1")
+	ch, replay, terminal := b.subscribe("t1", 0)
+	if terminal {
+		t.Fatal("stream still terminal after reset — retry events would be dropped")
+	}
+	if ch == nil {
+		t.Fatal("no live channel after reset — retry would not stream")
+	}
+	for _, ev := range replay {
+		if ev.Type == EventTaskFailed {
+			t.Fatalf("stale failure replayed after reset: %+v", ev)
+		}
+	}
+	// Seq restarts at 1 so reconnecting clients only see the new attempt.
+	ev := b.Publish("t1", EventTaskQueued, "s", map[string]string{"retry": "true"})
+	if ev.Seq != 1 {
+		t.Fatalf("seq after reset = %d, want 1", ev.Seq)
+	}
+	select {
+	case got := <-ch:
+		if got.Type != EventTaskQueued {
+			t.Fatalf("unexpected live event after reset: %+v", got)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("retry event not delivered to live subscriber")
+	}
+}
+
 func TestBrokerLiveDelivery(t *testing.T) {
 	b := NewTaskBroker()
 	b.Publish("t1", EventTaskQueued, "s", nil)

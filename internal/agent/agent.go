@@ -24,6 +24,7 @@ import (
 	utilcb "github.com/cloudwego/eino/utils/callbacks"
 
 	"gameasset/internal/config"
+	"gameasset/internal/cos"
 	"gameasset/internal/crawl"
 	"gameasset/internal/crop"
 	"gameasset/internal/generation"
@@ -32,6 +33,7 @@ import (
 	"gameasset/internal/transport"
 	"gameasset/internal/usermodel"
 	"gameasset/internal/video"
+	"gameasset/internal/vision"
 	"gameasset/internal/websearch"
 )
 
@@ -75,6 +77,11 @@ type Orchestrator struct {
 	// the user to re-select it. In-memory only; survives across turns within a
 	// process lifetime (loss on restart is acceptable).
 	lastProduced map[string]string
+	// refPublisher / visionAnalyzer back the platform-adaptation vision pre-stage
+	// (publish refs to COS → analyze marketing elements). Both optional; nil
+	// disables the pre-stage so adaptation falls back to the standard harness.
+	refPublisher   *cos.Uploader
+	visionAnalyzer *vision.Analyzer
 }
 
 // NewOrchestrator builds the orchestrator from config and backing services. The
@@ -128,6 +135,14 @@ func (o *Orchestrator) SetWebSearch(svc *websearch.Service) { o.webSearch = svc 
 // left unset, the generate_image_from_text tool stays out of the whitelist and
 // the agent politely declines pure text-to-image requests.
 func (o *Orchestrator) SetTextToImage(svc *generation.Service) { o.textToImg = svc }
+
+// SetRefPublisher installs the COS uploader used by the platform-adaptation
+// vision pre-stage to publish source images for analysis. Optional.
+func (o *Orchestrator) SetRefPublisher(u *cos.Uploader) { o.refPublisher = u }
+
+// SetVisionAnalyzer installs the grok-4-fast analyzer used by the
+// platform-adaptation vision pre-stage. Optional; nil disables analysis.
+func (o *Orchestrator) SetVisionAnalyzer(a *vision.Analyzer) { o.visionAnalyzer = a }
 
 // AvailableModels returns the server-authoritative, credential-filtered model
 // catalog grouped by scene, the session's current selection per scene, and the
@@ -463,6 +478,19 @@ func (o *Orchestrator) Handle(ctx context.Context, sessionID, userText string, l
 		deps.AdaptModelOverride = &pc
 	} else if pc, ok := o.cfg.ResolveImageModel(config.SceneImage, "gemini-3-pro-image"); ok {
 		deps.AdaptModelOverride = &pc
+	}
+	// Vision pre-stage for platform adaptation (publish → analyze → theme inject).
+	deps.RefPublisher = o.refPublisher
+	deps.VisionAnalyzer = o.visionAnalyzer
+	if o.hub != nil {
+		sid := sessionID
+		deps.Notify = func(text string, done bool) {
+			o.hub.Send(sid, transport.Event{
+				Type:      transport.EventMessage,
+				SessionID: sid,
+				Data:      map[string]any{"text": text, "done": done},
+			})
+		}
 	}
 	tools, err := deps.Tools()
 	if err != nil {

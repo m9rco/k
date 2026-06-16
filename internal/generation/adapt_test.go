@@ -114,7 +114,7 @@ func init() {}
 func TestAdaptRatioMatchTakesCropPath(t *testing.T) {
 	svc, _, _, _ := newAdaptService(t)
 	// 1920×1080 source → 1280×720 target: same 16:9 ratio, crop fast path.
-	outcomes, err := svc.AdaptToPlatform(context.Background(), "s", "src", []string{"same.landscape.1280x720"}, false, nil)
+	outcomes, err := svc.AdaptToPlatform(context.Background(), "s", "src", []string{"same.landscape.1280x720"}, false, nil, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -132,7 +132,7 @@ func TestAdaptRatioMatchTakesCropPath(t *testing.T) {
 func TestAdaptOrientationFlipTakesAIPath(t *testing.T) {
 	svc, st, _, _ := newAdaptService(t)
 	// 1920×1080 (landscape) → 720×1280 (portrait): orientation flip, AI path.
-	outcomes, err := svc.AdaptToPlatform(context.Background(), "s", "src", []string{"flip.portrait.720x1280"}, false, nil)
+	outcomes, err := svc.AdaptToPlatform(context.Background(), "s", "src", []string{"flip.portrait.720x1280"}, false, nil, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -154,7 +154,7 @@ func TestAdaptOrientationFlipTakesAIPath(t *testing.T) {
 func TestAdaptSquareTakesAIPath(t *testing.T) {
 	svc, st, _, _ := newAdaptService(t)
 	// 1920×1080 (landscape) → 512×512 (square): ratio change, AI path.
-	outcomes, err := svc.AdaptToPlatform(context.Background(), "s", "src", []string{"flip.square.512x512"}, false, nil)
+	outcomes, err := svc.AdaptToPlatform(context.Background(), "s", "src", []string{"flip.square.512x512"}, false, nil, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -186,7 +186,7 @@ func TestAdaptSquareTakesAIPath(t *testing.T) {
 func TestAdaptReRequestRegenerates(t *testing.T) {
 	svc, st, _, _ := newAdaptService(t)
 	// First request: AI path (landscape→portrait flip).
-	outcomes1, err := svc.AdaptToPlatform(context.Background(), "s", "src", []string{"flip.portrait.720x1280"}, false, nil)
+	outcomes1, err := svc.AdaptToPlatform(context.Background(), "s", "src", []string{"flip.portrait.720x1280"}, false, nil, "")
 	if err != nil || outcomes1[0].Via != AdaptViaAI {
 		t.Fatalf("first: want AI path, err=%v via=%s", err, outcomes1[0].Via)
 	}
@@ -194,7 +194,7 @@ func TestAdaptReRequestRegenerates(t *testing.T) {
 
 	// Second request (same session, same source, same size): must regenerate,
 	// NOT reuse — a new AI task with a distinct product.
-	outcomes2, err := svc.AdaptToPlatform(context.Background(), "s", "src", []string{"flip.portrait.720x1280"}, false, nil)
+	outcomes2, err := svc.AdaptToPlatform(context.Background(), "s", "src", []string{"flip.portrait.720x1280"}, false, nil, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -212,7 +212,7 @@ func TestAdaptReRequestRegenerates(t *testing.T) {
 
 func TestAdaptUnknownSizeErrors(t *testing.T) {
 	svc, _, _, _ := newAdaptService(t)
-	_, err := svc.AdaptToPlatform(context.Background(), "s", "src", []string{"doesnotexist"}, false, nil)
+	_, err := svc.AdaptToPlatform(context.Background(), "s", "src", []string{"doesnotexist"}, false, nil, "")
 	if err == nil {
 		t.Error("expected error for unknown size id")
 	}
@@ -220,7 +220,7 @@ func TestAdaptUnknownSizeErrors(t *testing.T) {
 
 func TestAdaptNonProducibleSizeErrors(t *testing.T) {
 	svc, _, _, _ := newAdaptService(t)
-	_, err := svc.AdaptToPlatform(context.Background(), "s", "src", []string{"nonprod.video"}, false, nil)
+	_, err := svc.AdaptToPlatform(context.Background(), "s", "src", []string{"nonprod.video"}, false, nil, "")
 	if err == nil {
 		t.Error("expected error for non-producible size")
 	}
@@ -275,6 +275,35 @@ func TestConvergeMode(t *testing.T) {
 		if got != c.want {
 			t.Errorf("[%s] convergeMode(%q,%d,%d,%d,%d) = %q, want %q",
 				c.label, c.pin, c.genW, c.genH, c.dstW, c.dstH, got, c.want)
+		}
+	}
+}
+
+// TestResolveAndConvergeAgree verifies the D5 协同: the gpt-image-2 size resolver
+// and the auto convergence mode agree on the right path per catalog size — a
+// ratio-matched target downsamples by padding (contain), an extreme banner crops
+// (cover). The product always converges to the EXACT catalog size (the crop layer
+// guarantees the output dimensions), so this only asserts the mode selection.
+func TestResolveAndConvergeAgree(t *testing.T) {
+	cases := []struct {
+		dstW, dstH int
+		want       crop.Mode
+		label      string
+	}{
+		{1280, 720, crop.ModeContain, "16:9 same-ratio → contain (downsample)"},
+		{720, 1280, crop.ModeContain, "9:16 same-ratio → contain"},
+		{512, 512, crop.ModeContain, "square icon → contain (downsample)"},
+		{900, 600, crop.ModeContain, "3:2 cover → contain"},
+		{1120, 280, crop.ModeCover, "4:1 banner (clamped 3:1 gen) → cover"},
+		{1008, 168, crop.ModeCover, "6:1 strip (clamped 3:1 gen) → cover"},
+		{2732, 2048, crop.ModeContain, "iOS 4:3 (>2K) → contain (upsample)"},
+	}
+	for _, c := range cases {
+		size := resolveGptImage2Size(c.dstW, c.dstH)
+		gw, gh := parseSize(t, size)
+		got := convergeMode("", gw, gh, c.dstW, c.dstH)
+		if got != c.want {
+			t.Errorf("[%s] gen=%s converge=%q, want %q", c.label, size, got, c.want)
 		}
 	}
 }
