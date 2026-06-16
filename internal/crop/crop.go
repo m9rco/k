@@ -37,6 +37,11 @@ const (
 	// ModeContain scales the source to fully fit inside the target box without
 	// cropping anything, padding the leftover area with a background color.
 	ModeContain Mode = "contain"
+	// ModeScale scales the source to exactly targetW×targetH without any padding
+	// or cropping. Slight aspect-ratio distortion is accepted — use when source
+	// and target ratios are very close (e.g. after the gpt-image-2 16px rounding)
+	// and letterbox padding would be more objectionable than a <1% stretch.
+	ModeScale Mode = "scale"
 	// ModeAnchor behaves like cover but crops toward a nine-grid anchor instead
 	// of center, keeping a chosen region (e.g. top) visible.
 	ModeAnchor Mode = "anchor"
@@ -255,6 +260,13 @@ func CropImage(src image.Image, targetW, targetH int, opts Options) (image.Image
 		return coverCropAnchored(src, targetW, targetH, anchor)
 	case ModeContain:
 		return ContainCrop(src, targetW, targetH, opts.Background)
+	case ModeScale:
+		if targetW <= 0 || targetH <= 0 {
+			return nil, fmt.Errorf("invalid target size %dx%d", targetW, targetH)
+		}
+		out := image.NewRGBA(image.Rect(0, 0, targetW, targetH))
+		xdraw.CatmullRom.Scale(out, out.Bounds(), src, src.Bounds(), xdraw.Over, nil)
+		return out, nil
 	case ModeRect:
 		if opts.Rect == nil {
 			return nil, fmt.Errorf("rect mode requires a region")

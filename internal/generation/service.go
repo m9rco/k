@@ -476,7 +476,7 @@ func (s *Service) run(ctx context.Context, taskID string, p GenerateParams) {
 	// （透明），保证最终落库即是请求的 icon 尺寸。
 	if p.Slots.Kind == EditIcon && iconW > 0 && iconH > 0 {
 		genW, genH := decodeDimensions(out.Data)
-		if conv, err := crop.CropBytesWithOptions(out.Data, iconW, iconH, crop.Options{Mode: crop.ModeContain}); err != nil {
+		if conv, err := crop.CropBytesWithOptions(out.Data, iconW, iconH, crop.Options{Mode: crop.ModeScale}); err != nil {
 			log.Printf("gen.run: task=%s icon converge to %dx%d FAILED: %v (keeping provider output)", taskID, iconW, iconH, err)
 		} else {
 			out.Data = conv.Data
@@ -484,7 +484,7 @@ func (s *Service) run(ctx context.Context, taskID string, p GenerateParams) {
 				Str("kind", "icon").
 				Int("gen_w", genW).Int("gen_h", genH).
 				Int("dst_w", iconW).Int("dst_h", iconH).
-				Str("mode", "contain").
+				Str("mode", "scale").
 				Msg("icon converged to target size")
 		}
 	}

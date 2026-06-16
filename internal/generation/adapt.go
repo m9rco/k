@@ -176,15 +176,17 @@ func convergeMode(pin string, genW, genH, dstW, dstH int) crop.Mode {
 	switch crop.Mode(pin) {
 	case crop.ModeContain:
 		return crop.ModeContain
+	case crop.ModeScale:
+		return crop.ModeScale
 	case crop.ModeCover:
 		return crop.ModeCover
 	}
 	if genW <= 0 || genH <= 0 || dstW <= 0 || dstH <= 0 {
-		return crop.ModeContain
+		return crop.ModeScale
 	}
 	diff := math.Abs(math.Log(float64(genW)/float64(genH)) - math.Log(float64(dstW)/float64(dstH)))
 	if diff > convergeTolerance {
 		return crop.ModeCover
 	}
-	return crop.ModeContain
+	return crop.ModeScale
 }
