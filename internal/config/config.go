@@ -359,7 +359,7 @@ func Load(platformsPath string) (*Config, error) {
 	// Outpaint provider for extreme-ratio adaptation convergence. Defaults to
 	// gemini (image models that extend a scene cleanly). No API key → the
 	// outpaint path falls back to band padding, so adaptation still works.
-	imageOutpaint := common.resolveEndpoint("IMAGE_OUTPAINT", "gemini", "gemini-2.5-flash-image", endpointAliases{})
+	imageOutpaint := common.resolveEndpoint("IMAGE_OUTPAINT", "gemini", "gemini-3.1-flash-image", endpointAliases{})
 	// Text-to-image (wan/qwen via DashScope async). Default provider "dashscope".
 	textToImage := common.resolveEndpoint("TEXT_TO_IMAGE", "dashscope", "", endpointAliases{})
 	// Video canonicalizes on VIDEO_*; the older HAPPYHORSE_* names remain as

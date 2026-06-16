@@ -44,32 +44,52 @@ type AdaptOutcome struct {
 	TaskID  string `json:"taskId,omitempty"`
 }
 
-// AdaptToPlatform adapts one source image to each requested target size,
-// choosing per size between a deterministic crop (when the source and target
-// aspect ratios match within ratioTolerance and share orientation) and an AI
-// repaint (when the ratio must change — crop would slice the subject out).
+// AdaptToPlatform adapts an ordered reference group to each requested target
+// size, producing EXACTLY ONE product per target size (product count = size
+// count, never references × sizes). references[0] is the anchor — the content /
+// subject / intent truth source that drives parent linkage, size inheritance and
+// palette; references[1:] are auxiliary (style/element only, must not replace the
+// anchor subject). The legacy single-image call passes a one-element slice.
 //
-// Session-level dedup runs first per size: when this session already holds a
-// product derived from this source at this size, that product is reused and no
-// new work starts (covers cross-turn re-requests; backed by persisted assets so
-// it survives restarts). The crop fast path is synchronous (asset ready on
-// return); the AI path returns a task id whose progress streams over SSE.
-func (s *Service) AdaptToPlatform(ctx context.Context, sessionID, sourceAssetID string, sizeIDs []string, lossless bool, override *config.ImageProviderConfig, themeReport string) ([]AdaptOutcome, error) {
+// Routing per size:
+//   - reference group of ≥2 → ALWAYS AI repaint. The deterministic crop fast path
+//     can only act on one image, so it would silently drop the auxiliary
+//     references; only an AI repaint lets the whole group inform the composition.
+//   - single reference → the original ratio-based split: crop fast path when the
+//     anchor and target aspect ratios match within ratioTolerance and share
+//     orientation, else AI repaint.
+//
+// The crop fast path is synchronous (asset ready on return); the AI path returns
+// a task id whose progress streams over SSE.
+func (s *Service) AdaptToPlatform(ctx context.Context, sessionID string, references []string, sizeIDs []string, lossless bool, override *config.ImageProviderConfig, themeReport string) ([]AdaptOutcome, error) {
 	if s.cropper == nil {
 		return nil, fmt.Errorf("platform adaptation unavailable: crop service not wired")
 	}
-	if sourceAssetID == "" {
-		return nil, fmt.Errorf("adapt requires a source asset id")
+	// Normalize the reference group: drop blanks, cap at MaxReferenceImages, take
+	// the first as anchor. An empty group is a hard error (nothing to adapt).
+	refs := make([]string, 0, len(references))
+	for _, id := range references {
+		if id != "" {
+			refs = append(refs, id)
+		}
 	}
+	if len(refs) > MaxReferenceImages {
+		refs = refs[:MaxReferenceImages]
+	}
+	if len(refs) == 0 {
+		return nil, fmt.Errorf("adapt requires at least one source/reference asset id")
+	}
+	anchorID := refs[0]
+	multiRef := len(refs) >= 2
 	if len(sizeIDs) == 0 {
 		return nil, fmt.Errorf("adapt requires at least one target size id")
 	}
-	src, err := s.store.GetAsset(sessionID, sourceAssetID)
+	src, err := s.store.GetAsset(sessionID, anchorID)
 	if err != nil {
 		return nil, err
 	}
 	if src == nil {
-		return nil, fmt.Errorf("source asset %q not found in session", sourceAssetID)
+		return nil, fmt.Errorf("anchor asset %q not found in session", anchorID)
 	}
 
 	// Validate every size up front (unknown / non-producible is a hard error, as
@@ -88,9 +108,10 @@ func (s *Service) AdaptToPlatform(ctx context.Context, sessionID, sourceAssetID 
 
 	outcomes := make([]AdaptOutcome, 0, len(specs))
 	for _, spec := range specs {
-		// Route: ratio match → deterministic crop; else AI repaint.
-		if aspectClose(src.Width, src.Height, spec.Width, spec.Height) {
-			results, err := s.cropper.CropToSizes(sessionID, sourceAssetID, []string{spec.SizeID}, lossless, crop.Options{Mode: crop.ModeCover})
+		// Route: single reference + ratio match → deterministic crop; a reference
+		// group (≥2) always takes AI repaint so the auxiliary refs aren't dropped.
+		if !multiRef && aspectClose(src.Width, src.Height, spec.Width, spec.Height) {
+			results, err := s.cropper.CropToSizes(sessionID, anchorID, []string{spec.SizeID}, lossless, crop.Options{Mode: crop.ModeCover})
 			if err != nil {
 				return nil, fmt.Errorf("adapt %s via crop: %w", spec.SizeID, err)
 			}
@@ -101,10 +122,12 @@ func (s *Service) AdaptToPlatform(ctx context.Context, sessionID, sourceAssetID 
 			continue
 		}
 
-		// 3) AI repaint: re-compose for the new aspect ratio, preserving subject.
+		// AI repaint: re-compose for the new aspect ratio, preserving the anchor
+		// subject. The whole reference group is threaded through so multi-image
+		// adaptations feed every reference to the image model.
 		taskID, err := s.Start(ctx, GenerateParams{
 			SessionID:         sessionID,
-			SourceAssetID:     sourceAssetID,
+			ReferenceAssetIDs: refs,
 			Lossless:          lossless,
 			ProviderOverride:  override,
 			AdaptChannelID:    spec.ChannelID,

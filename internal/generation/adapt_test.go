@@ -114,7 +114,7 @@ func init() {}
 func TestAdaptRatioMatchTakesCropPath(t *testing.T) {
 	svc, _, _, _ := newAdaptService(t)
 	// 1920×1080 source → 1280×720 target: same 16:9 ratio, crop fast path.
-	outcomes, err := svc.AdaptToPlatform(context.Background(), "s", "src", []string{"same.landscape.1280x720"}, false, nil, "")
+	outcomes, err := svc.AdaptToPlatform(context.Background(), "s", []string{"src"}, []string{"same.landscape.1280x720"}, false, nil, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -129,10 +129,101 @@ func TestAdaptRatioMatchTakesCropPath(t *testing.T) {
 	}
 }
 
+func TestRetryAssetReRunsFlowAsNewAsset(t *testing.T) {
+	svc, st, _, _ := newAdaptService(t)
+	// Produce an AI-adapted asset first.
+	outcomes, err := svc.AdaptToPlatform(context.Background(), "s", []string{"src"}, []string{"flip.portrait.720x1280"}, false, nil, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec := waitTask(t, st, "s", outcomes[0].TaskID)
+	if rec.Status != "done" || rec.AssetID == "" {
+		t.Fatalf("setup adapt failed: status=%q err=%q", rec.Status, rec.Error)
+	}
+	origID := rec.AssetID
+
+	// Retry that successful product → a NEW task/asset, original untouched.
+	newTaskID, err := svc.RetryAsset(context.Background(), "s", origID, nil)
+	if err != nil {
+		t.Fatalf("RetryAsset: %v", err)
+	}
+	newRec := waitTask(t, st, "s", newTaskID)
+	if newRec.Status != "done" {
+		t.Fatalf("retry task failed: %q", newRec.Error)
+	}
+	if newRec.AssetID == "" || newRec.AssetID == origID {
+		t.Errorf("retry must yield a new asset id, got %q (orig %q)", newRec.AssetID, origID)
+	}
+	if orig, _ := st.GetAsset("s", origID); orig == nil {
+		t.Error("original asset must be preserved after retry")
+	}
+}
+
+func TestRetryAssetRejectsNonRetryable(t *testing.T) {
+	svc, _, _, _ := newAdaptService(t)
+	// "src" is a plain upload — no gen_origin, so not retryable.
+	if _, err := svc.RetryAsset(context.Background(), "s", "src", nil); err == nil {
+		t.Error("expected error retrying a non-AI (upload) asset")
+	}
+	if _, err := svc.RetryAsset(context.Background(), "s", "nope", nil); err == nil {
+		t.Error("expected error retrying an unknown asset")
+	}
+}
+
+func TestAdaptMultiRefForcesAIEvenOnRatioMatch(t *testing.T) {
+	svc, st, dir, _ := newAdaptService(t)
+	// Add a second reference asset (same 16:9 ratio as the target).
+	now := time.Now().UTC()
+	auxPath := filepath.Join(dir, "aux.png")
+	_ = os.WriteFile(auxPath, solidPNGAdapt(t, 1920, 1080), 0o644)
+	_ = st.InsertAsset(store.AssetRecord{
+		ID: "aux", SessionID: "s", Kind: "upload", Path: auxPath, Mime: "image/png",
+		Width: 1920, Height: 1080, CreatedAt: now,
+	})
+	// Anchor 1920×1080 → 1280×720 is a 16:9 ratio match (single image would crop),
+	// but a 2-image reference group must force the AI repaint path so the auxiliary
+	// reference isn't silently dropped.
+	outcomes, err := svc.AdaptToPlatform(context.Background(), "s", []string{"src", "aux"}, []string{"same.landscape.1280x720"}, false, nil, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(outcomes) != 1 {
+		t.Fatalf("want 1 outcome, got %d", len(outcomes))
+	}
+	if outcomes[0].Via != AdaptViaAI {
+		t.Errorf("reference group must force AI path, got via=%q", outcomes[0].Via)
+	}
+	rec := waitTask(t, st, "s", outcomes[0].TaskID)
+	if rec.Status != "done" {
+		t.Fatalf("AI task failed: %q", rec.Error)
+	}
+}
+
+func TestAdaptMultiSizeProducesOnePerSize(t *testing.T) {
+	svc, _, dir, _ := newAdaptService(t)
+	now := time.Now().UTC()
+	auxPath := filepath.Join(dir, "aux2.png")
+	_ = os.WriteFile(auxPath, solidPNGAdapt(t, 1920, 1080), 0o644)
+	_ = svc.store.InsertAsset(store.AssetRecord{
+		ID: "aux2", SessionID: "s", Kind: "upload", Path: auxPath, Mime: "image/png",
+		Width: 1920, Height: 1080, CreatedAt: now,
+	})
+	// Reference group of 2 + 3 target sizes → exactly 3 outcomes (one per size),
+	// NOT references×sizes (which would be 6).
+	outcomes, err := svc.AdaptToPlatform(context.Background(), "s", []string{"src", "aux2"},
+		[]string{"same.landscape.1280x720", "flip.portrait.720x1280", "flip.square.512x512"}, false, nil, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(outcomes) != 3 {
+		t.Fatalf("reference group over 3 sizes must yield 3 outcomes (one per size), got %d", len(outcomes))
+	}
+}
+
 func TestAdaptOrientationFlipTakesAIPath(t *testing.T) {
 	svc, st, _, _ := newAdaptService(t)
 	// 1920×1080 (landscape) → 720×1280 (portrait): orientation flip, AI path.
-	outcomes, err := svc.AdaptToPlatform(context.Background(), "s", "src", []string{"flip.portrait.720x1280"}, false, nil, "")
+	outcomes, err := svc.AdaptToPlatform(context.Background(), "s", []string{"src"}, []string{"flip.portrait.720x1280"}, false, nil, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -154,7 +245,7 @@ func TestAdaptOrientationFlipTakesAIPath(t *testing.T) {
 func TestAdaptSquareTakesAIPath(t *testing.T) {
 	svc, st, _, _ := newAdaptService(t)
 	// 1920×1080 (landscape) → 512×512 (square): ratio change, AI path.
-	outcomes, err := svc.AdaptToPlatform(context.Background(), "s", "src", []string{"flip.square.512x512"}, false, nil, "")
+	outcomes, err := svc.AdaptToPlatform(context.Background(), "s", []string{"src"}, []string{"flip.square.512x512"}, false, nil, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -186,7 +277,7 @@ func TestAdaptSquareTakesAIPath(t *testing.T) {
 func TestAdaptReRequestRegenerates(t *testing.T) {
 	svc, st, _, _ := newAdaptService(t)
 	// First request: AI path (landscape→portrait flip).
-	outcomes1, err := svc.AdaptToPlatform(context.Background(), "s", "src", []string{"flip.portrait.720x1280"}, false, nil, "")
+	outcomes1, err := svc.AdaptToPlatform(context.Background(), "s", []string{"src"}, []string{"flip.portrait.720x1280"}, false, nil, "")
 	if err != nil || outcomes1[0].Via != AdaptViaAI {
 		t.Fatalf("first: want AI path, err=%v via=%s", err, outcomes1[0].Via)
 	}
@@ -194,7 +285,7 @@ func TestAdaptReRequestRegenerates(t *testing.T) {
 
 	// Second request (same session, same source, same size): must regenerate,
 	// NOT reuse — a new AI task with a distinct product.
-	outcomes2, err := svc.AdaptToPlatform(context.Background(), "s", "src", []string{"flip.portrait.720x1280"}, false, nil, "")
+	outcomes2, err := svc.AdaptToPlatform(context.Background(), "s", []string{"src"}, []string{"flip.portrait.720x1280"}, false, nil, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -212,7 +303,7 @@ func TestAdaptReRequestRegenerates(t *testing.T) {
 
 func TestAdaptUnknownSizeErrors(t *testing.T) {
 	svc, _, _, _ := newAdaptService(t)
-	_, err := svc.AdaptToPlatform(context.Background(), "s", "src", []string{"doesnotexist"}, false, nil, "")
+	_, err := svc.AdaptToPlatform(context.Background(), "s", []string{"src"}, []string{"doesnotexist"}, false, nil, "")
 	if err == nil {
 		t.Error("expected error for unknown size id")
 	}
@@ -220,7 +311,7 @@ func TestAdaptUnknownSizeErrors(t *testing.T) {
 
 func TestAdaptNonProducibleSizeErrors(t *testing.T) {
 	svc, _, _, _ := newAdaptService(t)
-	_, err := svc.AdaptToPlatform(context.Background(), "s", "src", []string{"nonprod.video"}, false, nil, "")
+	_, err := svc.AdaptToPlatform(context.Background(), "s", []string{"src"}, []string{"nonprod.video"}, false, nil, "")
 	if err == nil {
 		t.Error("expected error for non-producible size")
 	}

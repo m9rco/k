@@ -42,6 +42,7 @@ CREATE TABLE IF NOT EXISTS assets (
 	provider    TEXT NOT NULL DEFAULT '', -- which image provider produced it
 	parent_id   TEXT NOT NULL DEFAULT '', -- source asset for derived products
 	meta        TEXT NOT NULL DEFAULT '', -- JSON blob for extra metadata
+	gen_origin  TEXT NOT NULL DEFAULT '', -- JSON GenerateParams for retry (empty = not retryable)
 	created_at  DATETIME NOT NULL,
 	FOREIGN KEY (session_id) REFERENCES sessions(id)
 );
@@ -127,6 +128,16 @@ func Open(dbPath string) (*Store, error) {
 		_ = db.Close()
 		return nil, fmt.Errorf("apply schema: %w", err)
 	}
+	// Additive migrations for databases created before a column existed. SQLite
+	// has no "ADD COLUMN IF NOT EXISTS", so ignore the duplicate-column error.
+	for _, stmt := range []string{
+		`ALTER TABLE assets ADD COLUMN gen_origin TEXT NOT NULL DEFAULT ''`,
+	} {
+		if _, err := db.Exec(stmt); err != nil && !strings.Contains(err.Error(), "duplicate column name") {
+			_ = db.Close()
+			return nil, fmt.Errorf("migrate: %w", err)
+		}
+	}
 	return &Store{db: db}, nil
 }
 
@@ -187,15 +198,19 @@ type AssetRecord struct {
 	Provider  string
 	ParentID  string
 	Meta      string
+	// GenOrigin is the JSON-marshaled GenerateParams that produced this asset,
+	// used to re-run the same flow on retry. Empty for non-AI products (uploads,
+	// deterministic crops) — those are not retryable.
+	GenOrigin string
 	CreatedAt time.Time
 }
 
 // InsertAsset persists a new asset.
 func (s *Store) InsertAsset(a AssetRecord) error {
 	_, err := s.db.Exec(`
-		INSERT INTO assets (id, session_id, kind, path, mime, width, height, provider, parent_id, meta, created_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		a.ID, a.SessionID, a.Kind, a.Path, a.Mime, a.Width, a.Height, a.Provider, a.ParentID, a.Meta, a.CreatedAt)
+		INSERT INTO assets (id, session_id, kind, path, mime, width, height, provider, parent_id, meta, gen_origin, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		a.ID, a.SessionID, a.Kind, a.Path, a.Mime, a.Width, a.Height, a.Provider, a.ParentID, a.Meta, a.GenOrigin, a.CreatedAt)
 	if err != nil {
 		return fmt.Errorf("insert asset: %w", err)
 	}
@@ -206,10 +221,10 @@ func (s *Store) InsertAsset(a AssetRecord) error {
 // Scoping by session enforces cross-session isolation at the data layer.
 func (s *Store) GetAsset(sessionID, id string) (*AssetRecord, error) {
 	row := s.db.QueryRow(`
-		SELECT id, session_id, kind, path, mime, width, height, provider, parent_id, meta, created_at
+		SELECT id, session_id, kind, path, mime, width, height, provider, parent_id, meta, gen_origin, created_at
 		FROM assets WHERE id = ? AND session_id = ?`, id, sessionID)
 	var a AssetRecord
-	err := row.Scan(&a.ID, &a.SessionID, &a.Kind, &a.Path, &a.Mime, &a.Width, &a.Height, &a.Provider, &a.ParentID, &a.Meta, &a.CreatedAt)
+	err := row.Scan(&a.ID, &a.SessionID, &a.Kind, &a.Path, &a.Mime, &a.Width, &a.Height, &a.Provider, &a.ParentID, &a.Meta, &a.GenOrigin, &a.CreatedAt)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -222,7 +237,7 @@ func (s *Store) GetAsset(sessionID, id string) (*AssetRecord, error) {
 // ListAssets returns all assets for a session, newest first.
 func (s *Store) ListAssets(sessionID string) ([]AssetRecord, error) {
 	rows, err := s.db.Query(`
-		SELECT id, session_id, kind, path, mime, width, height, provider, parent_id, meta, created_at
+		SELECT id, session_id, kind, path, mime, width, height, provider, parent_id, meta, gen_origin, created_at
 		FROM assets WHERE session_id = ? ORDER BY created_at DESC`, sessionID)
 	if err != nil {
 		return nil, fmt.Errorf("list assets: %w", err)
@@ -231,7 +246,7 @@ func (s *Store) ListAssets(sessionID string) ([]AssetRecord, error) {
 	var out []AssetRecord
 	for rows.Next() {
 		var a AssetRecord
-		if err := rows.Scan(&a.ID, &a.SessionID, &a.Kind, &a.Path, &a.Mime, &a.Width, &a.Height, &a.Provider, &a.ParentID, &a.Meta, &a.CreatedAt); err != nil {
+		if err := rows.Scan(&a.ID, &a.SessionID, &a.Kind, &a.Path, &a.Mime, &a.Width, &a.Height, &a.Provider, &a.ParentID, &a.Meta, &a.GenOrigin, &a.CreatedAt); err != nil {
 			return nil, fmt.Errorf("scan asset: %w", err)
 		}
 		out = append(out, a)

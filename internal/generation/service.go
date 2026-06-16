@@ -290,6 +290,46 @@ func (s *Service) Retry(ctx context.Context, sessionID, taskID string) error {
 	return nil
 }
 
+// genOrigin marshals the params that produced an asset so the same flow can be
+// re-run on retry. ProviderOverride is dropped: it may carry credentials and is
+// re-resolved at retry time by the caller (the adapt path re-forces gpt-image-2).
+// Returns "" on marshal failure — the product is simply treated as non-retryable.
+func genOrigin(p GenerateParams) string {
+	p.ProviderOverride = nil
+	b, err := json.Marshal(p)
+	if err != nil {
+		return ""
+	}
+	return string(b)
+}
+
+// RetryAsset re-runs the AI generation flow that produced a successful product,
+// reusing its persisted gen_origin parameters. The result is a NEW asset (the
+// original is left untouched) — this is distinct from Retry, which re-runs a
+// FAILED task in place. Only session-owned assets carrying a gen_origin (i.e. AI
+// products; uploads and deterministic crops have none) can be retried. override,
+// when non-nil, re-applies the request-scoped provider routing (e.g. adapt's
+// gpt-image-2) that was stripped from gen_origin before persistence.
+func (s *Service) RetryAsset(ctx context.Context, sessionID, assetID string, override *config.ImageProviderConfig) (string, error) {
+	asset, err := s.store.GetAsset(sessionID, assetID)
+	if err != nil {
+		return "", err
+	}
+	if asset == nil {
+		return "", fmt.Errorf("asset %q not found in session", assetID)
+	}
+	if asset.GenOrigin == "" {
+		return "", fmt.Errorf("asset %q is not retryable (no generation origin)", assetID)
+	}
+	var p GenerateParams
+	if err := json.Unmarshal([]byte(asset.GenOrigin), &p); err != nil {
+		return "", fmt.Errorf("decode gen_origin for %q: %w", assetID, err)
+	}
+	p.SessionID = sessionID // never trust a persisted session id; scope to caller
+	p.ProviderOverride = override
+	return s.Start(ctx, p)
+}
+
 // Cancel aborts an in-flight task: it fires the run context's cancel (which
 // interrupts the provider HTTP request and stops the pipeline before it can
 // persist an orphan product) and deletes the task record. Returns the number of
@@ -581,6 +621,7 @@ func (s *Service) run(ctx context.Context, taskID string, p GenerateParams) {
 		Provider:  out.Provider,
 		ParentID:  primaryID,
 		Meta:      meta,
+		GenOrigin: genOrigin(p),
 		CreatedAt: now,
 	}); err != nil {
 		s.fail(taskID, p.SessionID, fmt.Sprintf("persist: %v", err))

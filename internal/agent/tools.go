@@ -565,8 +565,8 @@ func (d ToolDeps) newListSizesTool() (tool.InvokableTool, error) {
 // --- adapt_to_platform -------------------------------------------------------
 
 type adaptArgs struct {
-	SourceAssetID     string   `json:"source_asset_id" jsonschema:"description=ID of the workspace image to adapt"`
-	ReferenceAssetIDs []string `json:"reference_asset_ids,omitempty" jsonschema:"description=Optional extra reference images (up to 16). First is the anchor (primary) when source_asset_id is omitted."`
+	SourceAssetID     string   `json:"source_asset_id,omitempty" jsonschema:"description=ID of a single workspace image to adapt. For a multi-image reference group use reference_asset_ids instead."`
+	ReferenceAssetIDs []string `json:"reference_asset_ids,omitempty" jsonschema:"description=Ordered reference group (up to 16) to adapt as ONE bundle. First id is the anchor (内容/主体真相源), the rest are auxiliary style/element references. Each target size yields exactly one image referencing the whole group (product count = size count). Use this for the [reference assets: ...] multi-select case."`
 	SizeIDs           []string `json:"size_ids" jsonschema:"description=Unique platform size ids to adapt to (e.g. taptap.banner.1120x280). Use list_platform_sizes first."`
 }
 
@@ -595,21 +595,44 @@ func adaptProvider(d ToolDeps) *config.ImageProviderConfig {
 }
 
 // visionThemeReport runs the publish → analyze pre-stage for platform adaptation
-// and returns the marketing theme report to anchor the AI repaint. Returns "" —
-// and the caller proceeds with the standard harness — whenever COS/vision are
-// unconfigured, the source can't be read, or any step fails. Stage progress is
-// surfaced to chat: upload/error via d.Notify, analysis chunks via d.NotifyAnalysis
-// (collapsible panel), falling back to d.Notify when NotifyAnalysis is nil.
-func visionThemeReport(ctx context.Context, d ToolDeps, sourceID string) string {
+// and returns the marketing theme report to anchor the AI repaint. It analyzes the
+// WHOLE ordered reference group (anchor first), so multi-image adaptations feed
+// every reference to grok-4-fast. Returns "" — and the caller proceeds with the
+// standard harness — whenever COS/vision are unconfigured, no reference can be
+// read, or any step fails. Stage progress is surfaced to chat: upload/error via
+// d.Notify, analysis chunks via d.NotifyAnalysis (collapsible panel), falling back
+// to d.Notify when NotifyAnalysis is nil.
+//
+// Cache key: a single image keys on its raw-content md5 (so an upload-time prewarm
+// and a later single-image adapt share the same cached report); a group of 2+ keys
+// on a composite fingerprint of the ordered per-image md5s.
+func visionThemeReport(ctx context.Context, d ToolDeps, refIDs []string) string {
 	if d.RefPublisher == nil || d.VisionAnalyzer == nil || !d.VisionAnalyzer.Configured() || d.Store == nil {
 		return ""
 	}
-	asset, err := d.Store.GetAsset(d.SessionID, sourceID)
-	if err != nil || asset == nil {
-		return ""
+	// Load each reference's bytes in order; skip any that can't be read rather
+	// than failing the whole pre-stage (a missing auxiliary ref must not block).
+	type refImg struct {
+		data []byte
+		mime string
+		md5  string
 	}
-	data, err := os.ReadFile(asset.Path)
-	if err != nil {
+	var imgs []refImg
+	for _, id := range refIDs {
+		if id == "" {
+			continue
+		}
+		asset, err := d.Store.GetAsset(d.SessionID, id)
+		if err != nil || asset == nil {
+			continue
+		}
+		data, err := os.ReadFile(asset.Path)
+		if err != nil {
+			continue
+		}
+		imgs = append(imgs, refImg{data: data, mime: asset.Mime, md5: fmt.Sprintf("%x", md5.Sum(data))})
+	}
+	if len(imgs) == 0 {
 		return ""
 	}
 
@@ -618,11 +641,18 @@ func visionThemeReport(ctx context.Context, d ToolDeps, sourceID string) string 
 		notifyAnalysis = d.Notify
 	}
 
-	// Check the vision report cache first — skip grok-4-fast for identical images.
-	sum := md5.Sum(data)
-	imgMD5 := fmt.Sprintf("%x", sum)
-	if cached, err := d.Store.GetVisionReport(imgMD5); err == nil && cached != "" {
-		applog.From(ctx).Info().Str("event", "adapt.analysis_cache_hit").Str("md5", imgMD5).Msg("vision report cache hit")
+	// Group cache key: raw md5 for a single image (aligns with upload prewarm);
+	// composite of ordered per-image md5s for a group.
+	cacheKey := imgs[0].md5
+	if len(imgs) > 1 {
+		parts := make([]string, len(imgs))
+		for i, im := range imgs {
+			parts[i] = im.md5
+		}
+		cacheKey = fmt.Sprintf("%x", md5.Sum([]byte("group:"+strings.Join(parts, ","))))
+	}
+	if cached, err := d.Store.GetVisionReport(cacheKey); err == nil && cached != "" {
+		applog.From(ctx).Info().Str("event", "adapt.analysis_cache_hit").Str("key", cacheKey).Int("refs", len(imgs)).Msg("vision report cache hit")
 		if notifyAnalysis != nil {
 			notifyAnalysis(cached, true)
 		}
@@ -632,15 +662,23 @@ func visionThemeReport(ctx context.Context, d ToolDeps, sourceID string) string 
 	if d.Notify != nil {
 		d.Notify("⏫ 正在分析参考图的宣发要素，请稍候…\n\n", false)
 	}
-	url, err := d.RefPublisher.UploadIfAbsent(ctx, data, asset.Mime, d.Store)
-	if err != nil {
-		applog.From(ctx).Warn().Str("event", "adapt.publish_failed").Err(err).Msg("ref publish failed; skipping analysis")
+	// Publish every reference (md5-deduped); collect the public URLs in order.
+	var urls []string
+	for _, im := range imgs {
+		url, err := d.RefPublisher.UploadIfAbsent(ctx, im.data, im.mime, d.Store)
+		if err != nil {
+			applog.From(ctx).Warn().Str("event", "adapt.publish_failed").Err(err).Msg("ref publish failed; skipping that reference")
+			continue
+		}
+		urls = append(urls, url)
+	}
+	if len(urls) == 0 {
 		if d.Notify != nil {
 			d.Notify("（参考图发布暂不可用，按默认适配）", true)
 		}
 		return ""
 	}
-	report, err := d.VisionAnalyzer.Analyze(ctx, []string{url}, func(chunk string) {
+	report, err := d.VisionAnalyzer.Analyze(ctx, urls, func(chunk string) {
 		if notifyAnalysis != nil {
 			notifyAnalysis(chunk, false)
 		}
@@ -655,10 +693,10 @@ func visionThemeReport(ctx context.Context, d ToolDeps, sourceID string) string 
 	if notifyAnalysis != nil {
 		notifyAnalysis("", true)
 	}
-	if err := d.Store.InsertVisionReport(imgMD5, report); err != nil {
+	if err := d.Store.InsertVisionReport(cacheKey, report); err != nil {
 		applog.From(ctx).Warn().Str("event", "adapt.analysis_cache_miss").Err(err).Msg("failed to cache vision report")
 	}
-	applog.From(ctx).Info().Str("event", "adapt.analysis_ok").Str("md5", imgMD5).Int("report_len", len(report)).Msg("vision theme report produced and cached")
+	applog.From(ctx).Info().Str("event", "adapt.analysis_ok").Str("key", cacheKey).Int("refs", len(imgs)).Int("report_len", len(report)).Msg("vision theme report produced and cached")
 	return report
 }
 
@@ -672,22 +710,33 @@ func (d ToolDeps) newAdaptTool() (tool.InvokableTool, error) {
 			"Use list_platform_sizes first to get valid size_ids. "+
 			"Fast-path sizes return asset_id immediately; AI-repaint sizes return task_id (progress over SSE).",
 		func(ctx context.Context, a adaptArgs) (adaptResult, error) {
-			sourceID := a.SourceAssetID
-			if sourceID == "" && len(a.ReferenceAssetIDs) > 0 {
-				sourceID = a.ReferenceAssetIDs[0]
+			// Build the ordered reference group: explicit reference_asset_ids take
+			// precedence (anchor first); fall back to source_asset_id for the
+			// single-image call. The whole group is analyzed and fed to the model.
+			refs := a.ReferenceAssetIDs
+			if len(refs) == 0 && a.SourceAssetID != "" {
+				refs = []string{a.SourceAssetID}
+			} else if a.SourceAssetID != "" && (len(refs) == 0 || refs[0] != a.SourceAssetID) {
+				// An explicit source that isn't already the anchor leads the group.
+				refs = append([]string{a.SourceAssetID}, refs...)
 			}
-			if !d.dedup.firstSeen("adapt_to_platform|" + sourceID + "|" + strings.Join(a.SizeIDs, ",")) {
-				applog.From(ctx).Warn().Str("event", "tool.duplicate_suppressed").Str("tool", "adapt_to_platform").Str("source", sourceID).Msg("duplicate same-turn call suppressed")
+			if len(refs) == 0 {
+				return adaptResult{}, fmt.Errorf("adapt requires a source or reference asset")
+			}
+			dedupKey := "adapt_to_platform|" + strings.Join(refs, ",") + "|" + strings.Join(a.SizeIDs, ",")
+			if !d.dedup.firstSeen(dedupKey) {
+				applog.From(ctx).Warn().Str("event", "tool.duplicate_suppressed").Str("tool", "adapt_to_platform").Str("anchor", refs[0]).Msg("duplicate same-turn call suppressed")
 				return adaptResult{Status: statusDuplicate}, nil
 			}
-			// Vision pre-stage (proposal add-vision-guided-adaptation): publish the
-			// source image to COS (md5-deduped) → analyze its marketing elements →
-			// inject the resulting theme report into the AI-repaint prompt so each
-			// adapted size stays anchored to the analyzed subject/intent. Gracefully
-			// skipped (themeReport stays "") when COS/vision are unconfigured or any
-			// step fails — adaptation still runs with the standard harness.
-			themeReport := visionThemeReport(ctx, d, sourceID)
-			outcomes, err := d.Generation.AdaptToPlatform(ctx, d.SessionID, sourceID, a.SizeIDs, d.Lossless, adaptProvider(d), themeReport)
+			// Vision pre-stage (proposal add-vision-guided-adaptation, extended by
+			// strengthen-reference-driven-adaptation): publish the WHOLE reference
+			// group to COS (md5-deduped) → analyze its marketing elements → inject
+			// the resulting theme report into the AI-repaint prompt so each adapted
+			// size stays anchored to the analyzed subject/intent. Gracefully skipped
+			// (themeReport stays "") when COS/vision are unconfigured or any step
+			// fails — adaptation still runs with the standard harness.
+			themeReport := visionThemeReport(ctx, d, refs)
+			outcomes, err := d.Generation.AdaptToPlatform(ctx, d.SessionID, refs, a.SizeIDs, d.Lossless, adaptProvider(d), themeReport)
 			if err != nil {
 				return adaptResult{}, err
 			}
