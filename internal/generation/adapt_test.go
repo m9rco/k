@@ -262,13 +262,13 @@ func TestConvergeMode(t *testing.T) {
 		{"", 1536, 1024, 1280, 720, crop.ModeScale, "3:2 product → 16:9 target (close)"},
 		{"", 1024, 1024, 1080, 1080, crop.ModeScale, "square → square"},
 		// Auto: extreme gap crops (cover).
-		{"", 1536, 1024, 1280, 320, crop.ModeCover, "3:2 product → 4:1 banner (far)"},
+		{"", 1536, 1024, 1280, 320, crop.ModeContain, "3:2 product → 4:1 banner (far)"},
 		{"", 1024, 1536, 1080, 1920, crop.ModeScale, "2:3 product → 9:16 (close)"},
 		// Invalid dims fall back to contain.
 		{"", 0, 1024, 1280, 720, crop.ModeScale, "zero genW"},
 		{"", 1536, 1024, 1280, 0, crop.ModeScale, "zero dstH"},
 		// Unknown pin string is ignored → auto.
-		{"bogus", 1536, 1024, 1280, 320, crop.ModeCover, "unknown pin → auto cover"},
+		{"bogus", 1536, 1024, 1280, 320, crop.ModeContain, "unknown pin → auto contain"},
 	}
 	for _, c := range cases {
 		got := convergeMode(c.pin, c.genW, c.genH, c.dstW, c.dstH)
@@ -294,8 +294,8 @@ func TestResolveAndConvergeAgree(t *testing.T) {
 		{720, 1280, crop.ModeScale, "9:16 same-ratio → contain"},
 		{512, 512, crop.ModeScale, "square icon → contain (downsample)"},
 		{900, 600, crop.ModeScale, "3:2 cover → scale"},
-		{1120, 280, crop.ModeCover, "4:1 banner (clamped 3:1 gen) → cover"},
-		{1008, 168, crop.ModeCover, "6:1 strip (clamped 3:1 gen) → cover"},
+		{1120, 280, crop.ModeContain, "4:1 banner (clamped 3:1 gen) → contain"},
+		{1008, 168, crop.ModeContain, "6:1 strip (clamped 3:1 gen) → contain"},
 		{2732, 2048, crop.ModeScale, "iOS 4:3 (>2K) → contain (upsample)"},
 	}
 	for _, c := range cases {

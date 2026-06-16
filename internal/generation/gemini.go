@@ -54,7 +54,7 @@ func NewGeminiProvider(cfg config.ImageProviderConfig) *GeminiProvider {
 		baseURL: base,
 		apiKey:  cfg.APIKey,
 		model:   cfg.Model,
-		client:  &http.Client{Timeout: 120 * time.Second},
+		client:  &http.Client{Timeout: 5 * time.Minute},
 	}
 }
 
