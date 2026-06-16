@@ -28,6 +28,7 @@ import (
 	"gameasset/internal/download"
 	"gameasset/internal/generation"
 	"gameasset/internal/id"
+	applog "gameasset/internal/log"
 	"gameasset/internal/session"
 	"gameasset/internal/store"
 	"gameasset/internal/transport"
@@ -54,6 +55,19 @@ func run() error {
 	if err != nil {
 		return err
 	}
+
+	// Initialise structured diagnostic logging as early as possible (right after
+	// config) so every subsequent startup step logs through the facade. A missing
+	// file destination falls back to stderr (historical behaviour).
+	logCloser, err := applog.Init(applog.Options{
+		File:         cfg.Log.File,
+		Level:        cfg.Log.Level,
+		MirrorStderr: cfg.Log.MirrorStderr,
+	})
+	if err != nil {
+		return fmt.Errorf("init logging: %w", err)
+	}
+	defer logCloser.Close()
 
 	st, err := store.Open(cfg.DBPath)
 	if err != nil {
@@ -326,8 +340,15 @@ func writeJSON(w http.ResponseWriter, v any) {
 // interrupt could never be delivered). The orchestrator's per-session turn lock
 // keeps concurrently-dispatched turns ordered.
 func runTurn(ctx context.Context, orch *agent.Orchestrator, hub *transport.Hub, sessionID, text string, lossless bool) {
+	// One trace per turn (per inbound user message); session_id rides along so a
+	// single turn is pulled by trace_id and a whole session by session_id. The
+	// trace logger is stashed in ctx and survives the async generation boundary
+	// (context.WithoutCancel keeps ctx values), so long-task logs link back here.
+	ctx = applog.WithTrace(ctx, id.New("trace"), sessionID)
+	applog.From(ctx).Info().Str("event", "turn.start").Int("text_len", len(text)).Bool("lossless", lossless).Msg("turn accepted")
 	go func() {
 		if _, err := orch.Handle(ctx, sessionID, text, lossless); err != nil {
+			applog.From(ctx).Error().Str("event", "turn.error").Err(err).Msg("turn failed")
 			hub.Send(sessionID, transport.Event{
 				Type: transport.EventError,
 				Data: map[string]string{"message": err.Error()},

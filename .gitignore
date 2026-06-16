@@ -3,11 +3,8 @@
 .env.local
 *.local
 
-# Local data / generated artifacts.
-/data/*.db
-/data/*.db-shm
-/data/*.db-wal
-/data/assets/
+# Local data / generated artifacts (db, generated assets, runtime logs).
+/data/
 
 # Build output.
 /server

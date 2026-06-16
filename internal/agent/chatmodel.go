@@ -16,6 +16,7 @@ import (
 	"github.com/cloudwego/eino/schema"
 
 	"gameasset/internal/config"
+	applog "gameasset/internal/log"
 )
 
 // chatModel is a minimal HTTP-backed implementation of Eino's
@@ -94,6 +95,12 @@ func (m *chatModel) Stream(ctx context.Context, input []*schema.Message, opts ..
 		// Setup failed before any byte streamed: safe to degrade to one-shot.
 		// Tell the orchestrator so it can signal the frontend a non-streaming turn.
 		log.Printf("chatmodel: stream open failed, degrading to one-shot: %v", err)
+		applog.From(ctx).Warn().
+			Str("event", "model.degraded").
+			Str("provider", m.cfg.Provider).
+			Str("model", m.cfg.Model).
+			Err(err).
+			Msg("stream open failed, degrading to one-shot")
 		notifyDegrade(ctx)
 		return m.fallbackStream(ctx, input, opts...)
 	}
@@ -114,7 +121,44 @@ func (m *chatModel) Stream(ctx context.Context, input []*schema.Message, opts ..
 	return sr, nil
 }
 
-// openStream issues the streaming HTTP request and returns the live response on
+// logModelRequest emits a structured record of the exact request about to be
+// sent to the chat provider: which model, via which path (stream/oneshot), and a
+// per-message digest of the conversation (role, content length, a truncated
+// preview, and any tool-call names). This is the record to reach for when the
+// model's output looks wrong — e.g. spotting where an unexpected phrase enters
+// the prompt (system prompt vs injected context vs history vs the user turn).
+//
+// Content previews are truncated; the goal is to identify the SOURCE of a piece
+// of text, not to dump full payloads (large tool args/results stay out, D3).
+func (m *chatModel) logModelRequest(ctx context.Context, mode string, input []*schema.Message) {
+	ev := applog.From(ctx).Info().
+		Str("event", "model.request").
+		Str("mode", mode).
+		Str("provider", m.cfg.Provider).
+		Str("model", m.cfg.Model).
+		Int("msg_count", len(input))
+	digest := make([]map[string]any, 0, len(input))
+	for _, in := range input {
+		entry := map[string]any{
+			"role":        string(in.Role),
+			"content_len": len(in.Content),
+			"content":     truncate(in.Content, 500),
+		}
+		if len(in.ToolCalls) > 0 {
+			names := make([]string, 0, len(in.ToolCalls))
+			for _, tc := range in.ToolCalls {
+				names = append(names, tc.Function.Name)
+			}
+			entry["tool_calls"] = names
+		}
+		if in.Role == schema.Tool {
+			entry["tool_name"] = in.ToolName
+		}
+		digest = append(digest, entry)
+	}
+	ev.Interface("messages", digest).Msg("model request")
+}
+
 // a 2xx status. Non-2xx or transport errors are returned so the caller can
 // decide to degrade (no frame has been emitted yet).
 func (m *chatModel) openStream(ctx context.Context, input []*schema.Message) (*http.Response, error) {
@@ -129,6 +173,7 @@ func (m *chatModel) openStream(ctx context.Context, input []*schema.Message) (*h
 		url, headers, body = m.openAIURL(), map[string]string{"Authorization": "Bearer " + m.cfg.APIKey}, m.openAIBody(input)
 	}
 	body["stream"] = true
+	m.logModelRequest(ctx, "stream", input)
 	buf, err := json.Marshal(body)
 	if err != nil {
 		return nil, fmt.Errorf("marshal stream request: %w", err)
@@ -336,6 +381,7 @@ func (m *chatModel) openAIURL() string {
 
 func (m *chatModel) generateOpenAI(ctx context.Context, input []*schema.Message) (*schema.Message, error) {
 	body := m.openAIBody(input)
+	m.logModelRequest(ctx, "oneshot", input)
 	raw, err := m.postJSON(ctx, m.openAIURL(), body)
 	if err != nil {
 		return nil, err
@@ -476,6 +522,7 @@ func (m *chatModel) anthropicHeaders() map[string]string {
 
 func (m *chatModel) generateAnthropic(ctx context.Context, input []*schema.Message) (*schema.Message, error) {
 	body := m.anthropicBody(input)
+	m.logModelRequest(ctx, "oneshot", input)
 	raw, err := m.postJSONWithHeaders(ctx, m.anthropicURL(), body, m.anthropicHeaders())
 	if err != nil {
 		return nil, err

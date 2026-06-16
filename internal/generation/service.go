@@ -19,6 +19,7 @@ import (
 	"gameasset/internal/config"
 	"gameasset/internal/crop"
 	"gameasset/internal/imageopt"
+	applog "gameasset/internal/log"
 	"gameasset/internal/store"
 	"gameasset/internal/transport"
 )
@@ -135,6 +136,10 @@ type GenerateParams struct {
 	AdaptSizeName  string
 	AdaptWidth     int
 	AdaptHeight    int
+	// AdaptConvergeMode optionally pins the post-generation convergence mode for
+	// adaptation ("contain"/"cover"). Empty lets run() auto-pick by the
+	// aspect-ratio difference between the provider output and the target size.
+	AdaptConvergeMode string
 }
 
 // primaryAndExtras resolves the effective reference list: the primary asset id
@@ -336,6 +341,7 @@ func (s *Service) run(ctx context.Context, taskID string, p GenerateParams) {
 
 	genStart := time.Now()
 	log.Printf("gen.run: task=%s calling provider.Generate (prompt %d chars, refs=%d)", taskID, len(prompt), len(extraImages))
+	applog.From(ctx).Info().Str("event", "gen.provider_call").Str("task", taskID).Int("prompt_len", len(prompt)).Int("refs", len(extraImages)).Msg("calling provider.Generate")
 	// Pick the generator: a per-session model override fixes a specific provider
 	// for this task; otherwise use the Service default. Resolved here at run time
 	// so the choice is fixed for the task's lifetime.
@@ -353,10 +359,12 @@ func (s *Service) run(ctx context.Context, taskID string, p GenerateParams) {
 	})
 	if err != nil {
 		log.Printf("gen.run: task=%s provider.Generate FAILED after %s: %v", taskID, time.Since(genStart), err)
+		applog.From(ctx).Error().Str("event", "gen.provider_failed").Str("task", taskID).Int64("duration_ms", time.Since(genStart).Milliseconds()).Err(err).Msg("provider.Generate failed")
 		s.fail(taskID, p.SessionID, err.Error())
 		return
 	}
 	log.Printf("gen.run: task=%s provider.Generate OK in %s (%d bytes)", taskID, time.Since(genStart), len(out.Data))
+	applog.From(ctx).Info().Str("event", "gen.provider_ok").Str("task", taskID).Int64("duration_ms", time.Since(genStart).Milliseconds()).Int("bytes", len(out.Data)).Msg("provider.Generate ok")
 
 	// If the task was cancelled while the provider was working, drop the result
 	// instead of persisting it — otherwise a cancelled task leaves an orphan
@@ -379,12 +387,16 @@ func (s *Service) run(ctx context.Context, taskID string, p GenerateParams) {
 	}
 
 	// adapt_platform: same convergence范式 as icon — the provider snaps to its
-	// supported size enum, so contain-converge the product down to the exact
-	// target platform size (subject preserved, no crop, padded). Final persisted
-	// product is then precisely the requested placement size.
+	// supported size enum, so converge the product down to the exact target
+	// platform size. Mode is picked per size: contain (pad, no crop) when the
+	// provider output's aspect ratio is close to the target, cover (crop, no pad)
+	// when it differs enough that padding would leave large empty bands (e.g. an
+	// extreme banner). A size may pin the mode via its catalog convergeMode.
 	if p.Slots.Kind == EditAdaptPlatform && adaptW > 0 && adaptH > 0 {
-		if conv, err := crop.CropBytesWithOptions(out.Data, adaptW, adaptH, crop.Options{Mode: crop.ModeContain}); err != nil {
-			log.Printf("gen.run: task=%s adapt converge to %dx%d FAILED: %v (keeping provider output)", taskID, adaptW, adaptH, err)
+		genW, genH := decodeDimensions(out.Data)
+		mode := convergeMode(p.AdaptConvergeMode, genW, genH, adaptW, adaptH)
+		if conv, err := crop.CropBytesWithOptions(out.Data, adaptW, adaptH, crop.Options{Mode: mode}); err != nil {
+			log.Printf("gen.run: task=%s adapt converge to %dx%d (%s) FAILED: %v (keeping provider output)", taskID, adaptW, adaptH, mode, err)
 		} else {
 			out.Data = conv.Data
 		}
@@ -449,6 +461,7 @@ func (s *Service) run(ctx context.Context, taskID string, p GenerateParams) {
 		s.onAsset(p.SessionID, assetID)
 	}
 	log.Printf("gen.run: task=%s DONE asset=%s published task_done", taskID, assetID)
+	applog.From(ctx).Info().Str("event", "gen.done").Str("task", taskID).Str("asset", assetID).Msg("generation done, published task_done")
 }
 
 func (s *Service) setStatus(taskID, sessionID, status string, ev transport.EventType, progress int, assetID, errMsg string) {

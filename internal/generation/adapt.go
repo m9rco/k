@@ -103,15 +103,16 @@ func (s *Service) AdaptToPlatform(ctx context.Context, sessionID, sourceAssetID 
 
 		// 3) AI repaint: re-compose for the new aspect ratio, preserving subject.
 		taskID, err := s.Start(ctx, GenerateParams{
-			SessionID:        sessionID,
-			SourceAssetID:    sourceAssetID,
-			Lossless:         lossless,
-			ProviderOverride: override,
-			AdaptChannelID:   spec.ChannelID,
-			AdaptSizeID:      spec.SizeID,
-			AdaptSizeName:    spec.SizeName,
-			AdaptWidth:       spec.Width,
-			AdaptHeight:      spec.Height,
+			SessionID:         sessionID,
+			SourceAssetID:     sourceAssetID,
+			Lossless:          lossless,
+			ProviderOverride:  override,
+			AdaptChannelID:    spec.ChannelID,
+			AdaptSizeID:       spec.SizeID,
+			AdaptSizeName:     spec.SizeName,
+			AdaptWidth:        spec.Width,
+			AdaptHeight:       spec.Height,
+			AdaptConvergeMode: spec.ConvergeMode,
 			Slots: Slots{
 				Kind:          EditAdaptPlatform,
 				ChannelName:   spec.ChannelName,
@@ -156,4 +157,33 @@ func orientationOf(w, h int) string {
 	default:
 		return "square"
 	}
+}
+
+// convergeTolerance is the max absolute log-ratio difference between the AI
+// product's aspect ratio and the target size's at which adaptation converges by
+// padding (contain) rather than cropping (cover). ~0.18 ≈ a 20% ratio gap:
+// within it, padding leaves only a thin border; beyond it (e.g. a 3:2 product
+// forced toward a 4:1 banner) padding would leave large empty bands, so cover
+// crops to fill instead. Tuned against the gpt-image-2 size enum.
+const convergeTolerance = 0.18
+
+// convergeMode picks how an adaptation product is converged to the exact target
+// size. A non-empty pin (from the size catalog) wins outright; otherwise the
+// mode is auto-selected by the log-ratio gap between the provider output and the
+// target. Any zero/invalid dimension falls back to contain (never crops blindly).
+func convergeMode(pin string, genW, genH, dstW, dstH int) crop.Mode {
+	switch crop.Mode(pin) {
+	case crop.ModeContain:
+		return crop.ModeContain
+	case crop.ModeCover:
+		return crop.ModeCover
+	}
+	if genW <= 0 || genH <= 0 || dstW <= 0 || dstH <= 0 {
+		return crop.ModeContain
+	}
+	diff := math.Abs(math.Log(float64(genW)/float64(genH)) - math.Log(float64(dstW)/float64(dstH)))
+	if diff > convergeTolerance {
+		return crop.ModeCover
+	}
+	return crop.ModeContain
 }

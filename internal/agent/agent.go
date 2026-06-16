@@ -27,6 +27,7 @@ import (
 	"gameasset/internal/crawl"
 	"gameasset/internal/crop"
 	"gameasset/internal/generation"
+	applog "gameasset/internal/log"
 	"gameasset/internal/store"
 	"gameasset/internal/transport"
 	"gameasset/internal/usermodel"
@@ -377,19 +378,41 @@ func (o *Orchestrator) Handle(ctx context.Context, sessionID, userText string, l
 	// remains the decision-maker (see intent.go, SystemPrompt rule 10).
 	hint := ClassifyIntent(userText)
 	turnText := userText
+	hintInjected := false
 	if prefix := BuildIntentHint(hint); prefix != "" {
 		turnText = prefix + " " + userText
+		hintInjected = true
 	}
+	applog.From(ctx).Info().
+		Str("event", "intent.classify").
+		Str("intent", intentLabel(hint)).
+		Bool("hint_injected", hintInjected).
+		Msg("intent pre-classified")
 	// Feedback-driven remediation: when the user reports that a previous operation
 	// never actually produced anything AND the previous assistant turn in fact
 	// called no tool (the fake-exec pattern), inject an advisory hint nudging the
 	// model to really call the tool this turn instead of confirming in prose again.
 	// Checked against the live window BEFORE appending this turn's user message.
 	if looksLikeMissingOutputComplaint(userText) && !prevTurnHadToolCall(w.Messages()) {
-		log.Printf("agent: session=%s missing-output complaint after a zero-tool turn, injecting remediation hint", sessionID)
+		applog.From(ctx).Warn().
+			Str("event", "remediation.missing_output_hint").
+			Str("intent", intentLabel(hint)).
+			Msg("missing-output complaint after a zero-tool turn, injecting remediation hint")
 		turnText = BuildRemediationHint(hint) + " " + turnText
 	}
 	w.Append(schema.UserMessage(turnText))
+	// Surface any compression that just happened with the turn's trace context —
+	// a truncated window is a prime suspect when the model later hallucinates.
+	for _, ce := range w.DrainCompressions() {
+		applog.From(ctx).Info().
+			Str("event", "window.compress").
+			Int("before_msgs", ce.BeforeMsgs).
+			Int("after_msgs", ce.AfterMsgs).
+			Int("folded", ce.Folded).
+			Int("summary_len", ce.SummaryLen).
+			Bool("tool_exchange_kept", ce.ToolExchangeKept).
+			Msg("context window compressed")
+	}
 
 	ctx = withSession(ctx, sessionID)
 
@@ -428,13 +451,17 @@ func (o *Orchestrator) Handle(ctx context.Context, sessionID, userText string, l
 	if pc, ok := o.models.ImageModel(sessionID, config.SceneVideo); ok {
 		deps.VideoOverride = &pc
 	}
-	// Request-scoped routing: adapt_to_platform's AI repaint path fixes on
-	// gemini-3-pro-image regardless of the session's image-scene selection.
-	// ResolveImageModel returns ok only when the model is available (its scene
-	// credential is configured), so a missing key never injects a broken
-	// override — it falls through to AdaptModelOverride=nil (== ImageOverride).
+	// Request-scoped routing: adapt_to_platform's AI repaint path defaults to
+	// gpt-image-2 (best subject/composition preservation) regardless of the
+	// session's image-scene selection. ResolveImageModel returns ok only when a
+	// model is available (its scene credential is configured), so a missing key
+	// never injects a broken override. Fallback order: gpt-image-2 →
+	// gemini-3-pro-image → nil (AdaptModelOverride stays nil, so adaptProvider
+	// falls through to ImageOverride: the session image选择 or service default).
 	// edit_image and other image tools are unaffected (they use ImageOverride).
-	if pc, ok := o.cfg.ResolveImageModel(config.SceneImage, "gemini-3-pro-image"); ok {
+	if pc, ok := o.cfg.ResolveImageModel(config.SceneImage, "gpt-image-2"); ok {
+		deps.AdaptModelOverride = &pc
+	} else if pc, ok := o.cfg.ResolveImageModel(config.SceneImage, "gemini-3-pro-image"); ok {
 		deps.AdaptModelOverride = &pc
 	}
 	tools, err := deps.Tools()
@@ -522,6 +549,12 @@ func (o *Orchestrator) Handle(ctx context.Context, sessionID, userText string, l
 		// Append the faked ack + a stern correction so the next attempt actually
 		// calls the tool rather than repeating the prose confirmation.
 		log.Printf("agent: session=%s fake-exec ack detected (attempt %d), self-correcting", sessionID, attempt)
+		applog.From(ctx).Warn().
+			Str("event", "fakeack.retry").
+			Int("attempt", attempt).
+			Int("attempt_exec", attemptExec).
+			Str("intent", intentLabel(hint)).
+			Msg("fake-exec ack detected, self-correcting")
 		attemptMsgs = append(append([]*schema.Message{}, attemptMsgs...),
 			schema.AssistantMessage(reply, nil),
 			schema.UserMessage(fakeAckCorrection),
@@ -542,6 +575,29 @@ func (o *Orchestrator) Handle(ctx context.Context, sessionID, userText string, l
 	log.Printf("agent: session=%s turn done model=%s compressed=%t has_tool_exchange=%t toolCalls=%d replyLen=%d capsule=%t cancelled=%t",
 		sessionID, turnModelID, w.Compressed(), recentHasToolExchange(baseMsgs),
 		len(turnCalls), len(reply), capsuleAsked, cancelled)
+	hasToolExchange := recentHasToolExchange(baseMsgs)
+	applog.From(ctx).Info().
+		Str("event", "turn.done").
+		Str("model", turnModelID).
+		Bool("compressed", w.Compressed()).
+		Bool("has_tool_exchange", hasToolExchange).
+		Int("tool_calls", len(turnCalls)).
+		Int("reply_len", len(reply)).
+		Bool("capsule", capsuleAsked).
+		Bool("cancelled", cancelled).
+		Str("intent", intentLabel(hint)).
+		Msg("turn done")
+	// Explicit "the model should have called a tool but didn't" verdict: the
+	// single most useful signal when chasing tool-not-executed reports.
+	if len(turnCalls) == 0 && !cancelled && hint.Whitelisted {
+		applog.From(ctx).Warn().
+			Str("event", "tool.zero_exec").
+			Str("intent", intentLabel(hint)).
+			Float64("confidence", hint.Confidence).
+			Bool("capsule", capsuleAsked).
+			Int("reply_len", len(reply)).
+			Msg("zero real tool executions despite tool-expecting intent")
+	}
 
 	if cancelled {
 		// Interrupted mid-turn: persist whatever text was produced (keeps context
@@ -564,9 +620,11 @@ func (o *Orchestrator) Handle(ctx context.Context, sessionID, userText string, l
 	// turn empty or wrong (see remediationAction).
 	switch remediationAction(len(turnCalls), cancelled, capsuleAsked, replyEmpty, reply, hint) {
 	case remediateClarify:
+		applog.From(ctx).Warn().Str("event", "remediation.decision").Str("decision", "clarify").Str("intent", intentLabel(hint)).Msg("remediation: clarify")
 		q, opts := remediationClarify(hint, o.LastProduced(sessionID))
 		clarify(q, opts)
 	case remediateRefuse:
+		applog.From(ctx).Warn().Str("event", "remediation.decision").Str("decision", "refuse").Str("intent", intentLabel(hint)).Msg("remediation: refuse")
 		reply = RefusalMessage()
 		replyEmpty = false
 	case remediateHonestFail:
@@ -574,6 +632,7 @@ func (o *Orchestrator) Handle(ctx context.Context, sessionID, userText string, l
 		// never called a tool. Do not let the false confirmation pose as a real
 		// reply — replace it with honest feedback (see fakeack.go).
 		log.Printf("agent: session=%s fake-exec ack survived retries, honest-fail remediation", sessionID)
+		applog.From(ctx).Warn().Str("event", "remediation.decision").Str("decision", "honest_fail").Str("intent", intentLabel(hint)).Msg("fake-exec ack survived retries, honest-fail remediation")
 		reply = honestFailMessage
 		replyEmpty = false
 	}
@@ -621,6 +680,7 @@ func (o *Orchestrator) Handle(ctx context.Context, sessionID, userText string, l
 // list are produced there, not here. The caller decides whether the turn is final
 // and emits the terminal done:true frame; streamOnce never emits one.
 func (o *Orchestrator) streamOnce(ctx context.Context, ra *react.Agent, sessionID string, msgs []*schema.Message, toolCB callbacks.Handler) (string, error) {
+	start := time.Now()
 	stream, err := ra.Stream(ctx, msgs, agentOption(toolCB))
 	if err != nil {
 		return "", err
@@ -636,6 +696,11 @@ func (o *Orchestrator) streamOnce(ctx context.Context, ra *react.Agent, sessionI
 				// Surface the real upstream/transport error instead of silently
 				// ending the turn with an empty reply (root-cause diagnostics).
 				log.Printf("agent: session=%s stream recv error after %d chunks: %v", sessionID, chunks, err)
+				applog.From(ctx).Error().
+					Str("event", "stream.recv_error").
+					Int("chunks", chunks).
+					Err(err).
+					Msg("stream recv error")
 			}
 			break // io.EOF or stream end
 		}
@@ -660,6 +725,12 @@ func (o *Orchestrator) streamOnce(ctx context.Context, ra *react.Agent, sessionI
 		}
 	}
 	log.Printf("agent: session=%s stream attempt done replyLen=%d chunks=%d", sessionID, sb.Len(), chunks)
+	applog.From(ctx).Info().
+		Str("event", "model.response").
+		Int("chunks", chunks).
+		Int("reply_len", sb.Len()).
+		Int64("duration_ms", time.Since(start).Milliseconds()).
+		Msg("model stream attempt done")
 	return sb.String(), nil
 }
 
@@ -765,6 +836,16 @@ type turnEndInfo struct {
 	hasCapsule bool
 	replyEmpty bool // no body text produced (frontend suppresses the empty bubble)
 	cancelled  bool // the turn was interrupted by the user
+}
+
+// intentLabel renders an IntentHint as a compact log field: the matched
+// whitelist labels joined by "/", or "none" when nothing matched. Used so trace
+// logs carry the deterministic pre-classification verdict for each turn.
+func intentLabel(hint IntentHint) string {
+	if len(hint.Labels) == 0 {
+		return "none"
+	}
+	return strings.Join(hint.Labels, "/")
 }
 
 // remediationClarify builds the fallback clarify question used when the model
@@ -980,6 +1061,15 @@ func (o *Orchestrator) toolCallbackHandler(sessionID string, tracker *toolExecTr
 			// Authoritative record of a real execution (drives retry / remediation /
 			// window structure), independent of what the output stream reports.
 			tracker.record(id, name, args)
+			// Full, UNtruncated arguments to the trace log — this is the record you
+			// reach for when chasing "tool not executed / executed with wrong args".
+			// The frontend event below stays truncated (UI concern).
+			applog.From(ctx).Info().
+				Str("event", "tool.start").
+				Str("tool", name).
+				Str("tool_call_id", id).
+				Str("args", args).
+				Msg("tool start")
 			o.emit(sessionID, transport.Event{
 				Type:      transport.EventToolCall,
 				SessionID: sessionID,
@@ -1000,6 +1090,12 @@ func (o *Orchestrator) toolCallbackHandler(sessionID string, tracker *toolExecTr
 			if output != nil {
 				summary = truncate(output.Response, 200)
 			}
+			applog.From(ctx).Info().
+				Str("event", "tool.end").
+				Str("tool", name).
+				Str("tool_call_id", compose.GetToolCallID(ctx)).
+				Str("summary", summary).
+				Msg("tool end")
 			data := map[string]any{
 				"name":    name,
 				"status":  "done",
@@ -1028,6 +1124,13 @@ func (o *Orchestrator) toolCallbackHandler(sessionID string, tracker *toolExecTr
 			if info != nil {
 				name = info.Name
 			}
+			// Full error to the trace log; the frontend event stays truncated.
+			applog.From(ctx).Error().
+				Str("event", "tool.error").
+				Str("tool", name).
+				Str("tool_call_id", compose.GetToolCallID(ctx)).
+				Err(err).
+				Msg("tool error")
 			o.emit(sessionID, transport.Event{
 				Type:      transport.EventToolResult,
 				SessionID: sessionID,

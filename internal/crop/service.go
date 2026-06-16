@@ -125,6 +125,10 @@ type SizeSpec struct {
 	Orientation   string
 	Note          string
 	Producible    bool
+	// ConvergeMode optionally pins how platform adaptation converges the AI
+	// product down to this exact size ("contain"/"cover"); empty lets the
+	// generation layer auto-pick by aspect-ratio difference.
+	ConvergeMode string
 }
 
 // SizeSpec looks up a single size by its globally-unique id. ok is false when
@@ -146,6 +150,7 @@ func (s *Service) SizeSpec(sizeID string) (SizeSpec, bool) {
 		Orientation:   ref.size.Orientation,
 		Note:          ref.size.Note,
 		Producible:    ref.size.Producible,
+		ConvergeMode:  ref.size.ConvergeMode,
 	}, true
 }
 

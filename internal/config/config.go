@@ -89,6 +89,12 @@ type Size struct {
 	MaxKB int `json:"maxKB,omitempty"`
 	// Note carries free-form requirements (e.g. "无文案", "圆角", "透明底").
 	Note string `json:"note,omitempty"`
+	// ConvergeMode optionally pins how platform adaptation converges the AI
+	// product down to this exact size: "contain" (pad, never crop) or "cover"
+	// (fill, crop overflow). Empty = auto: contain when the generated ratio is
+	// close to the target, cover when it diverges too far (avoids large padding
+	// on extreme banners). Lets the catalog pre-set known-extreme specs.
+	ConvergeMode string `json:"convergeMode,omitempty"`
 	// Producible marks whether pure cropping can produce this size. Video specs
 	// and external-link specs set this false so the UI greys them out and the
 	// crop tool rejects them.
@@ -202,6 +208,22 @@ type Config struct {
 
 	// ContextTokenBudget bounds the conversation sliding window.
 	ContextTokenBudget int
+
+	// Log configures diagnostic logging (file destination, level, stderr mirror).
+	Log LogConfig
+}
+
+// LogConfig configures the structured diagnostic logger. An empty File keeps the
+// historical behaviour (stderr only). MirrorStderr additionally echoes every
+// record to stderr (handy during local development) while the file stays pure
+// JSON for jq/grep post-mortems.
+type LogConfig struct {
+	// File is the JSON log destination path. Empty => stderr only.
+	File string
+	// Level is the minimum level: debug | info | warn | error. Default info.
+	Level string
+	// MirrorStderr echoes records to stderr in addition to the file.
+	MirrorStderr bool
 }
 
 // env returns the environment value for key, or def when unset/empty.
@@ -416,6 +438,12 @@ func Load(platformsPath string) (*Config, error) {
 		AssetRetentionHours: envInt("ASSET_RETENTION_HOURS", 0),
 
 		ContextTokenBudget: envInt("CONTEXT_TOKEN_BUDGET", 8000),
+
+		Log: LogConfig{
+			File:         env("LOG_FILE", "data/logs/app.log"),
+			Level:        env("LOG_LEVEL", "info"),
+			MirrorStderr: envBool("LOG_MIRROR_STDERR", false),
+		},
 	}
 
 	// Per-provider chat credentials. chatCommon is the shared yunwu/common gateway

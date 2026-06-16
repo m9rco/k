@@ -142,6 +142,35 @@ type Window struct {
 	// the model's few-shot signal for tool use is never erased by compression.
 	// Reset naturally when a new Window is created (e.g. after ResetContext).
 	hasEverCalledTool bool
+	// pendingCompressions buffers a snapshot of each compression cycle performed
+	// during the most recent Append, so the caller (which holds the turn's trace
+	// context) can drain and log them. compressLocked has no ctx of its own.
+	pendingCompressions []CompressionEvent
+}
+
+// CompressionEvent is a before/after snapshot of one compression cycle, surfaced
+// for diagnostic logging (chasing hallucinations caused by a truncated context).
+type CompressionEvent struct {
+	// BeforeMsgs / AfterMsgs are the recent-message counts around the fold.
+	BeforeMsgs int
+	AfterMsgs  int
+	// Folded is how many messages were summarized away this cycle.
+	Folded int
+	// SummaryLen is the byte length of the resulting summary message.
+	SummaryLen int
+	// ToolExchangeKept reports whether the post-fold window still contains a
+	// complete assistant{tool_calls}→role:tool anchor (the few-shot invariant).
+	ToolExchangeKept bool
+}
+
+// DrainCompressions returns and clears the compression snapshots buffered since
+// the last call. The caller logs them with the turn's trace context.
+func (w *Window) DrainCompressions() []CompressionEvent {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	out := w.pendingCompressions
+	w.pendingCompressions = nil
+	return out
 }
 
 // assetOp is the source→output lineage of one edit operation. SourceID comes
@@ -344,7 +373,15 @@ func (w *Window) compressLocked() {
 			body += "\n" + renderAssetAnchor(w.lastAssetOp)
 		}
 		w.summary = schema.SystemMessage(body)
+		beforeMsgs := len(w.recent)
 		w.recent = append([]*schema.Message{}, w.recent[foldCount:]...)
+		w.pendingCompressions = append(w.pendingCompressions, CompressionEvent{
+			BeforeMsgs:       beforeMsgs,
+			AfterMsgs:        len(w.recent),
+			Folded:           foldCount,
+			SummaryLen:       len(body),
+			ToolExchangeKept: recentHasToolExchange(w.recent),
+		})
 	}
 }
 

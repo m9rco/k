@@ -248,6 +248,37 @@ func TestAspectClose(t *testing.T) {
 	}
 }
 
+func TestConvergeMode(t *testing.T) {
+	cases := []struct {
+		pin                    string
+		genW, genH, dstW, dstH int
+		want                   crop.Mode
+		label                  string
+	}{
+		// Pins win outright regardless of ratio gap.
+		{"contain", 1536, 1024, 1280, 320, crop.ModeContain, "pin contain on extreme target"},
+		{"cover", 1024, 1024, 1024, 1024, crop.ModeCover, "pin cover on identical ratio"},
+		// Auto: close ratios pad (contain).
+		{"", 1536, 1024, 1280, 720, crop.ModeContain, "3:2 product → 16:9 target (close)"},
+		{"", 1024, 1024, 1080, 1080, crop.ModeContain, "square → square"},
+		// Auto: extreme gap crops (cover).
+		{"", 1536, 1024, 1280, 320, crop.ModeCover, "3:2 product → 4:1 banner (far)"},
+		{"", 1024, 1536, 1080, 1920, crop.ModeContain, "2:3 product → 9:16 (close)"},
+		// Invalid dims fall back to contain.
+		{"", 0, 1024, 1280, 720, crop.ModeContain, "zero genW"},
+		{"", 1536, 1024, 1280, 0, crop.ModeContain, "zero dstH"},
+		// Unknown pin string is ignored → auto.
+		{"bogus", 1536, 1024, 1280, 320, crop.ModeCover, "unknown pin → auto cover"},
+	}
+	for _, c := range cases {
+		got := convergeMode(c.pin, c.genW, c.genH, c.dstW, c.dstH)
+		if got != c.want {
+			t.Errorf("[%s] convergeMode(%q,%d,%d,%d,%d) = %q, want %q",
+				c.label, c.pin, c.genW, c.genH, c.dstW, c.dstH, got, c.want)
+		}
+	}
+}
+
 func containsStr(s, sub string) bool {
 	return len(s) >= len(sub) && (s == sub || len(sub) == 0 ||
 		func() bool {

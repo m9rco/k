@@ -5,6 +5,7 @@ go 1.25.0
 require (
 	github.com/cloudwego/eino v0.9.6
 	github.com/coder/websocket v1.8.14
+	github.com/rs/zerolog v1.35.1
 	github.com/tencentyun/cos-go-sdk-v5 v0.7.73
 	golang.org/x/image v0.42.0
 	modernc.org/sqlite v1.52.0
@@ -26,6 +27,7 @@ require (
 	github.com/json-iterator/go v1.1.12 // indirect
 	github.com/klauspost/cpuid/v2 v2.2.9 // indirect
 	github.com/mailru/easyjson v0.7.7 // indirect
+	github.com/mattn/go-colorable v0.1.14 // indirect
 	github.com/mattn/go-isatty v0.0.20 // indirect
 	github.com/mitchellh/mapstructure v1.4.3 // indirect
 	github.com/modern-go/concurrent v0.0.0-20180306012644-bacd9c7ef1dd // indirect

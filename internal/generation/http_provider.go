@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"mime/multipart"
 	"net/http"
 	"strings"
@@ -163,20 +164,54 @@ func (p *HTTPProvider) buildEditRequest(ctx context.Context, req Request) (*http
 	return r, nil
 }
 
-// sizeParam maps dimensions to the gpt-image-1 size enum, snapping to the
-// nearest supported value. Empty means "let the provider decide".
+// genSize is one of the image API's legal output dimensions, with its precomputed
+// aspect ratio. gpt-image-2 only accepts this fixed enum: any other requested size
+// is snapped to the model's nearest default. We therefore pick the legal size whose
+// aspect ratio is closest to the target, so the generated composition is as close to
+// the target proportions as possible before the convergence step trims it to exact.
+type genSize struct {
+	label string
+	ratio float64 // width/height
+}
+
+// legalGenSizes is the gpt-image-2 supported size enum (square, landscape 3:2,
+// portrait 2:3). Kept as data so the mapping is centralized, pre-configurable, and
+// unit-testable.
+var legalGenSizes = []genSize{
+	{label: "1024x1024", ratio: 1.0},             // 1:1
+	{label: "1536x1024", ratio: 1536.0 / 1024.0}, // 3:2 landscape
+	{label: "1024x1536", ratio: 1024.0 / 1536.0}, // 2:3 portrait
+}
+
+// sizeParam maps requested dimensions to the gpt-image-2 size enum by NEAREST
+// ASPECT RATIO (log-distance, so landscape/portrait are symmetric) rather than a
+// coarse orientation三分类 — this keeps 3:2 and 4:1 targets on the closest legal
+// proportion instead of collapsing both to the same landscape value. Empty means
+// "let the provider decide". We never pass "auto": auto lets the model pick the
+// size, making the output ratio unpredictable and the convergence step unable to
+// estimate padding/crop; an explicit legal enum keeps it deterministic.
 func sizeParam(w, h int) string {
 	if w == 0 || h == 0 {
 		return ""
 	}
-	switch {
-	case w == h:
-		return "1024x1024"
-	case w > h:
-		return "1536x1024"
-	default:
-		return "1024x1536"
+	return nearestGenSize(w, h)
+}
+
+// nearestGenSize returns the legal gen-size label whose aspect ratio is closest to
+// w×h, measured by absolute log-ratio distance (symmetric across orientation).
+func nearestGenSize(w, h int) string {
+	if w <= 0 || h <= 0 {
+		return ""
 	}
+	target := math.Log(float64(w) / float64(h))
+	best := legalGenSizes[0]
+	bestDist := math.Abs(target - math.Log(best.ratio))
+	for _, c := range legalGenSizes[1:] {
+		if d := math.Abs(target - math.Log(c.ratio)); d < bestDist {
+			best, bestDist = c, d
+		}
+	}
+	return best.label
 }
 
 func truncate(s string, n int) string {

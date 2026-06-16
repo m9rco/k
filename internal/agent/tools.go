@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log"
 	"strings"
 	"sync"
 	"time"
@@ -13,6 +12,7 @@ import (
 	"gameasset/internal/crawl"
 	"gameasset/internal/crop"
 	"gameasset/internal/generation"
+	applog "gameasset/internal/log"
 	"gameasset/internal/store"
 	"gameasset/internal/video"
 	"gameasset/internal/websearch"
@@ -54,7 +54,8 @@ type ToolDeps struct {
 	// repaint path instead of ImageOverride. Request-scoped: only this one
 	// tool uses it; edit_image and other image tools keep using ImageOverride.
 	// Nil falls back to ImageOverride (or service default). Injected by the
-	// orchestrator to fix-route AI platform adaptation to gemini-3-pro-image.
+	// orchestrator to route AI platform adaptation to gpt-image-2 (falling back
+	// to gemini-3-pro-image when gpt-image-2 is unavailable).
 	AdaptModelOverride *config.ImageProviderConfig
 	// Clarify, when set, is invoked by the clarify_intent tool to surface a
 	// structured clarifying question (capsule) to the user. Injected by the
@@ -276,9 +277,8 @@ func (d ToolDeps) newEditTool() (tool.InvokableTool, error) {
 			"Returns a task id; progress streams over SSE and the result lands in the workspace. "+
 			"Set await_result=true only when you must chain this result into the next tool call.",
 		func(ctx context.Context, a editArgs) (editResult, error) {
-			log.Printf("edit_image: invoked intent=%q source=%q refs=%v await=%v", a.Intent, a.SourceAssetID, a.ReferenceAssetIDs, a.AwaitResult)
 			if !d.dedup.firstSeen("edit_image|" + argSig(a)) {
-				log.Printf("edit_image: duplicate same-turn call suppressed intent=%q source=%q", a.Intent, a.SourceAssetID)
+				applog.From(ctx).Warn().Str("event", "tool.duplicate_suppressed").Str("tool", "edit_image").Str("intent", a.Intent).Str("source", a.SourceAssetID).Msg("duplicate same-turn call suppressed")
 				return editResult{Status: statusDuplicate}, nil
 			}
 			kind := generation.EditKind(a.Intent)
@@ -298,7 +298,7 @@ func (d ToolDeps) newEditTool() (tool.InvokableTool, error) {
 				if d.Clarify != nil {
 					d.Clarify(question, opts)
 				}
-				log.Printf("edit_image: missing description for intent=%q, surfaced clarify capsule", a.Intent)
+				applog.From(ctx).Warn().Str("event", "tool.missing_param").Str("tool", "edit_image").Str("intent", a.Intent).Msg("missing description, surfaced clarify capsule")
 				return editResult{Status: statusClarified}, nil
 			}
 			taskID, err := d.Generation.Start(ctx, generation.GenerateParams{
@@ -355,12 +355,11 @@ func (d ToolDeps) newIconTool() (tool.InvokableTool, error) {
 			"exact requested icon size (default 150x150). Returns a task id; progress streams over SSE and "+
 			"the icon lands in the workspace.",
 		func(ctx context.Context, a iconArgs) (editResult, error) {
-			log.Printf("generate_icon: invoked source=%q desc=%q size=%dx%d", a.SourceAssetID, a.Desc, a.Width, a.Height)
 			if a.SourceAssetID == "" {
 				return editResult{}, fmt.Errorf("generate_icon requires source_asset_id")
 			}
 			if !d.dedup.firstSeen("generate_icon|" + argSig(a)) {
-				log.Printf("generate_icon: duplicate same-turn call suppressed source=%q", a.SourceAssetID)
+				applog.From(ctx).Warn().Str("event", "tool.duplicate_suppressed").Str("tool", "generate_icon").Str("source", a.SourceAssetID).Msg("duplicate same-turn call suppressed")
 				return editResult{Status: statusDuplicate}, nil
 			}
 			taskID, err := d.Generation.Start(ctx, generation.GenerateParams{
@@ -404,9 +403,8 @@ func (d ToolDeps) newTextToImageTool() (tool.InvokableTool, error) {
 			"Returns a task id; progress streams over SSE and the result lands in the workspace. "+
 			"Set await_result=true only when chaining into the next tool.",
 		func(ctx context.Context, a textToImageArgs) (editResult, error) {
-			log.Printf("generate_image_from_text: invoked desc=%q size=%dx%d await=%v", a.Desc, a.Width, a.Height, a.AwaitResult)
 			if !d.dedup.firstSeen("generate_image_from_text|" + argSig(a)) {
-				log.Printf("generate_image_from_text: duplicate same-turn call suppressed desc=%q", a.Desc)
+				applog.From(ctx).Warn().Str("event", "tool.duplicate_suppressed").Str("tool", "generate_image_from_text").Msg("duplicate same-turn call suppressed")
 				return editResult{Status: statusDuplicate}, nil
 			}
 			taskID, err := d.TextToImage.Start(ctx, generation.GenerateParams{
@@ -591,9 +589,8 @@ func (d ToolDeps) newAdaptTool() (tool.InvokableTool, error) {
 			if sourceID == "" && len(a.ReferenceAssetIDs) > 0 {
 				sourceID = a.ReferenceAssetIDs[0]
 			}
-			log.Printf("adapt_to_platform: source=%q sizes=%v", sourceID, a.SizeIDs)
 			if !d.dedup.firstSeen("adapt_to_platform|" + sourceID + "|" + strings.Join(a.SizeIDs, ",")) {
-				log.Printf("adapt_to_platform: duplicate same-turn call suppressed")
+				applog.From(ctx).Warn().Str("event", "tool.duplicate_suppressed").Str("tool", "adapt_to_platform").Str("source", sourceID).Msg("duplicate same-turn call suppressed")
 				return adaptResult{Status: statusDuplicate}, nil
 			}
 			outcomes, err := d.Generation.AdaptToPlatform(ctx, d.SessionID, sourceID, a.SizeIDs, d.Lossless, adaptProvider(d))
@@ -640,7 +637,7 @@ func (d ToolDeps) newVideoTool() (tool.InvokableTool, error) {
 			// parallel image_to_video calls), which would start two tasks and
 			// concatenate two identical acks into one bubble.
 			if !d.dedup.firstSeen(fmt.Sprintf("image_to_video|%s|%s", a.SourceAssetID, a.Motion)) {
-				log.Printf("image_to_video: duplicate same-turn call suppressed source=%q", a.SourceAssetID)
+				applog.From(ctx).Warn().Str("event", "tool.duplicate_suppressed").Str("tool", "image_to_video").Str("source", a.SourceAssetID).Msg("duplicate same-turn call suppressed")
 				return videoResult{Status: statusDuplicate}, nil
 			}
 			taskID, err := d.Video.Start(ctx, video.Params{
