@@ -3,11 +3,14 @@ package agent
 import (
 	"bytes"
 	"context"
+	"crypto/md5"
+	"fmt"
 	"image"
 	"image/png"
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -133,5 +136,48 @@ func TestAdaptToolUnknownSizeErrors(t *testing.T) {
 	}
 	if _, err := at.InvokableRun(context.Background(), `{"source_asset_id":"src","size_ids":["nope.bad.id"]}`); err == nil {
 		t.Error("expected error for unknown size id")
+	}
+}
+
+// TestVisionThemeReportGroupCacheHit verifies that a pre-cached group report is
+// returned without needing COS/vision: the cache hit path runs before the
+// publisher/analyzer nil-check so a prewarm-written report is always reused.
+func TestVisionThemeReportGroupCacheHit(t *testing.T) {
+	deps, st := newAdaptDeps(t)
+	dir := t.TempDir()
+	// Seed two reference assets on disk so visionThemeReport can compute their md5.
+	p1, p2 := filepath.Join(dir, "r1.png"), filepath.Join(dir, "r2.png")
+	writePNG(t, p1, 8, 8)
+	writePNG(t, p2, 10, 10)
+	now := time.Now().UTC()
+	_ = st.InsertAsset(store.AssetRecord{ID: "r1", SessionID: "s", Kind: "upload", Path: p1, Mime: "image/png", CreatedAt: now})
+	_ = st.InsertAsset(store.AssetRecord{ID: "r2", SessionID: "s", Kind: "upload", Path: p2, Mime: "image/png", CreatedAt: now})
+
+	// Compute the group cache key exactly as visionThemeReport does:
+	// composite of per-image md5s joined under "group:".
+	d1, _ := os.ReadFile(p1)
+	d2, _ := os.ReadFile(p2)
+	m1 := fmt.Sprintf("%x", md5.Sum(d1))
+	m2 := fmt.Sprintf("%x", md5.Sum(d2))
+	groupKey := fmt.Sprintf("%x", md5.Sum([]byte("group:"+strings.Join([]string{m1, m2}, ","))))
+
+	if err := st.InsertVisionReport(groupKey, "cached group report"); err != nil {
+		t.Fatal(err)
+	}
+
+	// With nil RefPublisher (no COS) the function must still return the cached report.
+	report := visionThemeReport(context.Background(), deps, []string{"r1", "r2"})
+	if report != "cached group report" {
+		t.Errorf("expected cached group report, got %q", report)
+	}
+}
+
+// TestVisionThemeReportDegradation verifies that nil publisher/analyzer causes
+// visionThemeReport to return "" without error, so adaptation continues normally.
+func TestVisionThemeReportDegradation(t *testing.T) {
+	deps, _ := newAdaptDeps(t)
+	// No publisher or analyzer wired → must degrade to "".
+	if got := visionThemeReport(context.Background(), deps, []string{"src"}); got != "" {
+		t.Errorf("expected empty string on degradation, got %q", got)
 	}
 }

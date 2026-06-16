@@ -13,6 +13,7 @@ import {
   Sparkles,
   AppWindow,
   MessageCircleQuestion,
+  RotateCcw,
   Wrench,
   type LucideIcon,
 } from "lucide-react";
@@ -29,6 +30,7 @@ const TOOL_META: Record<string, ToolMeta> = {
   "edit_image:change_character": { icon: UserRoundCog, title: "换角色" },
   "edit_image:add_character":    { icon: UserRoundPlus, title: "增加角色" },
   "edit_image:change_text":      { icon: Type, title: "换文案" },
+  "edit_image:retry":            { icon: RotateCcw, title: "重试生成" },
   edit_image:                    { icon: ImagePlus, title: "生成图片" },
   image_to_video:                { icon: Clapperboard, title: "生成视频" },
   crop_to_sizes:                 { icon: Scissors, title: "切尺寸" },

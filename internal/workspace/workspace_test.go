@@ -133,6 +133,112 @@ func TestRetryOnlyFailedTasks(t *testing.T) {
 	}
 }
 
+// TestRetryAssetDispatchesAndListsRetryable verifies the asset-retry endpoint
+// dispatches the injected retryAsset fn for a product carrying a gen_origin, and
+// that the list view marks such a product Retryable while leaving a plain upload
+// non-retryable.
+func TestRetryAssetDispatchesAndListsRetryable(t *testing.T) {
+	dir := t.TempDir()
+	st, _ := store.Open(filepath.Join(dir, "ws.db"))
+	t.Cleanup(func() { _ = st.Close() })
+	seedSession(t, st, "s1")
+	now := time.Now().UTC()
+	// A retryable AI product (has gen_origin) and a plain upload (none).
+	_ = st.InsertAsset(store.AssetRecord{ID: "gen1", SessionID: "s1", Kind: "generated", Path: "/tmp/g", Mime: "image/png", GenOrigin: `{"sessionId":"s1"}`, CreatedAt: now})
+	_ = st.InsertAsset(store.AssetRecord{ID: "up1", SessionID: "s1", Kind: "upload", Path: "/tmp/u", Mime: "image/png", CreatedAt: now})
+
+	var retriedAsset string
+	svc := NewService(st, filepath.Join(dir, "assets"), func() string { return "a" }, nil, nil)
+	svc.SetRetryAsset(func(_, assetID string) (string, error) {
+		retriedAsset = assetID
+		return "newtask", nil
+	})
+	mux := http.NewServeMux()
+	svc.RegisterRoutes(mux)
+
+	req := httptest.NewRequest("POST", "/api/session/s1/assets/gen1/retry", nil)
+	rr := httptest.NewRecorder()
+	mux.ServeHTTP(rr, req)
+	if rr.Code != http.StatusAccepted {
+		t.Fatalf("asset retry status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	if retriedAsset != "gen1" {
+		t.Fatalf("asset retry not dispatched for gen1, got %q", retriedAsset)
+	}
+
+	// List: gen1 is retryable, up1 is not.
+	lreq := httptest.NewRequest("GET", "/api/session/s1/assets", nil)
+	lrr := httptest.NewRecorder()
+	mux.ServeHTTP(lrr, lreq)
+	var resp struct {
+		Assets []AssetView `json:"assets"`
+	}
+	_ = json.Unmarshal(lrr.Body.Bytes(), &resp)
+	got := map[string]bool{}
+	for _, a := range resp.Assets {
+		got[a.ID] = a.Retryable
+	}
+	if !got["gen1"] {
+		t.Error("gen1 (has gen_origin) should be Retryable")
+	}
+	if got["up1"] {
+		t.Error("up1 (plain upload) must not be Retryable")
+	}
+}
+
+// TestRetryAssetUnwiredReturns503 verifies the endpoint reports unavailable when
+// the retry capability was never wired (e.g. generation service absent).
+func TestRetryAssetUnwiredReturns503(t *testing.T) {
+	_, st, mux := newWS(t)
+	seedSession(t, st, "s1")
+	req := httptest.NewRequest("POST", "/api/session/s1/assets/x/retry", nil)
+	rr := httptest.NewRecorder()
+	mux.ServeHTTP(rr, req)
+	if rr.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected 503 when retry unwired, got %d", rr.Code)
+	}
+}
+
+// TestUploadTriggersPrewarm verifies a successful upload fires the prewarm hook
+// once with the new asset's id/path/mime, and that the upload response is not
+// blocked by it (the hook returns synchronously here; in production it spawns a
+// goroutine).
+func TestUploadTriggersPrewarm(t *testing.T) {
+	dir := t.TempDir()
+	st, _ := store.Open(filepath.Join(dir, "ws.db"))
+	t.Cleanup(func() { _ = st.Close() })
+	seedSession(t, st, "s1")
+	var n int
+	svc := NewService(st, filepath.Join(dir, "assets"), func() string { n++; return "a" + string(rune('0'+n)) }, nil, nil)
+	prewarmed := make(chan [3]string, 1)
+	svc.SetPrewarm(func(sessionID, assetID, path, mime string) {
+		prewarmed <- [3]string{sessionID, assetID, mime}
+	})
+	mux := http.NewServeMux()
+	svc.RegisterRoutes(mux)
+
+	var body bytes.Buffer
+	mw := multipart.NewWriter(&body)
+	fw, _ := mw.CreateFormFile("file", "hero.png")
+	fw.Write(pngBytes(t, color.RGBA{1, 2, 3, 255}))
+	mw.Close()
+	req := httptest.NewRequest("POST", "/api/session/s1/upload", &body)
+	req.Header.Set("Content-Type", mw.FormDataContentType())
+	rr := httptest.NewRecorder()
+	mux.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("upload status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	select {
+	case got := <-prewarmed:
+		if got[0] != "s1" || got[2] != "image/png" || got[1] == "" {
+			t.Fatalf("unexpected prewarm args: %v", got)
+		}
+	default:
+		t.Fatal("prewarm hook was not called on upload")
+	}
+}
+
 func TestListTasksReflectsStatus(t *testing.T) {
 	_, st, mux := newWS(t)
 	seedSession(t, st, "s1")

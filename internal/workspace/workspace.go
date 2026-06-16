@@ -33,6 +33,15 @@ type Service struct {
 	// cancel aborts an in-flight (queued/running) task and deletes its record;
 	// injected so workspace doesn't import generation/video. Returns rows removed.
 	cancel func(sessionID, taskID string) (int64, error)
+	// retryAsset re-runs the AI flow that produced a SUCCEEDED product, yielding a
+	// new task whose product is a new asset (the original is left in place).
+	// Injected (wired to generation.Service.RetryAsset) so workspace doesn't import
+	// generation; nil disables the asset-retry endpoint. Returns the new task id.
+	retryAsset func(sessionID, assetID string) (string, error)
+	// prewarm fires the upload-time vision analysis (publish → analyze → cache by
+	// md5) in the background after a successful upload. Injected so workspace
+	// doesn't import cos/vision; nil disables prewarming (graceful no-op).
+	prewarm func(sessionID, assetID, path, mime string)
 }
 
 // NewService constructs the workspace service. retryFn re-runs a failed task
@@ -49,6 +58,18 @@ func NewService(st *store.Store, assetDir string, newID func() string, retryFn f
 	}
 }
 
+// SetRetryAsset wires the successful-product retry (generation.Service.RetryAsset).
+// Leaving it unset makes the asset-retry endpoint return 503.
+func (s *Service) SetRetryAsset(fn func(sessionID, assetID string) (string, error)) {
+	s.retryAsset = fn
+}
+
+// SetPrewarm wires the upload-time vision analysis prewarm. Leaving it unset
+// disables prewarming (uploads still succeed; later adapts analyze on demand).
+func (s *Service) SetPrewarm(fn func(sessionID, assetID, path, mime string)) {
+	s.prewarm = fn
+}
+
 // AssetView is the workspace representation of one asset.
 type AssetView struct {
 	ID       string `json:"id"`
@@ -60,9 +81,16 @@ type AssetView struct {
 	ParentID string `json:"parentId,omitempty"`
 	// SizeID is set for platform-adaptation products (crop or AI repaint). It
 	// lets the frontend collapse a batch of adapted sizes into one timeline node.
-	SizeID    string `json:"sizeId,omitempty"`
-	URL       string `json:"url"`
-	CreatedAt string `json:"createdAt,omitempty"`
+	SizeID string `json:"sizeId,omitempty"`
+	// Retryable is true when this product carries a generation origin (an AI flow
+	// that can be re-run). Uploads and deterministic crops have none → false, so
+	// the frontend shows no retry affordance for them.
+	Retryable bool `json:"retryable,omitempty"`
+	// ReferenceIDs lists the reference asset ids used to produce this asset
+	// (derived from gen_origin). Populated only for AI products with ≥2 references.
+	ReferenceIDs []string `json:"referenceIds,omitempty"`
+	URL          string   `json:"url"`
+	CreatedAt    string   `json:"createdAt,omitempty"`
 }
 
 // TaskView is the workspace representation of one task (placeholder card).
@@ -81,6 +109,7 @@ func (s *Service) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/session/{id}/assets", s.handleListAssets)
 	mux.HandleFunc("GET /api/session/{id}/assets/{assetId}/raw", s.handleAssetRaw)
 	mux.HandleFunc("DELETE /api/session/{id}/assets/{assetId}", s.handleDeleteAsset)
+	mux.HandleFunc("POST /api/session/{id}/assets/{assetId}/retry", s.handleRetryAsset)
 	mux.HandleFunc("GET /api/session/{id}/tasks", s.handleListTasks)
 	mux.HandleFunc("POST /api/session/{id}/upload", s.handleUpload)
 	mux.HandleFunc("POST /api/session/{id}/tasks/{taskId}/retry", s.handleRetry)
@@ -138,6 +167,7 @@ func (s *Service) handleListAssets(w http.ResponseWriter, r *http.Request) {
 		view := AssetView{
 			ID: a.ID, Kind: a.Kind, Mime: a.Mime, Width: a.Width, Height: a.Height,
 			Provider: a.Provider, ParentID: a.ParentID,
+			Retryable: a.GenOrigin != "",
 			URL:       fmt.Sprintf("/api/session/%s/assets/%s/raw", sessionID, a.ID),
 			CreatedAt: a.CreatedAt.Format(time.RFC3339),
 		}
@@ -147,6 +177,14 @@ func (s *Service) handleListAssets(w http.ResponseWriter, r *http.Request) {
 			}
 			if json.Unmarshal([]byte(a.Meta), &m) == nil {
 				view.SizeID = m.SizeID
+			}
+		}
+		if a.GenOrigin != "" {
+			var g struct {
+				ReferenceAssetIDs []string `json:"reference_asset_ids"`
+			}
+			if json.Unmarshal([]byte(a.GenOrigin), &g) == nil && len(g.ReferenceAssetIDs) >= 2 {
+				view.ReferenceIDs = g.ReferenceAssetIDs
 			}
 		}
 		out = append(out, view)
@@ -251,6 +289,13 @@ func (s *Service) handleUpload(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	// Upload-time vision prewarm: fire-and-forget publish → analyze → cache by md5
+	// so a later adapt of this image hits the cache instead of re-analyzing. Best
+	// effort — must not block or fail the upload response. Disabled (nil) when
+	// COS/vision are unconfigured.
+	if s.prewarm != nil {
+		s.prewarm(sessionID, assetID, path, mime)
+	}
 	writeJSON(w, AssetView{
 		ID: assetID, Kind: "upload", Mime: mime, Width: cfg.Width, Height: cfg.Height,
 		URL:       fmt.Sprintf("/api/session/%s/assets/%s/raw", sessionID, assetID),
@@ -268,6 +313,27 @@ func (s *Service) handleRetry(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := s.retry(sessionID, taskID); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	w.WriteHeader(http.StatusAccepted)
+	writeJSON(w, map[string]string{"status": "queued", "taskId": taskID})
+}
+
+// handleRetryAsset re-runs the AI flow that produced a SUCCEEDED product. Unlike
+// handleRetry (which re-runs a failed task in place), this yields a NEW task whose
+// product is a new asset; the original is left untouched. Returns 503 when the
+// retry capability is unwired, and 400 when the asset carries no generation origin
+// (uploads / deterministic crops are not retryable).
+func (s *Service) handleRetryAsset(w http.ResponseWriter, r *http.Request) {
+	sessionID := r.PathValue("id")
+	assetID := r.PathValue("assetId")
+	if s.retryAsset == nil {
+		http.Error(w, "retry not available", http.StatusServiceUnavailable)
+		return
+	}
+	taskID, err := s.retryAsset(sessionID, assetID)
+	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}

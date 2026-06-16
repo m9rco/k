@@ -16,6 +16,34 @@ const KIND_LABEL: Record<string, string> = {
   upload: "上传", generated: "生成", cropped: "裁剪", crawled: "爬取", video: "视频",
 };
 
+// RefBadge shows "参考 N 张" and on hover expands mini-thumbnails (≤4 stacked).
+function RefBadge({ ids, assets }: { ids: string[]; assets: Map<string, Asset> }) {
+  const [hovered, setHovered] = React.useState(false);
+  const thumbs = ids.slice(0, 4);
+  const extra = ids.length - 4;
+  return (
+    <span
+      className="flex items-center gap-0.5 rounded-md bg-black/55 px-1.5 py-0.5 text-[10px] text-fg-mute backdrop-blur-sm"
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => setHovered(false)}
+    >
+      {hovered ? (
+        <span className="flex items-center gap-0.5">
+          {thumbs.map((id) => {
+            const a = assets.get(id);
+            return a ? (
+              <img key={id} src={a.url} alt="" className="-ml-1 size-5 rounded-sm object-cover ring-1 ring-black/30 first:ml-0" />
+            ) : null;
+          })}
+          {extra > 0 && <span className="ml-0.5">+{extra}</span>}
+        </span>
+      ) : (
+        `参考 ${ids.length} 张`
+      )}
+    </span>
+  );
+}
+
 export function AssetCard({
   asset,
   label,
@@ -36,6 +64,7 @@ export function AssetCard({
   const isVideo = (asset.mime || "").startsWith("video/") || asset.kind === "video";
   const vidRef = React.useRef<HTMLVideoElement>(null);
   const cardRef = React.useRef<HTMLDivElement>(null);
+  const [retrying, setRetrying] = React.useState(false);
 
   const openMenu = (e: React.MouseEvent) => {
     e.stopPropagation();
@@ -51,6 +80,14 @@ export function AssetCard({
       }),
     );
   };
+
+  const handleRetry = async () => {
+    if (retrying) return;
+    setRetrying(true);
+    try { await app.retryAsset(asset.id); } finally { setRetrying(false); }
+  };
+
+  const hasRefs = (asset.referenceIds?.length ?? 0) >= 2;
 
   return (
     <ContextMenu>
@@ -105,11 +142,17 @@ export function AssetCard({
               {isVideo ? "视频" : KIND_LABEL[asset.kind] || asset.kind}
             </span>
           </div>
-          {!!(asset.width && asset.height) && (
-            <span className="absolute bottom-1.5 left-1.5 rounded-md bg-black/55 px-1.5 py-0.5 text-[10px] tabular-nums text-fg-mute backdrop-blur-sm">
-              {asset.width}×{asset.height}
-            </span>
-          )}
+
+          <div className="absolute bottom-1.5 left-1.5 flex items-center gap-1">
+            {!!(asset.width && asset.height) && (
+              <span className="rounded-md bg-black/55 px-1.5 py-0.5 text-[10px] tabular-nums text-fg-mute backdrop-blur-sm">
+                {asset.width}×{asset.height}
+              </span>
+            )}
+            {hasRefs && (
+              <RefBadge ids={asset.referenceIds!} assets={app.state.assets} />
+            )}
+          </div>
 
           <div className="absolute right-1.5 top-1.5 flex gap-1 opacity-0 transition-opacity group-hover:opacity-100">
             <button
@@ -142,6 +185,11 @@ export function AssetCard({
         {!isVideo && <ContextMenuItem onSelect={() => onCrop(asset)}>适配尺寸</ContextMenuItem>}
         {!isVideo && <ContextMenuItem onSelect={() => onPreview(asset)}>二次调整</ContextMenuItem>}
         {!isVideo && <ContextMenuItem onSelect={() => onVideo(asset)}>生成视频</ContextMenuItem>}
+        {asset.retryable && (
+          <ContextMenuItem disabled={retrying} onSelect={handleRetry}>
+            {retrying ? "重试中…" : "重试生成"}
+          </ContextMenuItem>
+        )}
         {/* 视频裁剪/抽帧暂禁用（功能待完善）；onVideoOps 透传链保留，完善后去掉 disabled 即恢复 */}
         {isVideo && <ContextMenuItem disabled onSelect={() => onVideoOps(asset, "trim")}>裁剪片段（待完善）</ContextMenuItem>}
         {isVideo && <ContextMenuItem disabled onSelect={() => onVideoOps(asset, "frame")}>抽帧（待完善）</ContextMenuItem>}

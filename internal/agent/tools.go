@@ -607,7 +607,7 @@ func adaptProvider(d ToolDeps) *config.ImageProviderConfig {
 // and a later single-image adapt share the same cached report); a group of 2+ keys
 // on a composite fingerprint of the ordered per-image md5s.
 func visionThemeReport(ctx context.Context, d ToolDeps, refIDs []string) string {
-	if d.RefPublisher == nil || d.VisionAnalyzer == nil || !d.VisionAnalyzer.Configured() || d.Store == nil {
+	if d.Store == nil {
 		return ""
 	}
 	// Load each reference's bytes in order; skip any that can't be read rather
@@ -641,8 +641,9 @@ func visionThemeReport(ctx context.Context, d ToolDeps, refIDs []string) string 
 		notifyAnalysis = d.Notify
 	}
 
-	// Group cache key: raw md5 for a single image (aligns with upload prewarm);
-	// composite of ordered per-image md5s for a group.
+	// Group cache key: raw md5 for a single image (aligns with upload prewarm so a
+	// pre-warmed single-image report is reused here too); composite of ordered
+	// per-image md5s for a reference group of 2+.
 	cacheKey := imgs[0].md5
 	if len(imgs) > 1 {
 		parts := make([]string, len(imgs))
@@ -651,12 +652,21 @@ func visionThemeReport(ctx context.Context, d ToolDeps, refIDs []string) string 
 		}
 		cacheKey = fmt.Sprintf("%x", md5.Sum([]byte("group:"+strings.Join(parts, ","))))
 	}
+	// Check cache first — this path requires only the store, not COS/vision. A
+	// report written by the upload prewarm (or a previous adapt) is returned even
+	// when COS/vision are currently unconfigured (e.g. credentials rotated).
 	if cached, err := d.Store.GetVisionReport(cacheKey); err == nil && cached != "" {
 		applog.From(ctx).Info().Str("event", "adapt.analysis_cache_hit").Str("key", cacheKey).Int("refs", len(imgs)).Msg("vision report cache hit")
 		if notifyAnalysis != nil {
 			notifyAnalysis(cached, true)
 		}
 		return cached
+	}
+
+	// No cached report — need live publish + analysis. Both publisher and analyzer
+	// must be configured; otherwise degrade gracefully.
+	if d.RefPublisher == nil || d.VisionAnalyzer == nil || !d.VisionAnalyzer.Configured() {
+		return ""
 	}
 
 	if d.Notify != nil {

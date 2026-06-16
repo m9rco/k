@@ -5,6 +5,7 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/u
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Button } from "@/components/ui/button";
 import * as api from "@/lib/api";
+import { Loader2 } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 interface Chosen {
@@ -179,7 +180,9 @@ export function SizePicker({
           </div>
           <p className="text-[11px] leading-relaxed text-fg-mute">
             {action === "adapt"
-              ? "保留主体与宣发意图，自动适配各平台：比例一致直接缩放，横竖翻转或比例差异大时由 AI 重绘补全画面。"
+              ? assetIds && assetIds.length > 1
+                ? `以这 ${assetIds.length} 张图作为参考组（第一张为主参考）共同定调，每个尺寸产出 1 张${chosen.size > 0 ? `，共 ${chosen.size} 张` : ""}。保留主体与宣发意图。`
+                : "保留主体与宣发意图，自动适配各平台：比例一致直接缩放，横竖翻转或比例差异大时由 AI 重绘补全画面。"
               : "确定性裁剪，不经过 AI。可选铺满 / 留白 / 锚点 / 框选模式。"}
           </p>
         </div>
@@ -284,7 +287,7 @@ export function SizePicker({
         <div className="mt-3 flex items-center gap-3 border-t border-line pt-3">
           <span className="text-xs text-fg-dim">已选 {chosen.size} 个尺寸</span>
           <Button className="ml-auto" size="sm" disabled={chosen.size === 0 || running} onClick={run}>
-            {running ? "处理中…" : action === "adapt" ? "开始适配" : "开始裁剪"}
+            {running ? <><Loader2 className="mr-1.5 size-3.5 animate-spin" />处理中…</> : action === "adapt" ? "开始适配" : "开始裁剪"}
           </Button>
         </div>
       </DialogContent>

@@ -8,6 +8,7 @@ package main
 
 import (
 	"context"
+	"crypto/md5"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -114,6 +115,14 @@ func run() error {
 	// the LLM understands the image + intent before any repaint) — there is no
 	// direct HTTP endpoint that would bypass the model.
 	genSvc.SetCropper(cropSvc)
+	// Mirror the orchestrator's per-turn adapt routing (gpt-image-2 →
+	// gemini-3-pro-image) onto the generation service so RetryAsset can re-force it
+	// for adapt products (gen_origin strips the provider override before persisting).
+	if pc, ok := cfg.ResolveImageModel(config.SceneImage, "gpt-image-2"); ok {
+		genSvc.SetAdaptImageProvider(&pc)
+	} else if pc, ok := cfg.ResolveImageModel(config.SceneImage, "gemini-3-pro-image"); ok {
+		genSvc.SetAdaptImageProvider(&pc)
+	}
 
 	// Outpaint convergence provider for extreme-ratio platform adaptation (e.g. a
 	// 2:1 product toward a 4:1 banner): the product is padded to the target ratio
@@ -177,6 +186,12 @@ func run() error {
 			return genSvc.Cancel(sessionID, taskID)
 		})
 	wsSvc.RegisterRoutes(mux)
+	// Asset-level retry: re-run the AI flow that produced a SUCCEEDED product as a
+	// new asset (the original is left in place). RetryAsset re-forces the adapt
+	// provider internally for adapt products, so override stays nil here.
+	wsSvc.SetRetryAsset(func(sessionID, assetID string) (string, error) {
+		return genSvc.RetryAsset(context.Background(), sessionID, assetID, nil)
+	})
 
 	// Download: single-asset attachment + server-side zip packaging.
 	dlSvc := download.NewService(st)
@@ -207,7 +222,8 @@ func run() error {
 	// then analyze with grok-4-fast to produce a theme report injected into the
 	// AI-repaint prompt. Both capabilities are optional; nil disables gracefully.
 	visionBase, visionKey := cfg.VisionCredential()
-	if visionAnalyzer := vision.New(visionBase, visionKey, "grok-4-fast"); visionAnalyzer != nil {
+	visionAnalyzer := vision.New(visionBase, visionKey, "grok-4-fast")
+	if visionAnalyzer != nil {
 		orch.SetVisionAnalyzer(visionAnalyzer)
 		log.Printf("vision: grok-4-fast analysis enabled (base=%s)", visionBase)
 	} else {
@@ -215,6 +231,43 @@ func run() error {
 	}
 	if cosUploader != nil {
 		orch.SetRefPublisher(cosUploader)
+	}
+	// Upload-time vision prewarm: when both COS and vision are configured, each new
+	// upload is analyzed in the background and cached by raw-content md5 — the same
+	// key a later single-image adapt uses (internal/agent.visionThemeReport), so the
+	// adapt hits the cache instead of re-analyzing. Best effort: an md5 already
+	// cached is skipped; publish/analyze failures only log. Unconfigured → nil → the
+	// workspace skips prewarming entirely.
+	if cosUploader != nil && visionAnalyzer != nil {
+		wsSvc.SetPrewarm(func(sessionID, assetID, path, mime string) {
+			go func() {
+				data, err := os.ReadFile(path)
+				if err != nil {
+					log.Printf("prewarm: read %s failed: %v", assetID, err)
+					return
+				}
+				key := fmt.Sprintf("%x", md5.Sum(data))
+				if cached, err := st.GetVisionReport(key); err == nil && cached != "" {
+					return // already analyzed (same content uploaded before)
+				}
+				ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+				defer cancel()
+				url, err := cosUploader.UploadIfAbsent(ctx, data, mime, st)
+				if err != nil {
+					log.Printf("prewarm: publish %s failed: %v", assetID, err)
+					return
+				}
+				report, err := visionAnalyzer.Analyze(ctx, []string{url}, nil)
+				if err != nil {
+					log.Printf("prewarm: analyze %s failed: %v", assetID, err)
+					return
+				}
+				if err := st.InsertVisionReport(key, report); err != nil {
+					log.Printf("prewarm: cache %s failed: %v", assetID, err)
+				}
+			}()
+		})
+		log.Printf("upload prewarm: enabled (publish → analyze → cache by md5)")
 	}
 	hub.SetHandler(func(ctx context.Context, sessionID string, msg transport.Inbound) {
 		switch msg.Type {

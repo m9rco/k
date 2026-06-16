@@ -1,6 +1,6 @@
 import * as React from "react";
 import { AnimatePresence, motion } from "framer-motion";
-import { Plus, Sparkles, Send, X, ArrowUp, Zap } from "lucide-react";
+import { Plus, Sparkles, Send, X, ArrowUp, Zap, Loader2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { Capybara } from "@/components/capybara/capybara";
@@ -68,6 +68,7 @@ export function Composer({ onboarding = false }: { onboarding?: boolean }) {
   const [text, setText] = React.useState("");
   const [focused, setFocused] = React.useState(false);
   const [optimizing, setOptimizing] = React.useState(false);
+  const [uploading, setUploading] = React.useState(false);
   const fileRef = React.useRef<HTMLInputElement>(null);
 
   const selectedCount = state.selected.size;
@@ -198,13 +199,23 @@ export function Composer({ onboarding = false }: { onboarding?: boolean }) {
           accept="image/*"
           multiple
           hidden
-          onChange={(e) => {
-            if (e.target.files?.length) app.uploadFiles(e.target.files);
+          onChange={async (e) => {
+            if (e.target.files?.length) {
+              setUploading(true);
+              try { await app.uploadFiles(e.target.files); } finally { setUploading(false); }
+            }
             e.target.value = "";
           }}
         />
-        <Button type="button" variant="ghost" size="icon" title="上传图片" onClick={() => fileRef.current?.click()}>
-          <Plus />
+        <Button
+          type="button"
+          variant="ghost"
+          size="icon"
+          title="上传图片"
+          disabled={uploading}
+          onClick={() => fileRef.current?.click()}
+        >
+          {uploading ? <Loader2 className="size-4 animate-spin" /> : <Plus />}
         </Button>
         <input
           value={text}

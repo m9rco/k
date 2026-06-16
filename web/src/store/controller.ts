@@ -65,6 +65,9 @@ export function useAppController() {
   // submitted — long before the artifact exists — so a "已完成" bubble would lie.
   // We hold it and render only once the session has no queued/running tasks left.
   const pendingFollowUpRef = React.useRef<{ message: string; options: { label: string; value: string }[] } | null>(null);
+  // retryCardsRef maps taskId → chat tool-card id for direct retries so the
+  // tool card tracks task_done/task_failed without going through the agent WS.
+  const retryCardsRef = React.useRef<Map<string, string>>(new Map());
   const setChat = React.useCallback((fn: (c: ChatItem[]) => ChatItem[]) => {
     setState((s) => ({ ...s, chat: fn(s.chat) }));
   }, []);
@@ -159,12 +162,23 @@ export function useAppController() {
         if (newAsset && (taskKind === "generate" || taskKind === "video")) {
           setState((s) => ({ ...s, selected: new Set([newAsset]) }));
         }
+        // Update the retry tool card in chat if this task was triggered by retryAsset.
+        const retryCardId = retryCardsRef.current.get(taskId);
+        if (retryCardId) {
+          setChat((c) => c.map((it) => it.kind === "tool" && it.tool.id === retryCardId ? { ...it, tool: { ...it.tool, status: "done" } } : it));
+          retryCardsRef.current.delete(taskId);
+        }
       } else if (type === "task_progress" && data.asset_id) {
         // immediate backfill: each downloaded image is pushed as soon as it lands
         void refreshWorkspace(sid);
       } else if (type === "task_failed") {
         closeStream(taskId);
         toast("有一个生成任务失败了，可在工作区重试", "warn");
+        const retryCardId = retryCardsRef.current.get(taskId);
+        if (retryCardId) {
+          setChat((c) => c.map((it) => it.kind === "tool" && it.tool.id === retryCardId ? { ...it, tool: { ...it.tool, status: "failed", error: (data.error as string) || "重试失败" } } : it));
+          retryCardsRef.current.delete(taskId);
+        }
       }
       // Flush a deferred follow_up once this turn's async work has fully settled:
       // the backend sent it at turn-end (when the task was merely submitted), and
@@ -177,7 +191,7 @@ export function useAppController() {
         }
       }
     },
-    [closeStream, refreshWorkspace, refreshContext, toast, renderFollowUp],
+    [closeStream, refreshWorkspace, refreshContext, toast, renderFollowUp, setChat],
   );
 
   const subscribeTask = React.useCallback(
@@ -406,7 +420,7 @@ export function useAppController() {
     setChat((c) => c.map((it) => {
       if (it.kind !== "analysis" || it.id !== analysisRef.current.id) return it;
       const next = it.text + (text || "");
-      return done ? { ...it, text: next, collapsed: false, done: true } : { ...it, text: next };
+      return done ? { ...it, text: next, collapsed: true, done: true } : { ...it, text: next };
     }));
     if (done) analysisRef.current.done = true;
   }, [clearLoading, setChat]);
@@ -880,6 +894,25 @@ export function useAppController() {
     }
   }, [subscribeTask, toast]);
 
+  // retryAsset re-runs the AI flow behind a SUCCEEDED product. The backend yields
+  // a NEW task (original asset untouched); we seed a placeholder for it so the new
+  // product streams into the workspace just like a fresh generation.
+  const retryAsset = React.useCallback(async (assetId: string) => {
+    const sid = stateRef.current.sessionId;
+    const cardId = uid("tc");
+    setChat((c) => [...c, { kind: "tool", id: cardId, tool: { id: cardId, name: "edit_image", args: { intent: "retry" }, status: "running" } }]);
+    try {
+      const { taskId } = await api.retryAsset(sid, assetId);
+      if (taskId) {
+        retryCardsRef.current.set(taskId, cardId);
+        ensureTaskPlaceholder(sid, taskId, "generate", "重试生成");
+      }
+    } catch (e) {
+      setChat((c) => c.map((it) => it.kind === "tool" && it.tool.id === cardId ? { ...it, tool: { ...it.tool, status: "failed", error: (e as Error).message } } : it));
+      toast("重试失败：" + (e as Error).message);
+    }
+  }, [ensureTaskPlaceholder, setChat, toast]);
+
   const clearWorkspace = React.useCallback(async () => {
     const sid = stateRef.current.sessionId;
     try {
@@ -950,6 +983,7 @@ export function useAppController() {
     removeTask,
     clearFailed,
     retryTask,
+    retryAsset,
     clearWorkspace,
     clearContext,
     uploadFiles,

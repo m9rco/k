@@ -83,6 +83,13 @@ export function retryTask(sid: string, taskId: string) {
   return api(`/api/session/${sid}/tasks/${taskId}/retry`, { method: "POST" });
 }
 
+// retryAsset re-runs the AI flow that produced a SUCCEEDED product. Unlike
+// retryTask (re-runs a failed task in place), this yields a NEW task whose
+// product is a new asset; the original is preserved. Returns { status, taskId }.
+export function retryAsset(sid: string, assetId: string): Promise<{ status: string; taskId: string }> {
+  return api(`/api/session/${sid}/assets/${assetId}/retry`, { method: "POST" });
+}
+
 export function deleteTask(sid: string, taskId: string) {
   return api(`/api/session/${sid}/tasks/${taskId}`, { method: "DELETE" });
 }

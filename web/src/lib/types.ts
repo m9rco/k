@@ -14,6 +14,11 @@ export interface Asset {
   // sizeId is set for platform-adaptation products (crop fast path or AI repaint).
   // The timeline uses it to collapse a batch of adapted sizes into one node.
   sizeId?: string;
+  // retryable is true for AI products carrying a generation origin (re-runnable).
+  // Uploads and deterministic crops are false → no retry affordance in the UI.
+  retryable?: boolean;
+  // referenceIds lists the reference asset ids used to produce this asset (≥2 means multi-ref).
+  referenceIds?: string[];
   createdAt?: string;
 }
 

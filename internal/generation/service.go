@@ -61,6 +61,16 @@ type Service struct {
 	// the zero value (empty Provider) is treated as the OpenAI-compatible adapter.
 	defaultImageProvider config.ImageProviderConfig
 
+	// adaptImageProvider, when set, is the request-scoped image provider that the
+	// platform-adaptation AI repaint forces (gpt-image-2, falling back to
+	// gemini-3-pro-image) regardless of the session's image-scene selection. It
+	// mirrors the orchestrator's per-turn AdaptModelOverride, but is held here so
+	// RetryAsset can re-apply it: gen_origin strips ProviderOverride before
+	// persistence (it may carry credentials), so an adapt product retried via
+	// RetryAsset would otherwise fall back to the service default. Wired via
+	// SetAdaptImageProvider; nil leaves the persisted (default) routing.
+	adaptImageProvider *config.ImageProviderConfig
+
 	// outpainter, when set, is the image provider used for the outpaint
 	// convergence step: extreme-ratio adaptations (e.g. a 2:1 product toward a
 	// 4:1 banner) are padded to the target ratio with transparent margins and
@@ -109,6 +119,14 @@ func (s *Service) SetDefaultImageProvider(cfg config.ImageProviderConfig) {
 // outpaint path fall back to ModeContain (transparent band padding), so
 // adaptation degrades gracefully rather than failing.
 func (s *Service) SetOutpainter(p Provider) { s.outpainter = p }
+
+// SetAdaptImageProvider records the provider that platform-adaptation AI repaints
+// force (gpt-image-2 → gemini-3-pro-image), so RetryAsset can re-apply it to an
+// adapt product whose persisted gen_origin had ProviderOverride stripped. Optional;
+// nil leaves the persisted routing (service default).
+func (s *Service) SetAdaptImageProvider(pc *config.ImageProviderConfig) {
+	s.adaptImageProvider = pc
+}
 
 // providerSupportsTransparency reports whether an image adapter can produce a
 // real transparent background. gpt-image-2 (the OpenAI-compatible default) cannot;
@@ -326,7 +344,18 @@ func (s *Service) RetryAsset(ctx context.Context, sessionID, assetID string, ove
 		return "", fmt.Errorf("decode gen_origin for %q: %w", assetID, err)
 	}
 	p.SessionID = sessionID // never trust a persisted session id; scope to caller
-	p.ProviderOverride = override
+	// Re-resolve the request-scoped provider that gen_origin stripped. An explicit
+	// override wins; otherwise an adapt product re-forces the adapt provider
+	// (gpt-image-2) so a retried adaptation routes like the original rather than
+	// falling back to the service default. Non-adapt products keep the default.
+	switch {
+	case override != nil:
+		p.ProviderOverride = override
+	case p.Slots.Kind == EditAdaptPlatform && s.adaptImageProvider != nil:
+		p.ProviderOverride = s.adaptImageProvider
+	default:
+		p.ProviderOverride = nil
+	}
 	return s.Start(ctx, p)
 }
 
