@@ -16,3 +16,6 @@
 
 # Playwright MCP browser-test artifacts (snapshots, console logs).
 .playwright-mcp/
+
+# Claude Code worktree artifacts
+.claude/worktrees/

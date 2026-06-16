@@ -13,6 +13,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"gameasset/internal/config"
 	"gameasset/internal/store"
@@ -73,8 +74,26 @@ func TestSanitizeStripsInjection(t *testing.T) {
 
 func TestSanitizeTruncates(t *testing.T) {
 	long := strings.Repeat("x", 1000)
-	if len(Sanitize(long)) > maxSlotLen {
-		t.Error("sanitize did not truncate")
+	if n := len([]rune(Sanitize(long))); n > maxSlotLen {
+		t.Errorf("sanitize did not truncate: got %d runes, want <= %d", n, maxSlotLen)
+	}
+}
+
+// TestSanitizeTruncatesOnRuneBoundary guards the bug where byte-slicing cut a
+// multi-byte CJK glyph in half, emitting a U+FFFD "�" into the prompt. The cap
+// is now in runes, so CJK gets the full character budget and the result is
+// always valid UTF-8.
+func TestSanitizeTruncatesOnRuneBoundary(t *testing.T) {
+	long := strings.Repeat("银发短发少年", 200) // 1200 runes, 3 bytes each
+	out := Sanitize(long)
+	if n := len([]rune(out)); n != maxSlotLen {
+		t.Errorf("rune count = %d, want exactly %d", n, maxSlotLen)
+	}
+	if strings.ContainsRune(out, '�') {
+		t.Error("output contains U+FFFD replacement char: a multi-byte rune was split mid-character")
+	}
+	if !utf8.ValidString(out) {
+		t.Error("output is not valid UTF-8")
 	}
 }
 

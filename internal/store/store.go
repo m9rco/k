@@ -8,7 +8,9 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
+	"unicode/utf8"
 
 	_ "modernc.org/sqlite"
 )
@@ -540,6 +542,13 @@ func (s *Store) GetVisionReport(md5 string) (string, error) {
 
 // InsertVisionReport stores a completed analysis report keyed by image MD5.
 func (s *Store) InsertVisionReport(md5, report string) error {
+	// Guard the cache against invalid UTF-8: an upstream byte-boundary truncation
+	// can leave an orphaned partial rune (renders as "�") that would otherwise be
+	// served verbatim on every cache hit. ToValidUTF8 drops such bytes so the DB
+	// only ever holds clean text. No-op for already-valid input.
+	if !utf8.ValidString(report) {
+		report = strings.ToValidUTF8(report, "")
+	}
 	_, err := s.db.Exec(`
 		INSERT INTO vision_reports (md5, report, created_at)
 		VALUES (?, ?, ?)

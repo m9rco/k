@@ -167,6 +167,14 @@ type Config struct {
 	ImagePrimary ImageProviderConfig
 	ImageBackup  ImageProviderConfig
 
+	// ImageOutpaint is the provider used for the outpaint convergence step in
+	// extreme-ratio platform adaptation: a product padded to the target ratio
+	// with transparent margins is handed to this model to fill the margins by
+	// extending the scene (e.g. a 2:1 product → 4:1 banner without dead bands).
+	// Defaults to provider=gemini (image models that extend cleanly). When its
+	// APIKey is unset the outpaint path falls back to band padding (ModeContain).
+	ImageOutpaint ImageProviderConfig
+
 	// TextToImage is the pure text-to-image provider (wan/qwen). When its APIKey
 	// is unset the text-to-image capability stays disabled and its agent tool is
 	// left out of the whitelist.
@@ -348,6 +356,10 @@ func Load(platformsPath string) (*Config, error) {
 		endpointAliases{apiKey: []string{"DEEPSEEK_API_KEY"}})
 	imagePrimary := common.resolveEndpoint("IMAGE_PRIMARY", "openai", "gpt-image-2", endpointAliases{})
 	imageBackup := common.resolveEndpoint("IMAGE_BACKUP", "openai", "gpt-image-2", endpointAliases{})
+	// Outpaint provider for extreme-ratio adaptation convergence. Defaults to
+	// gemini (image models that extend a scene cleanly). No API key → the
+	// outpaint path falls back to band padding, so adaptation still works.
+	imageOutpaint := common.resolveEndpoint("IMAGE_OUTPAINT", "gemini", "gemini-2.5-flash-image", endpointAliases{})
 	// Text-to-image (wan/qwen via DashScope async). Default provider "dashscope".
 	textToImage := common.resolveEndpoint("TEXT_TO_IMAGE", "dashscope", "", endpointAliases{})
 	// Video canonicalizes on VIDEO_*; the older HAPPYHORSE_* names remain as
@@ -399,6 +411,16 @@ func Load(platformsPath string) (*Config, error) {
 			BaseURL:  imageBackup.baseURL,
 			APIKey:   imageBackup.apiKey,
 			Model:    imageBackup.model,
+		},
+
+		// Outpaint convergence provider. APIKey empty => outpaint path falls back
+		// to band padding (ModeContain) rather than failing.
+		ImageOutpaint: ImageProviderConfig{
+			Name:     env("IMAGE_OUTPAINT_NAME", "outpaint"),
+			Provider: imageOutpaint.provider,
+			BaseURL:  imageOutpaint.baseURL,
+			APIKey:   imageOutpaint.apiKey,
+			Model:    imageOutpaint.model,
 		},
 
 		// Text-to-image (wan/qwen). APIKey empty => capability stays disabled.

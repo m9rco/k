@@ -137,6 +137,97 @@ func TestContainTransparentDefault(t *testing.T) {
 	}
 }
 
+func TestPadToAspectWidensAndCentersWithTransparency(t *testing.T) {
+	// 2:1 source toward a 4:1 target → canvas widens to 4:1, height unchanged,
+	// source centered with transparent bands left/right.
+	data := makePNG(t, 800, 400)
+	res, err := PadToAspectBytes(data, 1120, 280) // 4:1
+	if err != nil {
+		t.Fatalf("PadToAspectBytes: %v", err)
+	}
+	// Height stays 400; width grows to 400*4 = 1600.
+	if res.Width != 1600 || res.Height != 400 {
+		t.Fatalf("canvas = %dx%d, want 1600x400", res.Width, res.Height)
+	}
+	img := decodePNG(t, res.Data)
+	// Far-left band is transparent (source is centered, band ~400px each side).
+	if _, _, _, a := img.At(10, 200).RGBA(); a>>8 != 0 {
+		t.Errorf("left band alpha = %d, want 0 (transparent)", a>>8)
+	}
+	// Center holds the opaque source.
+	if _, _, _, a := img.At(800, 200).RGBA(); a>>8 != 255 {
+		t.Errorf("center alpha = %d, want 255 (opaque source)", a>>8)
+	}
+}
+
+func TestPadToAspectHeightensForTallTarget(t *testing.T) {
+	// 2:1 source toward a 1:2 target → canvas heightens, width unchanged.
+	data := makePNG(t, 800, 400)
+	res, err := PadToAspectBytes(data, 280, 1120) // 1:4
+	if err != nil {
+		t.Fatalf("PadToAspectBytes: %v", err)
+	}
+	// Width stays 800; height grows to 800*4 = 3200.
+	if res.Width != 800 || res.Height != 3200 {
+		t.Fatalf("canvas = %dx%d, want 800x3200", res.Width, res.Height)
+	}
+}
+
+func TestPadToAspectMatchingRatioReturnsSource(t *testing.T) {
+	// Source already matches the target ratio → returned unchanged (no band).
+	data := makePNG(t, 800, 400)                  // 2:1
+	res, err := PadToAspectBytes(data, 1000, 500) // 2:1
+	if err != nil {
+		t.Fatalf("PadToAspectBytes: %v", err)
+	}
+	if res.Width != 800 || res.Height != 400 {
+		t.Errorf("canvas = %dx%d, want 800x400 (unchanged)", res.Width, res.Height)
+	}
+}
+
+func TestPadToAspectInvalidTarget(t *testing.T) {
+	data := makePNG(t, 800, 400)
+	if _, err := PadToAspectBytes(data, 0, 280); err == nil {
+		t.Error("expected error for zero target width, got nil")
+	}
+}
+
+func TestCompositeOutpaintKeepsMasterCenter(t *testing.T) {
+	// Master: solid red 800×400 (2:1). Fill: solid blue 1600×400 (4:1 bg).
+	master := makeSolidPNG(t, 800, 400, color.RGBA{220, 30, 30, 255})
+	fill := makeSolidPNG(t, 1600, 400, color.RGBA{30, 30, 220, 255})
+
+	res, err := CompositeOutpaintBytes(master, fill, 1120, 280, 0) // no feather: hard center
+	if err != nil {
+		t.Fatalf("CompositeOutpaintBytes: %v", err)
+	}
+	if res.Width != 1120 || res.Height != 280 {
+		t.Fatalf("dims = %dx%d, want 1120x280", res.Width, res.Height)
+	}
+	img := decodePNG(t, res.Data)
+	// Center pixel must be the master's red (master composited over center).
+	r, g, b, _ := img.At(560, 140).RGBA()
+	if r>>8 < 180 || g>>8 > 80 || b>>8 > 80 {
+		t.Errorf("center pixel = R%d G%d B%d, want master red", r>>8, g>>8, b>>8)
+	}
+	// Far-left edge must be the fill's blue (extended margin), NOT a band.
+	r, g, b, a := img.At(5, 140).RGBA()
+	if a>>8 != 255 {
+		t.Errorf("left edge alpha = %d, want 255 (no transparent band)", a>>8)
+	}
+	if b>>8 < 180 || r>>8 > 80 {
+		t.Errorf("left edge = R%d G%d B%d, want fill blue", r>>8, g>>8, b>>8)
+	}
+}
+
+func TestCompositeOutpaintInvalidTarget(t *testing.T) {
+	master := makeSolidPNG(t, 800, 400, color.RGBA{220, 30, 30, 255})
+	fill := makeSolidPNG(t, 1600, 400, color.RGBA{30, 30, 220, 255})
+	if _, err := CompositeOutpaintBytes(master, fill, 0, 280, 0); err == nil {
+		t.Error("expected error for zero target width, got nil")
+	}
+}
+
 func TestAnchorShiftsCrop(t *testing.T) {
 	// A tall source into a wide box crops vertically; top vs bottom anchors must
 	// keep different regions, so the two outputs must differ.
@@ -171,6 +262,22 @@ func TestCropModeInvalidParams(t *testing.T) {
 }
 
 // makeGradientPNG builds a vertical gradient so anchored crops differ by region.
+// makeSolidPNG builds a w×h PNG filled with a single color.
+func makeSolidPNG(t *testing.T, w, h int, c color.RGBA) []byte {
+	t.Helper()
+	img := image.NewRGBA(image.Rect(0, 0, w, h))
+	for y := 0; y < h; y++ {
+		for x := 0; x < w; x++ {
+			img.Set(x, y, c)
+		}
+	}
+	var buf bytes.Buffer
+	if err := png.Encode(&buf, img); err != nil {
+		t.Fatal(err)
+	}
+	return buf.Bytes()
+}
+
 func makeGradientPNG(t *testing.T, w, h int) []byte {
 	t.Helper()
 	img := image.NewRGBA(image.Rect(0, 0, w, h))

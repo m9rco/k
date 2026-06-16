@@ -258,17 +258,18 @@ func TestConvergeMode(t *testing.T) {
 		// Pins win outright regardless of ratio gap.
 		{"contain", 1536, 1024, 1280, 320, crop.ModeContain, "pin contain on extreme target"},
 		{"cover", 1024, 1024, 1024, 1024, crop.ModeCover, "pin cover on identical ratio"},
-		// Auto: close ratios pad (contain).
+		{"outpaint", 1024, 1024, 1024, 1024, crop.ModeOutpaint, "pin outpaint wins outright"},
+		// Auto: close ratios rescale (scale).
 		{"", 1536, 1024, 1280, 720, crop.ModeScale, "3:2 product → 16:9 target (close)"},
 		{"", 1024, 1024, 1080, 1080, crop.ModeScale, "square → square"},
-		// Auto: extreme gap crops (cover).
-		{"", 1536, 1024, 1280, 320, crop.ModeContain, "3:2 product → 4:1 banner (far)"},
+		// Auto: extreme gap outpaints (AI extends the scene to the new ratio).
+		{"", 1536, 1024, 1280, 320, crop.ModeOutpaint, "3:2 product → 4:1 banner (far)"},
 		{"", 1024, 1536, 1080, 1920, crop.ModeScale, "2:3 product → 9:16 (close)"},
-		// Invalid dims fall back to contain.
+		// Invalid dims fall back to scale.
 		{"", 0, 1024, 1280, 720, crop.ModeScale, "zero genW"},
 		{"", 1536, 1024, 1280, 0, crop.ModeScale, "zero dstH"},
 		// Unknown pin string is ignored → auto.
-		{"bogus", 1536, 1024, 1280, 320, crop.ModeContain, "unknown pin → auto contain"},
+		{"bogus", 1536, 1024, 1280, 320, crop.ModeOutpaint, "unknown pin → auto outpaint"},
 	}
 	for _, c := range cases {
 		got := convergeMode(c.pin, c.genW, c.genH, c.dstW, c.dstH)
@@ -290,13 +291,13 @@ func TestResolveAndConvergeAgree(t *testing.T) {
 		want       crop.Mode
 		label      string
 	}{
-		{1280, 720, crop.ModeScale, "16:9 same-ratio → contain (downsample)"},
-		{720, 1280, crop.ModeScale, "9:16 same-ratio → contain"},
-		{512, 512, crop.ModeScale, "square icon → contain (downsample)"},
+		{1280, 720, crop.ModeScale, "16:9 same-ratio → scale (downsample)"},
+		{720, 1280, crop.ModeScale, "9:16 same-ratio → scale"},
+		{512, 512, crop.ModeScale, "square icon → scale (downsample)"},
 		{900, 600, crop.ModeScale, "3:2 cover → scale"},
-		{1120, 280, crop.ModeContain, "4:1 banner (clamped 3:1 gen) → contain"},
-		{1008, 168, crop.ModeContain, "6:1 strip (clamped 3:1 gen) → contain"},
-		{2732, 2048, crop.ModeScale, "iOS 4:3 (>2K) → contain (upsample)"},
+		{1120, 280, crop.ModeOutpaint, "4:1 banner (clamped 3:1 gen) → outpaint"},
+		{1008, 168, crop.ModeOutpaint, "6:1 strip (clamped 3:1 gen) → outpaint"},
+		{2732, 2048, crop.ModeScale, "iOS 4:3 (>2K) → scale (upsample)"},
 	}
 	for _, c := range cases {
 		size := resolveGptImage2Size(c.dstW, c.dstH)

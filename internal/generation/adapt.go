@@ -162,16 +162,24 @@ func orientationOf(w, h int) string {
 
 // convergeTolerance is the max absolute log-ratio difference between the AI
 // product's aspect ratio and the target size's at which adaptation converges by
-// padding (contain) rather than cropping (cover). ~0.18 ≈ a 20% ratio gap:
-// within it, padding leaves only a thin border; beyond it (e.g. a 3:2 product
-// forced toward a 4:1 banner) padding would leave large empty bands, so cover
-// crops to fill instead. Tuned against the gpt-image-2 size enum.
+// a clean rescale (scale) rather than reshaping. ~0.18 ≈ a 20% ratio gap:
+// within it the stretch is imperceptible. Beyond it (e.g. a 2:1 product forced
+// toward a 4:1 banner) scaling would visibly distort and padding would leave
+// large empty bands, so convergence routes to an AI outpaint instead — extend
+// the scene to the new ratio, preserving the subject. Tuned against the
+// gpt-image-2 size enum.
 const convergeTolerance = 0.18
 
 // convergeMode picks how an adaptation product is converged to the exact target
 // size. A non-empty pin (from the size catalog) wins outright; otherwise the
 // mode is auto-selected by the log-ratio gap between the provider output and the
-// target. Any zero/invalid dimension falls back to contain (never crops blindly).
+// target. Any zero/invalid dimension falls back to scale (never crops blindly).
+//
+// Auto selection:
+//   - gap ≤ convergeTolerance → ModeScale (imperceptible stretch to exact size)
+//   - gap >  convergeTolerance → ModeOutpaint (AI extends the scene to the new
+//     ratio; the generation service falls back to ModeContain when no outpainter
+//     is wired, so a band-padded result is the worst case, never a sliced subject)
 func convergeMode(pin string, genW, genH, dstW, dstH int) crop.Mode {
 	switch crop.Mode(pin) {
 	case crop.ModeContain:
@@ -180,13 +188,15 @@ func convergeMode(pin string, genW, genH, dstW, dstH int) crop.Mode {
 		return crop.ModeScale
 	case crop.ModeCover:
 		return crop.ModeCover
+	case crop.ModeOutpaint:
+		return crop.ModeOutpaint
 	}
 	if genW <= 0 || genH <= 0 || dstW <= 0 || dstH <= 0 {
 		return crop.ModeScale
 	}
 	diff := math.Abs(math.Log(float64(genW)/float64(genH)) - math.Log(float64(dstW)/float64(dstH)))
 	if diff > convergeTolerance {
-		return crop.ModeContain
+		return crop.ModeOutpaint
 	}
 	return crop.ModeScale
 }

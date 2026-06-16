@@ -14,7 +14,23 @@ import (
 	"net/http"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
+
+// const analysisPrompt = `分析以下游戏宣发图，按固定格式输出，不要输出任何其他内容：
+
+// Produce a structured report covering:
+// 1. 核心主题/IP/游戏名 (Core Theme/IP/Game Name)
+// 2. 主体角色与场景 (Main Characters & Scene) — exact appearance, outfit, distinctive features
+// 3. 核心卖点与文案 (Key Selling Points & Copy) — any visible text, slogans
+// 4. 视觉风格与基调 (Visual Style & Tone)
+// 5. 主配色调 (Dominant Color Palette)
+// 6. 绝不可丢失的要素 (Must-Preserve Elements for all adapted sizes) — be specific
+// 7. 各尺寸适配注意点 (Adaptation Notes) — what to emphasize when reformatting to landscape/portrait/square/banner
+// 主体：[角色外貌、服装、标志性特征，一句话]
+// 宣发意图：[核心宣传主题/活动/卖点，一句话]
+// 必须保留：[适配各尺寸时绝不可缺少的视觉元素，分号分隔]
+// 配色：[主色调，3个以内，用 hex 或颜色名]`
 
 // analysisPrompt is a fixed server-side instruction. Never mixed with user text.
 // Kept intentionally concise so the output is directly usable as a generation
@@ -22,13 +38,17 @@ import (
 // general background description.
 const analysisPrompt = `分析以下游戏宣发图，按固定格式输出，不要输出任何其他内容：
 
+核心主题/IP/游戏名：[游戏名、IP] 
 主体：[角色外貌、服装、标志性特征，一句话]
 宣发意图：[核心宣传主题/活动/卖点，一句话]
-必须保留：[适配各尺寸时绝不可缺少的视觉元素，分号分隔]
-配色：[主色调，3个以内，用 hex 或颜色名]`
+必须保留：[适配各尺寸时绝不可缺少的视觉元素，分号分隔]`
 
 // maxReportLen caps the report before injecting into the generation prompt.
-const maxReportLen = 400
+// Aligned with generation.maxSlotLen (500), the ceiling the THEME segment is
+// Sanitized to downstream: a smaller value here would let the frontend show the
+// user less than what actually drives the adaptation. The fixed 4-line format
+// stays well under this; the cap only guards a runaway model.
+const maxReportLen = 500
 
 // Analyzer calls a vision-capable OpenAI-compatible model to produce a
 // structured marketing analysis report.
@@ -84,9 +104,15 @@ func (a *Analyzer) Analyze(ctx context.Context, imageURLs []string, onChunk func
 	}
 
 	payload := map[string]any{
-		"model":      a.model,
-		"stream":     true,
-		"max_tokens": 200, // fixed-format output is short; cap prevents runaway loops
+		"model":  a.model,
+		"stream": true,
+		// The fixed 4-line format is short in characters, but CJK output costs
+		// ~1.5–2 tokens per glyph, so a multi-character analysis (game name + IP +
+		// several subject descriptions + intent + must-keep list) needs far more
+		// than the old 200-token cap — which truncated mid-line and dropped the
+		// trailing 必须保留 row entirely. 800 comfortably fits the full format while
+		// still bounding a runaway loop.
+		"max_tokens": 800,
 		"messages": []map[string]any{
 			{"role": "user", "content": parts},
 		},
@@ -122,6 +148,8 @@ func (a *Analyzer) Analyze(ctx context.Context, imageURLs []string, onChunk func
 	}
 
 	var full strings.Builder
+	var fullRunes int       // rune count so far (CJK-correct cap; full.Len() is bytes)
+	var finishReason string // captured from the stream to surface length-truncation
 	scanner := bufio.NewScanner(resp.Body)
 	for scanner.Scan() {
 		line := scanner.Text()
@@ -137,23 +165,28 @@ func (a *Analyzer) Analyze(ctx context.Context, imageURLs []string, onChunk func
 				Delta struct {
 					Content string `json:"content"`
 				} `json:"delta"`
+				FinishReason string `json:"finish_reason"`
 			} `json:"choices"`
 		}
 		if err := json.Unmarshal([]byte(payload), &chunk); err != nil {
 			continue
 		}
 		if len(chunk.Choices) > 0 {
+			if fr := chunk.Choices[0].FinishReason; fr != "" {
+				finishReason = fr
+			}
 			text := chunk.Choices[0].Delta.Content
 			if text != "" {
 				full.WriteString(text)
+				fullRunes += utf8.RuneCountInString(text)
 				// Stop streaming to the chat once we hit the display cap; the
 				// scanner keeps draining the body (so the HTTP conn stays clean)
 				// but we don't push more chunks to the frontend.
-				if full.Len() <= maxReportLen && onChunk != nil {
+				if fullRunes <= maxReportLen && onChunk != nil {
 					onChunk(text)
 				}
 				// Hard-stop accumulation beyond the cap to prevent OOM on loops.
-				if full.Len() >= maxReportLen*2 {
+				if fullRunes >= maxReportLen*2 {
 					break
 				}
 			}
@@ -163,9 +196,18 @@ func (a *Analyzer) Analyze(ctx context.Context, imageURLs []string, onChunk func
 		return full.String(), fmt.Errorf("vision: read stream: %w", err)
 	}
 	report := full.String()
-	if len(report) > maxReportLen {
-		report = report[:maxReportLen]
+	// Truncate on a rune boundary so a multi-byte character (e.g. a Chinese
+	// glyph) is never cut in half into an invalid "�" replacement char — which
+	// would otherwise be carried verbatim into the generation prompt's THEME.
+	if r := []rune(report); len(r) > maxReportLen {
+		report = string(r[:maxReportLen])
 	}
-	log.Printf("vision.analyze: done in %s report_len=%d", time.Since(start), len(report))
+	// finish_reason=length means the model hit max_tokens and the report is
+	// truncated mid-format (the trailing rows are missing) — log it loudly so the
+	// cause is obvious rather than appearing as a silently short report.
+	if finishReason == "length" {
+		log.Printf("vision.analyze: WARNING output truncated by max_tokens (finish_reason=length); report may be missing trailing rows")
+	}
+	log.Printf("vision.analyze: done in %s report_len=%d finish_reason=%q", time.Since(start), len(report), finishReason)
 	return report, nil
 }

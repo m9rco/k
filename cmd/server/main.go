@@ -115,6 +115,18 @@ func run() error {
 	// direct HTTP endpoint that would bypass the model.
 	genSvc.SetCropper(cropSvc)
 
+	// Outpaint convergence provider for extreme-ratio platform adaptation (e.g. a
+	// 2:1 product toward a 4:1 banner): the product is padded to the target ratio
+	// with transparent margins and this provider fills them by extending the
+	// scene. Without an API key it stays unset and the outpaint path falls back to
+	// transparent band padding, so adaptation still produces a valid product.
+	if cfg.ImageOutpaint.APIKey != "" {
+		genSvc.SetOutpainter(generation.NewProvider(cfg.ImageOutpaint))
+		log.Printf("outpaint: provider=%s model=%s enabled for extreme-ratio adaptation", cfg.ImageOutpaint.Provider, cfg.ImageOutpaint.Model)
+	} else {
+		log.Printf("outpaint: not configured, extreme-ratio adaptation falls back to band padding")
+	}
+
 	// Image-to-video service (happyhorse). The provider fetches the source image
 	// by public URL, so video requires a COS uploader to publish the local frame
 	// first. Without COS configured the uploader stays nil, Service.Configured()

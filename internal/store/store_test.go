@@ -2,8 +2,10 @@ package store
 
 import (
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 )
 
 func newTestStore(t *testing.T) *Store {
@@ -249,5 +251,50 @@ func TestMessagesInsertAndListBySession(t *testing.T) {
 	}
 	if len(empty) != 0 {
 		t.Errorf("expected no messages, got %d", len(empty))
+	}
+}
+
+// TestVisionReportRoundTripCJK verifies valid Chinese text survives the
+// insert→select round-trip byte-for-byte (the store layer never mangles valid
+// UTF-8 — corruption seen in the wild was always pre-store truncation).
+func TestVisionReportRoundTripCJK(t *testing.T) {
+	s := newTestStore(t)
+	in := "核心主题：卡厄思梦境卡牌\n主体：银白短发的银发少年角色\n必须保留：右上角Logo、粉色拼贴与文字"
+	if err := s.InsertVisionReport("md5cjk", in); err != nil {
+		t.Fatalf("InsertVisionReport: %v", err)
+	}
+	out, err := s.GetVisionReport("md5cjk")
+	if err != nil {
+		t.Fatalf("GetVisionReport: %v", err)
+	}
+	if out != in {
+		t.Errorf("round-trip mismatch:\n in=%q\nout=%q", in, out)
+	}
+}
+
+// TestVisionReportScrubsInvalidUTF8 verifies the insert guard drops an orphaned
+// partial rune (e.g. a CJK glyph truncated mid-byte upstream) so the cache never
+// serves a "�" replacement char back on a hit.
+func TestVisionReportScrubsInvalidUTF8(t *testing.T) {
+	s := newTestStore(t)
+	// "卡厄思卡牌" with the last glyph's tail bytes lopped off → invalid UTF-8.
+	b := []byte("卡厄思卡牌")
+	bad := string(b[:len(b)-2])
+	if err := s.InsertVisionReport("md5bad", bad); err != nil {
+		t.Fatalf("InsertVisionReport: %v", err)
+	}
+	out, err := s.GetVisionReport("md5bad")
+	if err != nil {
+		t.Fatalf("GetVisionReport: %v", err)
+	}
+	if !utf8.ValidString(out) {
+		t.Errorf("stored report is not valid UTF-8: % x", []byte(out))
+	}
+	if strings.ContainsRune(out, '�') {
+		t.Errorf("stored report contains U+FFFD: %q", out)
+	}
+	// The four intact leading glyphs are preserved; only the orphan byte is gone.
+	if want := "卡厄思卡"; out != want {
+		t.Errorf("scrubbed report = %q, want %q", out, want)
 	}
 }

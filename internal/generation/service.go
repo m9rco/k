@@ -61,6 +61,14 @@ type Service struct {
 	// the zero value (empty Provider) is treated as the OpenAI-compatible adapter.
 	defaultImageProvider config.ImageProviderConfig
 
+	// outpainter, when set, is the image provider used for the outpaint
+	// convergence step: extreme-ratio adaptations (e.g. a 2:1 product toward a
+	// 4:1 banner) are padded to the target ratio with transparent margins and
+	// handed to this provider to fill the margins by extending the scene. Wired
+	// via SetOutpainter; nil makes the outpaint path fall back to ModeContain
+	// (band-padded), so adaptation still produces a valid product without it.
+	outpainter Provider
+
 	// params caches each task's request so a failed product can be retried
 	// without the caller re-supplying inputs (short-term in-memory store, D7).
 	mu     sync.Mutex
@@ -95,6 +103,12 @@ func (s *Service) SetAssetCallback(fn func(sessionID, assetID string)) { s.onAss
 func (s *Service) SetDefaultImageProvider(cfg config.ImageProviderConfig) {
 	s.defaultImageProvider = cfg
 }
+
+// SetOutpainter installs the image provider used for the outpaint convergence
+// step (extreme-ratio platform adaptation). Optional: leaving it unset makes the
+// outpaint path fall back to ModeContain (transparent band padding), so
+// adaptation degrades gracefully rather than failing.
+func (s *Service) SetOutpainter(p Provider) { s.outpainter = p }
 
 // providerSupportsTransparency reports whether an image adapter can produce a
 // real transparent background. gpt-image-2 (the OpenAI-compatible default) cannot;
@@ -491,14 +505,28 @@ func (s *Service) run(ctx context.Context, taskID string, p GenerateParams) {
 
 	// adapt_platform: same convergence范式 as icon — the provider snaps to its
 	// supported size enum, so converge the product down to the exact target
-	// platform size. Mode is picked per size: contain (pad, no crop) when the
-	// provider output's aspect ratio is close to the target, cover (crop, no pad)
-	// when it differs enough that padding would leave large empty bands (e.g. an
-	// extreme banner). A size may pin the mode via its catalog convergeMode.
+	// platform size. Mode is picked per size by convergeMode: scale (clean rescale)
+	// when the provider output's aspect ratio is close to the target, outpaint
+	// (AI extends the scene) when it diverges far enough that scaling would distort
+	// and padding would leave large empty bands (e.g. an extreme banner). A size
+	// may pin the mode via its catalog convergeMode.
 	if p.Slots.Kind == EditAdaptPlatform && adaptW > 0 && adaptH > 0 {
 		genW, genH := decodeDimensions(out.Data)
 		mode := convergeMode(p.AdaptConvergeMode, genW, genH, adaptW, adaptH)
-		if conv, err := crop.CropBytesWithOptions(out.Data, adaptW, adaptH, crop.Options{Mode: mode}); err != nil {
+		if mode == crop.ModeOutpaint {
+			// Outpaint: pad to the target ratio with transparent margins, let the
+			// outpainter fill them, then scale to exact. Falls back to ModeContain
+			// (band padding) when no outpainter is wired or the fill fails — never
+			// crops the subject out.
+			if data, err := s.outpaintConverge(ctx, taskID, out.Data, genW, genH, adaptW, adaptH); err != nil {
+				log.Printf("gen.run: task=%s adapt outpaint to %dx%d FAILED: %v (falling back to contain)", taskID, adaptW, adaptH, err)
+				if conv, cerr := crop.CropBytesWithOptions(out.Data, adaptW, adaptH, crop.Options{Mode: crop.ModeContain}); cerr == nil {
+					out.Data = conv.Data
+				}
+			} else {
+				out.Data = data
+			}
+		} else if conv, err := crop.CropBytesWithOptions(out.Data, adaptW, adaptH, crop.Options{Mode: mode}); err != nil {
 			log.Printf("gen.run: task=%s adapt converge to %dx%d (%s) FAILED: %v (keeping provider output)", taskID, adaptW, adaptH, mode, err)
 		} else {
 			out.Data = conv.Data
@@ -589,6 +617,56 @@ func (s *Service) fail(taskID, sessionID, msg string) {
 	now := s.now()
 	_ = s.store.UpdateTask(store.TaskRecord{ID: taskID, SessionID: sessionID, Status: "failed", Error: msg, UpdatedAt: now})
 	s.broker.Publish(taskID, transport.EventTaskFailed, sessionID, map[string]string{"error": msg})
+}
+
+// outpaintConverge converges an extreme-ratio adaptation product to the exact
+// target size by handing the UNPADDED high-res master to the outpainter, which
+// extends the scene outward to the new ratio, and cover-cropping that render to
+// dstW×dstH. The outpainter's output is used directly: a prior version composited
+// the master back over the center to keep brand pixels pristine, but the
+// mechanical seam between the locked center and the AI-filled margins (style /
+// perspective mismatch, "double image") looked worse than a single coherent
+// render. So the anti-drift load now lives entirely in buildOutpaintPrompt, which
+// frames the job as a preserve-everything outpaint rather than a regeneration.
+//
+// We do NOT pad with transparent margins first: the outpainter is a prompt-driven
+// editing model, not a mask inpainter, and treats a transparent region as a
+// black/empty band to keep rather than a fill mask (the observed "black sides"
+// bug). The caller falls back to band padding when no outpainter is wired — never
+// a sliced subject or a distorted stretch.
+func (s *Service) outpaintConverge(ctx context.Context, taskID string, data []byte, genW, genH, dstW, dstH int) ([]byte, error) {
+	if s.outpainter == nil {
+		return nil, fmt.Errorf("no outpainter wired")
+	}
+	start := time.Now()
+	out, err := s.outpainter.Generate(ctx, Request{
+		Prompt:      buildOutpaintPrompt(genW, genH, dstW, dstH),
+		SourceImage: data,
+		SourceMime:  "image/png",
+		Width:       dstW,
+		Height:      dstH,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("outpainter generate: %w", err)
+	}
+	fillW, fillH := decodeDimensions(out.Data)
+	// Cover-crop the outpainter render to the exact target (it snaps to its own
+	// size enum, so it rarely lands on dstW×dstH precisely). Center anchor keeps
+	// the preserved subject — which the prompt requires to stay centered — in frame.
+	conv, cerr := crop.CropBytesWithOptions(out.Data, dstW, dstH, crop.Options{Mode: crop.ModeCover})
+	if cerr != nil {
+		return nil, fmt.Errorf("cover-crop outpaint render to %dx%d: %w", dstW, dstH, cerr)
+	}
+	applog.From(ctx).Info().Str("event", "gen.converge").Str("task", taskID).
+		Str("kind", "adapt").
+		Int("gen_w", genW).Int("gen_h", genH).
+		Int("fill_w", fillW).Int("fill_h", fillH).
+		Int("dst_w", dstW).Int("dst_h", dstH).
+		Str("mode", "outpaint_direct").
+		Str("outpainter", s.outpainter.Name()).
+		Int64("fill_ms", time.Since(start).Milliseconds()).
+		Msg("adapt converged to target size via outpaint")
+	return conv.Data, nil
 }
 
 // decodeDimensions reads an image's pixel dimensions; returns (0,0) if the

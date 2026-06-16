@@ -105,6 +105,9 @@ var injectionPatterns = []*regexp.Regexp{
 }
 
 // maxSlotLen bounds each slot to keep prompts well-formed and limit abuse.
+// Counted in runes (characters), not bytes, so CJK text gets the same character
+// budget as ASCII and truncation never splits a multi-byte rune (which would
+// emit a U+FFFD "�" replacement char into the prompt).
 const maxSlotLen = 500
 
 // Sanitize strips control-style injection patterns, collapses whitespace, and
@@ -122,8 +125,10 @@ func Sanitize(s string) string {
 		return r
 	}, s)
 	s = strings.Join(strings.Fields(s), " ")
-	if len(s) > maxSlotLen {
-		s = s[:maxSlotLen]
+	// Truncate on a rune boundary so a multi-byte character (e.g. a Chinese
+	// glyph) is never cut in half into an invalid "�" sequence.
+	if r := []rune(s); len(r) > maxSlotLen {
+		s = string(r[:maxSlotLen])
 	}
 	return strings.TrimSpace(s)
 }
@@ -257,6 +262,10 @@ func BuildPrompt(slots Slots, palette []PaletteColor) (string, error) {
 			b.WriteString(placement)
 			b.WriteString(". ")
 		}
+		if hint := extremeRatioHint(slots.TargetWidth, slots.TargetHeight); hint != "" {
+			b.WriteString(hint)
+			b.WriteString(" ")
+		}
 		b.WriteString("Re-frame and extend/repaint the scene and background to fill the new aspect ratio naturally, rather than cropping; reposition the subject for a balanced composition at the target proportions. ")
 		if note := rewriteSizeNote(Sanitize(slots.SizeNote), slots.ProviderSupportsTransparency); note != "" {
 			b.WriteString("Respect this placement constraint: ")
@@ -343,4 +352,77 @@ func assetTypeGuide(key string) string {
 	default:
 		return ""
 	}
+}
+
+// extremeRatioWidthThreshold is the long:short aspect ratio at/above which a
+// target counts as an extreme banner/strip. gpt-image-2 clamps generation to
+// 3:1 (resolveGptImage2Size), so a 4:1+ target can never be generated at its
+// true ratio — the prompt must coach the model to compose for the wide format
+// inside the clamped frame so the later outpaint has well-placed content to
+// extend, not a centered subject with dead sides.
+const extremeRatioWidthThreshold = 3.0
+
+// extremeRatioHint returns a composition cue when the target is an extreme
+// banner (≥3:1) or strip (≤1:3), nudging gpt-image-2 to keep the subject
+// centered with clean, continuable background toward the long edges. Empty for
+// ordinary ratios. Mirrors the "降维打击" guidance: a master image whose
+// composition survives the ratio clamp + outpaint without breaking.
+func extremeRatioHint(w, h int) string {
+	if w <= 0 || h <= 0 {
+		return ""
+	}
+	ar := float64(w) / float64(h)
+	switch {
+	case ar >= extremeRatioWidthThreshold:
+		return "This is an ultra-wide panoramic banner. Use a landscape banner composition: keep the main subject centered, and let the background and scene elements extend cleanly toward the far left and far right so the wide format reads as one continuous scene with no dead space."
+	case ar <= 1.0/extremeRatioWidthThreshold:
+		return "This is an ultra-tall vertical strip. Use a portrait column composition: keep the main subject centered, and let the background and scene elements extend cleanly toward the top and bottom so the tall format reads as one continuous scene with no dead space."
+	default:
+		return ""
+	}
+}
+
+// buildOutpaintPrompt is the instruction for the outpaint convergence step. The
+// outpainter (gemini-2.5-flash-image / nano banana) is a prompt-driven *editing*
+// model, NOT a mask-based inpainter — handing it a transparent-padded canvas and
+// asking it to "fill the holes" fails, because it treats the transparent region
+// as part of the picture (and renders it as a black/empty band) rather than as a
+// fill mask. So instead we hand it the UNPADDED product and ask it to extend the
+// existing scene outward to the new ratio.
+//
+// The model's output is used directly (cover-cropped to the exact target) — the
+// master is no longer composited back over the center, because the mechanical
+// seam between locked-center and AI-filled margins looked worse than a single
+// coherent render. With nothing protecting the center pixels anymore, this prompt
+// must carry the full anti-drift load: it frames the job as a preserve-everything
+// outpaint/uncrop (existing content is fixed ground truth, only the added margins
+// are invented) rather than a "regenerate wider" that invites the model to redraw
+// the subject. dst gives the target ratio; genW/genH the source so the prompt can
+// name the extension direction.
+func buildOutpaintPrompt(genW, genH, dstW, dstH int) string {
+	var b strings.Builder
+	// Frame the task as outpainting/uncrop, not regeneration: the supplied image is
+	// fixed ground truth and only the newly added margins may carry invented
+	// content. With the master no longer composited back over the center, this
+	// preserve-everything framing is the primary lever against subject drift.
+	b.WriteString("OUTPAINT / UNCROP TASK: extend the supplied image onto a larger canvas. ")
+	b.WriteString("This is an outpainting operation, NOT a regeneration — treat the supplied image as fixed, locked ground truth. ")
+	b.WriteString("PRESERVE EXACTLY, pixel for pixel: the entire existing image and everything in it — the main subject and characters (identity, face, outfit, pose, expression), any text, logos and watermarks already present, the composition and the color grading. Do NOT redraw, move, resize, recolor, restyle, crop or cover any existing content; it must stay visually identical and remain centered. ")
+	// Name the extension axis so the model knows where to invent content.
+	if dstW*genH > genW*dstH {
+		// Target is proportionally wider → grow left/right.
+		b.WriteString("EXTEND only outward to the LEFT and RIGHT: generate brand-new background, scenery and atmosphere in the added side margins, seamlessly continuing the existing scene to fill the wider frame. ")
+	} else if dstW*genH < genW*dstH {
+		// Target is proportionally taller → grow top/bottom.
+		b.WriteString("EXTEND only outward to the TOP and BOTTOM: generate brand-new background, scenery and atmosphere in the added top and bottom margins, seamlessly continuing the existing scene to fill the taller frame. ")
+	} else {
+		b.WriteString("EXTEND the existing scene outward to fill the new frame, seamlessly continuing the scenery. ")
+	}
+	if hint := extremeRatioHint(dstW, dstH); hint != "" {
+		b.WriteString(hint)
+		b.WriteString(" ")
+	}
+	b.WriteString("Match the original art style, colors, texture, lighting and perspective exactly so there are no visible seams and the whole reads as one continuous image. ")
+	b.WriteString("Do NOT add blank, black, white or solid-color borders, and do NOT letterbox. Do NOT introduce any new text, logos or watermarks that are not already in the image. Fill the entire new canvas with coherent scenery. Production-ready, polished result.")
+	return b.String()
 }
