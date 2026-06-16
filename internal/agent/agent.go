@@ -918,19 +918,19 @@ func remediationClarify(hint IntentHint, lastProduced string) (string, []Clarify
 
 // emitFollowUp sends a proactive follow-up suggestion after a productive turn.
 func (o *Orchestrator) emitFollowUp(sessionID string) {
-	o.emit(sessionID, transport.Event{
-		Type:      transport.EventFollowUp,
-		SessionID: sessionID,
-		Data: map[string]any{
-			"message": "已完成！接下来想做什么？",
-			"options": []map[string]any{
-				{"label": "生成视频", "value": "帮我把刚才的图生成一段视频"},
-				{"label": "再换个风格", "value": "帮我再生成一版，换个风格"},
-				{"label": "切平台尺寸", "value": "帮我切成各平台的尺寸"},
-				{"label": "下载产物", "value": "下载刚才生成的产物"},
-			},
-		},
-	})
+	// o.emit(sessionID, transport.Event{
+	// 	Type:      transport.EventFollowUp,
+	// 	SessionID: sessionID,
+	// 	Data: map[string]any{
+	// 		"message": "已完成！接下来想做什么？",
+	// 		"options": []map[string]any{
+	// 			{"label": "生成视频", "value": "帮我把刚才的图生成一段视频"},
+	// 			{"label": "再换个风格", "value": "帮我再生成一版，换个风格"},
+	// 			{"label": "切平台尺寸", "value": "帮我切成各平台的尺寸"},
+	// 			{"label": "下载产物", "value": "下载刚才生成的产物"},
+	// 		},
+	// 	},
+	// })
 }
 
 // emitTurnEnd sends a turn_end event carrying turn metadata (tool usage, whether

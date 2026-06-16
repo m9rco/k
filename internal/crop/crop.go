@@ -152,24 +152,20 @@ func coverCropAnchored(src image.Image, targetW, targetH int, anchor Anchor) (im
 		scale = scaleY
 	}
 
-	scaledW := int(float64(srcW)*scale + 0.5)
-	scaledH := int(float64(srcH)*scale + 0.5)
-	if scaledW < targetW {
-		scaledW = targetW
-	}
-	if scaledH < targetH {
-		scaledH = targetH
-	}
-
-	// High-quality scale into an intermediate image.
-	scaled := image.NewRGBA(image.Rect(0, 0, scaledW, scaledH))
-	xdraw.CatmullRom.Scale(scaled, scaled.Bounds(), src, sb, xdraw.Over, nil)
-
-	// Crop the overflow toward the anchor.
-	offX := int(float64(scaledW-targetW)*fx + 0.5)
-	offY := int(float64(scaledH-targetH)*fy + 0.5)
+	// Compute the source sub-rectangle that corresponds to the target crop,
+	// then scale it directly to the output in one pass — no intermediate image.
+	srcCropW := float64(targetW) / scale
+	srcCropH := float64(targetH) / scale
+	x0 := (float64(srcW) - srcCropW) * fx
+	y0 := (float64(srcH) - srcCropH) * fy
+	srcRect := image.Rect(
+		max(sb.Min.X, min(sb.Max.X, int(x0+0.5))),
+		max(sb.Min.Y, min(sb.Max.Y, int(y0+0.5))),
+		max(sb.Min.X, min(sb.Max.X, int(x0+srcCropW+0.5))),
+		max(sb.Min.Y, min(sb.Max.Y, int(y0+srcCropH+0.5))),
+	)
 	out := image.NewRGBA(image.Rect(0, 0, targetW, targetH))
-	xdraw.Draw(out, out.Bounds(), scaled, image.Pt(offX, offY), xdraw.Src)
+	xdraw.CatmullRom.Scale(out, out.Bounds(), src, srcRect, xdraw.Over, nil)
 	return out, nil
 }
 

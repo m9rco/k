@@ -70,8 +70,16 @@ type Slots struct {
 	Orientation   string // landscape / portrait / square
 	TargetWidth   int
 	TargetHeight  int
-	SizeNote      string // e.g. 无文案 / 仅 logo / 圆角 / 透明底 / 安全区
-	AdaptDesc     string // optional user description for the adaptation
+	// GenWidth/GenHeight are the resolved generation dimensions passed to the
+	// image provider (after resolveGptImage2Size snapping). When set, they
+	// replace TargetWidth/TargetHeight in the placement phrase so the model
+	// generates at full quality rather than inferring a tiny output size from
+	// a small target (e.g. 200×200 icon → tell the model 1728×1728 so it
+	// generates full detail, then we converge down to exact during crop).
+	GenWidth  int
+	GenHeight int
+	SizeNote  string // e.g. 无文案 / 仅 logo / 圆角 / 透明底 / 安全区
+	AdaptDesc string // optional user description for the adaptation
 	// --- harness inputs set by the service (not user free text) ---
 	// RefCount is how many reference images this generation feeds the model
 	// (anchor + auxiliaries). When ≥2 the prompt adds an explicit anchor-role
@@ -319,8 +327,15 @@ func buildPlacementPhrase(slots Slots) string {
 	if o := Sanitize(slots.Orientation); o != "" {
 		parts = append(parts, o)
 	}
-	if slots.TargetWidth > 0 && slots.TargetHeight > 0 {
-		parts = append(parts, fmt.Sprintf("%d×%d", slots.TargetWidth, slots.TargetHeight))
+	// Prefer GenWidth/GenHeight (resolved provider dims) over TargetWidth/
+	// TargetHeight so the model sees the actual generation size, not the small
+	// platform target (prevents "I'm generating a tiny 200px image" reasoning).
+	dimW, dimH := slots.GenWidth, slots.GenHeight
+	if dimW <= 0 || dimH <= 0 {
+		dimW, dimH = slots.TargetWidth, slots.TargetHeight
+	}
+	if dimW > 0 && dimH > 0 {
+		parts = append(parts, fmt.Sprintf("%d×%d", dimW, dimH))
 	}
 	if ch := Sanitize(slots.ChannelName); ch != "" {
 		parts = append(parts, ch)

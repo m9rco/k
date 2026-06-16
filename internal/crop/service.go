@@ -182,13 +182,24 @@ func (s *Service) CropToSizes(sessionID, sourceAssetID string, sizeIDs []string,
 		return nil, fmt.Errorf("create asset dir: %w", err)
 	}
 
+	// Decode once; re-use the same image.Image for all target sizes.
+	srcImg, srcMime, err := Decode(data)
+	if err != nil {
+		return nil, fmt.Errorf("decode source: %w", err)
+	}
+
 	var results []CropResult
 	for _, ref := range refs {
 		sz := ref.size
-		res, err := CropBytesWithOptions(data, sz.Width, sz.Height, opts)
+		cropped, err := CropImage(srcImg, sz.Width, sz.Height, opts)
 		if err != nil {
 			return nil, fmt.Errorf("crop to %s: %w", sz.ID, err)
 		}
+		outBytes, outMime, err := Encode(cropped, srcMime)
+		if err != nil {
+			return nil, fmt.Errorf("encode %s: %w", sz.ID, err)
+		}
+		res := Result{Data: outBytes, Width: sz.Width, Height: sz.Height, Mime: outMime}
 		id := s.newID()
 		ext := ".png"
 		if res.Mime == "image/jpeg" {

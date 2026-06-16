@@ -1034,11 +1034,11 @@ func (d ToolDeps) Tools() ([]tool.BaseTool, error) {
 	if err != nil {
 		return nil, fmt.Errorf("clarify tool: %w", err)
 	}
-	icon, err := d.newIconTool()
-	if err != nil {
-		return nil, fmt.Errorf("icon tool: %w", err)
-	}
-	tools := []tool.BaseTool{edit, cropTool, listSizes, clarify, icon}
+	// icon, err := d.newIconTool()
+	// if err != nil {
+	// 	return nil, fmt.Errorf("icon tool: %w", err)
+	// }
+	tools := []tool.BaseTool{edit, cropTool, listSizes, clarify}
 	adaptTool, err := d.newAdaptTool()
 	if err != nil {
 		return nil, fmt.Errorf("adapt tool: %w", err)

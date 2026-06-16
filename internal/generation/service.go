@@ -442,6 +442,17 @@ func (s *Service) run(ctx context.Context, taskID string, p GenerateParams) {
 	}
 	p.Slots.ProviderSupportsTransparency = providerSupportsTransparency(effectiveCfg)
 
+	// Pre-compute the resolved generation dimensions for platform adaptation so
+	// BuildPrompt injects the actual provider size into the placement phrase
+	// (e.g. 1728×1728 instead of 200×200), preventing the model from generating
+	// low-detail output because it "thinks" the target is a tiny icon.
+	if p.Slots.Kind == EditAdaptPlatform && p.Slots.TargetWidth > 0 && p.Slots.TargetHeight > 0 {
+		var gw, gh int
+		if _, ferr := fmt.Sscanf(resolveGptImage2Size(p.Slots.TargetWidth, p.Slots.TargetHeight), "%dx%d", &gw, &gh); ferr == nil && gw > 0 && gh > 0 {
+			p.Slots.GenWidth, p.Slots.GenHeight = gw, gh
+		}
+	}
+
 	prompt, err := BuildPrompt(p.Slots, palette)
 	if err != nil {
 		s.fail(taskID, p.SessionID, err.Error())
@@ -484,13 +495,18 @@ func (s *Service) run(ctx context.Context, taskID string, p GenerateParams) {
 		}
 		wantW, wantH = iconW, iconH
 	}
-	// 平台适配：目标是平台尺寸（provider 会 snap 到支持的 enum，产物之后再由 crop
-	// 收敛到精确平台尺寸，同 icon 范式）。请求里携带目标平台宽高引导构图比例。
+	// 平台适配：用 resolveGptImage2Size 预算尺寸（已写入 Slots.GenWidth/GenHeight）
+	// 作为 Request 宽高，确保 provider 在完整分辨率下生成；之后由 crop 收敛到精确
+	// 平台尺寸。传 GenWidth/GenHeight 而非目标200×200，避免模型生成低细节产物。
 	adaptW, adaptH := 0, 0
 	if p.Slots.Kind == EditAdaptPlatform {
 		adaptW, adaptH = p.Slots.TargetWidth, p.Slots.TargetHeight
 		if adaptW > 0 && adaptH > 0 {
-			wantW, wantH = adaptW, adaptH
+			if p.Slots.GenWidth > 0 && p.Slots.GenHeight > 0 {
+				wantW, wantH = p.Slots.GenWidth, p.Slots.GenHeight
+			} else {
+				wantW, wantH = adaptW, adaptH
+			}
 		}
 		// Honest "no silent caps": a target above gpt-image-2's 2K experimental
 		// boundary is generated at the clamped ~2K budget and upsampled to exact
@@ -506,6 +522,21 @@ func (s *Service) run(ctx context.Context, taskID string, p GenerateParams) {
 	// use the explicit target size from the request when provided.
 	if wantW == 0 && wantH == 0 {
 		wantW, wantH = p.Width, p.Height
+	}
+
+	// Adapt: many edit-endpoint providers ignore the size parameter and return
+	// the input image's dimensions. Pre-upscale the source to wantW×wantH so
+	// the provider output is at gen resolution rather than the (smaller) source
+	// resolution — producing more AI-generated detail in the final product.
+	if p.Slots.Kind == EditAdaptPlatform && len(srcBytes) > 0 && wantW > srcW && wantH > srcH {
+		if conv, cerr := crop.CropBytesWithOptions(srcBytes, wantW, wantH, crop.Options{Mode: crop.ModeScale}); cerr == nil {
+			srcBytes = conv.Data
+			srcMime = conv.Mime
+			applog.From(ctx).Info().Str("event", "gen.src_upscale").Str("task", taskID).
+				Int("src_w", srcW).Int("src_h", srcH).
+				Int("gen_w", wantW).Int("gen_h", wantH).
+				Msg("pre-upscaled source to gen dims for adapt")
+		}
 	}
 
 	genStart := time.Now()
