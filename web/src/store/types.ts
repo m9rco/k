@@ -12,6 +12,7 @@ export type ChatItem =
   | { kind: "user"; id: string; text: string }
   | { kind: "assistant"; id: string; text: string; streaming: boolean }
   | { kind: "reasoning"; id: string; text: string; collapsed: boolean; done: boolean }
+  | { kind: "analysis"; id: string; text: string; collapsed: boolean; done: boolean }
   | { kind: "tool"; id: string; tool: ToolCardData }
   | { kind: "capsule"; id: string; question: string; options: CapsuleOption[]; answered: boolean }
   | { kind: "follow_up"; id: string; message: string; options: CapsuleOption[]; dismissed: boolean }

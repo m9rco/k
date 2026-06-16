@@ -77,6 +77,9 @@ type ToolDeps struct {
 	// streaming chunks (analysis report), done=true to finalize a message.
 	// Injected by the orchestrator so tools.go stays transport-free.
 	Notify func(text string, done bool)
+	// NotifyAnalysis sends vision analysis chunks to the collapsible analysis
+	// panel (distinct from regular assistant bubbles). Nil falls back to Notify.
+	NotifyAnalysis func(text string, done bool)
 	// dedup guards against the model emitting the SAME async-task tool call twice
 	// in one turn (parallel tool_calls), which would otherwise start two
 	// duplicate tasks and concatenate two identical acknowledgments into one
@@ -595,7 +598,8 @@ func adaptProvider(d ToolDeps) *config.ImageProviderConfig {
 // and returns the marketing theme report to anchor the AI repaint. Returns "" —
 // and the caller proceeds with the standard harness — whenever COS/vision are
 // unconfigured, the source can't be read, or any step fails. Stage progress is
-// surfaced to chat via d.Notify (the analysis report streams as chunks).
+// surfaced to chat: upload/error via d.Notify, analysis chunks via d.NotifyAnalysis
+// (collapsible panel), falling back to d.Notify when NotifyAnalysis is nil.
 func visionThemeReport(ctx context.Context, d ToolDeps, sourceID string) string {
 	if d.RefPublisher == nil || d.VisionAnalyzer == nil || !d.VisionAnalyzer.Configured() || d.Store == nil {
 		return ""
@@ -609,13 +613,18 @@ func visionThemeReport(ctx context.Context, d ToolDeps, sourceID string) string 
 		return ""
 	}
 
+	notifyAnalysis := d.NotifyAnalysis
+	if notifyAnalysis == nil {
+		notifyAnalysis = d.Notify
+	}
+
 	// Check the vision report cache first — skip grok-4-fast for identical images.
 	sum := md5.Sum(data)
 	imgMD5 := fmt.Sprintf("%x", sum)
 	if cached, err := d.Store.GetVisionReport(imgMD5); err == nil && cached != "" {
 		applog.From(ctx).Info().Str("event", "adapt.analysis_cache_hit").Str("md5", imgMD5).Msg("vision report cache hit")
-		if d.Notify != nil {
-			d.Notify("⚡ 已有分析摘要，直接使用\n\n"+cached, true)
+		if notifyAnalysis != nil {
+			notifyAnalysis(cached, true)
 		}
 		return cached
 	}
@@ -632,8 +641,8 @@ func visionThemeReport(ctx context.Context, d ToolDeps, sourceID string) string 
 		return ""
 	}
 	report, err := d.VisionAnalyzer.Analyze(ctx, []string{url}, func(chunk string) {
-		if d.Notify != nil {
-			d.Notify(chunk, false)
+		if notifyAnalysis != nil {
+			notifyAnalysis(chunk, false)
 		}
 	})
 	if err != nil {
@@ -643,10 +652,9 @@ func visionThemeReport(ctx context.Context, d ToolDeps, sourceID string) string 
 		}
 		return ""
 	}
-	if d.Notify != nil {
-		d.Notify("", true)
+	if notifyAnalysis != nil {
+		notifyAnalysis("", true)
 	}
-	// Persist the report so the same image never triggers grok-4-fast again.
 	if err := d.Store.InsertVisionReport(imgMD5, report); err != nil {
 		applog.From(ctx).Warn().Str("event", "adapt.analysis_cache_miss").Err(err).Msg("failed to cache vision report")
 	}

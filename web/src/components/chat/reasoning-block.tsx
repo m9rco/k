@@ -9,12 +9,15 @@ export function ReasoningBlock({
   collapsed,
   done,
   onToggle,
+  label,
 }: {
   text: string;
   collapsed: boolean;
   done: boolean;
   onToggle: () => void;
+  label?: string;
 }) {
+  const displayLabel = label ?? (done ? "已思考" : "思考中");
   return (
     <motion.div
       initial={{ opacity: 0, y: 4 }}
@@ -28,7 +31,7 @@ export function ReasoningBlock({
         className="flex w-full items-center gap-2 px-3 py-2 text-left text-xs text-fg-mute transition-colors hover:text-fg-dim"
       >
         <Brain className="size-3.5" />
-        <span>{done ? "已思考" : "思考中"}</span>
+        <span>{displayLabel}</span>
         <ChevronRight className={cn("ml-auto size-3.5 transition-transform", !collapsed && "rotate-90")} />
       </button>
       {!collapsed && (

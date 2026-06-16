@@ -394,6 +394,23 @@ export function useAppController() {
     pump();
   }, [clearLoading, flushTyper, pump, setChat]);
 
+  // analysisRef tracks the current in-flight analysis block (vision report).
+  const analysisRef = React.useRef<{ id: string; done: boolean }>({ id: "", done: false });
+  const onAnalysisDelta = React.useCallback((text: string, done: boolean) => {
+    clearLoading();
+    if (!analysisRef.current.id || analysisRef.current.done) {
+      const id = uid("an");
+      analysisRef.current = { id, done: false };
+      setChat((c) => [...c, { kind: "analysis", id, text: "", collapsed: false, done: false }]);
+    }
+    setChat((c) => c.map((it) => {
+      if (it.kind !== "analysis" || it.id !== analysisRef.current.id) return it;
+      const next = it.text + (text || "");
+      return done ? { ...it, text: next, collapsed: false, done: true } : { ...it, text: next };
+    }));
+    if (done) analysisRef.current.done = true;
+  }, [clearLoading, setChat]);
+
   // ============ tool cards ============
   const onToolCall = React.useCallback((data: Record<string, unknown>) => {
     clearLoading();
@@ -568,8 +585,12 @@ export function useAppController() {
           break;
         case "message":
           if ((d.text as string) || "") producedRef.current = true;
-          onAssistantDelta((d.text as string) || "", !!d.done);
-          if (d.done) { finishPendingTools(); void refreshContext(sid); }
+          if (d.analysis) {
+            onAnalysisDelta((d.text as string) || "", !!d.done);
+          } else {
+            onAssistantDelta((d.text as string) || "", !!d.done);
+            if (d.done) { finishPendingTools(); void refreshContext(sid); }
+          }
           break;
         case "reasoning":
           onReasoning((d.text as string) || "");
@@ -935,6 +956,8 @@ export function useAppController() {
     toast,
     collapseReasoningItem: (id: string) =>
       setChat((c) => c.map((it) => (it.kind === "reasoning" && it.id === id ? { ...it, collapsed: !it.collapsed } : it))),
+    collapseAnalysisItem: (id: string) =>
+      setChat((c) => c.map((it) => (it.kind === "analysis" && it.id === id ? { ...it, collapsed: !it.collapsed } : it))),
     dismissFollowUp: (id: string) =>
       setChat((c) => c.map((it) => (it.kind === "follow_up" && it.id === id ? { ...it, dismissed: true } : it))),
   } as const;

@@ -17,21 +17,18 @@ import (
 )
 
 // analysisPrompt is a fixed server-side instruction. Never mixed with user text.
-const analysisPrompt = `You are analyzing game promotional marketing images. Describe ONLY what you can actually see — do not invent content.
+// Kept intentionally concise so the output is directly usable as a generation
+// prompt constraint — focus on what matters for faithful adaptation, skip
+// general background description.
+const analysisPrompt = `分析以下游戏宣发图，按固定格式输出，不要输出任何其他内容：
 
-Produce a structured report covering:
-1. 核心主题/IP/游戏名 (Core Theme/IP/Game Name)
-2. 主体角色与场景 (Main Characters & Scene) — exact appearance, outfit, distinctive features
-3. 核心卖点与文案 (Key Selling Points & Copy) — any visible text, slogans
-4. 视觉风格与基调 (Visual Style & Tone)
-5. 主配色调 (Dominant Color Palette)
-6. 绝不可丢失的要素 (Must-Preserve Elements for all adapted sizes) — be specific
-7. 各尺寸适配注意点 (Adaptation Notes) — what to emphasize when reformatting to landscape/portrait/square/banner
-
-Rules: output in Chinese; include key constraints also in English for generation model comprehension. Output the report only, no preamble.`
+主体：[角色外貌、服装、标志性特征，一句话]
+宣发意图：[核心宣传主题/活动/卖点，一句话]
+必须保留：[适配各尺寸时绝不可缺少的视觉元素，分号分隔]
+配色：[主色调，3个以内，用 hex 或颜色名]`
 
 // maxReportLen caps the report before injecting into the generation prompt.
-const maxReportLen = 1500
+const maxReportLen = 400
 
 // Analyzer calls a vision-capable OpenAI-compatible model to produce a
 // structured marketing analysis report.
@@ -89,7 +86,7 @@ func (a *Analyzer) Analyze(ctx context.Context, imageURLs []string, onChunk func
 	payload := map[string]any{
 		"model":      a.model,
 		"stream":     true,
-		"max_tokens": 600, // cap generation to prevent runaway loops
+		"max_tokens": 200, // fixed-format output is short; cap prevents runaway loops
 		"messages": []map[string]any{
 			{"role": "user", "content": parts},
 		},

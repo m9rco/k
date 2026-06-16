@@ -491,6 +491,13 @@ func (o *Orchestrator) Handle(ctx context.Context, sessionID, userText string, l
 				Data:      map[string]any{"text": text, "done": done},
 			})
 		}
+		deps.NotifyAnalysis = func(text string, done bool) {
+			o.hub.Send(sid, transport.Event{
+				Type:      transport.EventMessage,
+				SessionID: sid,
+				Data:      map[string]any{"text": text, "done": done, "analysis": true},
+			})
+		}
 	}
 	tools, err := deps.Tools()
 	if err != nil {
