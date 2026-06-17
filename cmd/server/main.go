@@ -532,11 +532,12 @@ func (a qualityCheckerAdapter) Configured() bool { return a.qc.Configured() }
 func (a qualityCheckerAdapter) Check(ctx context.Context, img []byte, mime, themeReport, specLabel string) (generation.QualityVerdict, error) {
 	v, err := a.qc.Check(ctx, img, mime, themeReport, specLabel)
 	return generation.QualityVerdict{
-		Pass:      v.Pass,
-		Total:     v.Total,
-		Compliant: v.Compliant,
-		Reasons:   v.Reasons,
-		Hints:     v.Hints,
+		Pass:        v.Pass,
+		Total:       v.Total,
+		Compliant:   v.Compliant,
+		Reasons:     v.Reasons,
+		Hints:       v.Hints,
+		FaultSource: v.FaultSource,
 	}, err
 }
 

@@ -78,6 +78,10 @@ var testCatalog = map[string]crop.SizeSpec{
 	"flip.portrait.720x1280":   {SizeID: "flip.portrait.720x1280", ChannelID: "ch", ChannelName: "TestCh", AssetTypeName: "Story", Width: 720, Height: 1280, Orientation: "portrait", Producible: true},
 	"flip.square.512x512":      {SizeID: "flip.square.512x512", ChannelID: "ch", ChannelName: "TestCh", AssetTypeName: "Icon", Width: 512, Height: 512, Orientation: "square", Producible: true},
 	"nonprod.video":            {SizeID: "nonprod.video", ChannelID: "ch", ChannelName: "TestCh", AssetTypeName: "Video", Width: 1920, Height: 1080, Orientation: "landscape", Producible: false},
+	// extreme aspect ratio: triggers outpaint path (log-ratio diff >> 0.18)
+	"extreme.banner.1920x320": {SizeID: "extreme.banner.1920x320", ChannelID: "ch", ChannelName: "TestCh", AssetTypeName: "Banner", Width: 1920, Height: 320, Orientation: "landscape", Producible: true},
+	// same 4:3 ratio as gen output (400×300): never triggers outpaint (diff=0)
+	"same.ratio.800x600": {SizeID: "same.ratio.800x600", ChannelID: "ch", ChannelName: "TestCh", AssetTypeName: "Banner", Width: 800, Height: 600, Orientation: "landscape", Producible: true},
 }
 
 func (m *mockCropper) SizeSpec(id string) (crop.SizeSpec, bool) {

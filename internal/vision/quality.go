@@ -29,8 +29,10 @@ const qualityPrompt = `你是游戏宣发素材质检员。下面给你一张【
 4. overall_quality（整体质量，0-100）：清晰度、构图、和谐度。
 5. canvas_fill（画面完整度，0-100）：画面是否完整填充目标尺寸，无明显白边、纯色色块、透明带或未填充留白区域。存在任何明显留白即严重扣分（≤40分）。
 
+6. fault_source（缺陷来源，仅在不及格时有意义）："repaint" = 问题出在 AI 重绘主体/内容（主体错误、整体模糊、构图失当）；"outpaint" = 问题出在场景延伸填充（边界割裂、填充与主体风格不一致、边缘留白/色块）；"both" = 两处均有明显问题。若未经 outpaint（纯比例缩放产物），一律填 "repaint"。
+
 只输出如下 JSON：
-{"compliance":{"pass":true,"violations":[]},"scores":{"subject_consistency":0,"character_appeal":0,"overall_quality":0,"canvas_fill":0},"total":0,"hints":"若需改进，一句话说明重绘时应强化什么；无需改进则留空"}
+{"compliance":{"pass":true,"violations":[]},"scores":{"subject_consistency":0,"character_appeal":0,"overall_quality":0,"canvas_fill":0},"total":0,"fault_source":"repaint","hints":"若需改进，一句话说明重绘时应强化什么；无需改进则留空"}
 其中 total 为四个分数的综合（0-100）。hints 必须是可直接追加到图生图提示词的中文要点。`
 
 // QualityVerdict is the parsed, server-evaluated result of a quality check.
@@ -46,6 +48,10 @@ type QualityVerdict struct {
 	Reasons []string
 	// Hints is the model's improvement note, injected into the regenerate prompt.
 	Hints string
+	// FaultSource identifies which pipeline step caused the defect: "repaint"
+	// (gpt-image-2), "outpaint" (Gemini scene extension), or "both". Empty
+	// degrades to "repaint". Used by service.run to pick the retry strategy.
+	FaultSource string
 	// DimScores holds the per-dimension scores for logging; zero when unparseable.
 	DimScores struct {
 		SubjectConsistency int
@@ -123,8 +129,9 @@ type rawVerdict struct {
 		OverallQuality     int `json:"overall_quality"`
 		CanvasFill         int `json:"canvas_fill"`
 	} `json:"scores"`
-	Total int    `json:"total"`
-	Hints string `json:"hints"`
+	Total       int    `json:"total"`
+	FaultSource string `json:"fault_source"`
+	Hints       string `json:"hints"`
 }
 
 // Check scores one product image against the marketing theme report and target
@@ -337,7 +344,7 @@ func (q *QualityChecker) evaluate(content string) (QualityVerdict, error) {
 		// Model omitted total: derive from all four dimension scores.
 		total = (rv.Scores.SubjectConsistency + rv.Scores.CharacterAppeal + rv.Scores.OverallQuality + rv.Scores.CanvasFill) / 4
 	}
-	v := QualityVerdict{Total: total, Compliant: rv.Compliance.Pass, Hints: strings.TrimSpace(rv.Hints)}
+	v := QualityVerdict{Total: total, Compliant: rv.Compliance.Pass, Hints: strings.TrimSpace(rv.Hints), FaultSource: rv.FaultSource}
 	v.DimScores.SubjectConsistency = rv.Scores.SubjectConsistency
 	v.DimScores.CharacterAppeal = rv.Scores.CharacterAppeal
 	v.DimScores.OverallQuality = rv.Scores.OverallQuality

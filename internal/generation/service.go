@@ -138,11 +138,12 @@ type QualityChecker interface {
 // wording is never the verdict — Pass is the server-evaluated decision (red line
 // + threshold); Hints/Reasons feed the regeneration prompt.
 type QualityVerdict struct {
-	Pass      bool
-	Total     int
-	Compliant bool
-	Reasons   []string
-	Hints     string
+	Pass        bool
+	Total       int
+	Compliant   bool
+	Reasons     []string
+	Hints       string
+	FaultSource string // "repaint" | "outpaint" | "both"; empty = repaint
 }
 
 // SetQualityChecker installs the platform-adaptation quality-gate judge. Optional:
@@ -265,6 +266,11 @@ type GenerateParams struct {
 	// QualityHints, when set, is the judge's improvement note from a failed review,
 	// injected into the regeneration prompt and fed back to gpt-image-2.
 	QualityHints string
+	// PreOutpaintData, when set, skips the gen.Generate() call and uses these
+	// bytes directly as the input to the outpaint/converge step. Set on
+	// outpaint-only retries (fault_source="outpaint") so gpt-image-2 is not
+	// called again when only the scene-extension fill was defective.
+	PreOutpaintData []byte
 }
 
 // primaryAndExtras resolves the effective reference list: the primary asset id
@@ -598,49 +604,57 @@ func (s *Service) run(ctx context.Context, taskID string, p GenerateParams) {
 		}
 	}
 
-	genStart := time.Now()
-	// Log the full prompt sent to the image model so interactions are auditable.
-	// Also log the resolved generation size: for gpt-image-2 this is the legal
-	// enum snapped from the target dims (e.g. 200×200 icon → 1728×1728 gen size,
-	// then downsampled in the convergence step — verifying "small ≠ blurry").
-	applog.From(ctx).Info().
-		Str("event", "gen.provider_call").
-		Str("task", taskID).
-		Str("kind", string(p.Slots.Kind)).
-		Int("gen_w", wantW).Int("gen_h", wantH).
-		Int("refs", len(extraImages)).
-		Str("prompt", prompt).
-		Msg("calling provider.Generate")
-	// Pick the generator: a per-session model override fixes a specific provider
-	// for this task; otherwise use the Service default. Resolved here at run time
-	// so the choice is fixed for the task's lifetime.
-	gen := s.gen
-	if p.ProviderOverride != nil {
-		gen = NewProvider(*p.ProviderOverride)
-	}
-	out, err := gen.Generate(ctx, Request{
-		Prompt:          prompt,
-		SourceImage:     srcBytes,
-		SourceMime:      srcMime,
-		ReferenceImages: extraImages,
-		Width:           wantW,
-		Height:          wantH,
-	})
-	if err != nil {
-		log.Printf("gen.run: task=%s provider.Generate FAILED after %s: %v", taskID, time.Since(genStart), err)
-		applog.From(ctx).Error().Str("event", "gen.provider_failed").Str("task", taskID).Int64("duration_ms", time.Since(genStart).Milliseconds()).Err(err).Msg("provider.Generate failed")
-		s.fail(taskID, p.SessionID, err.Error())
-		return
-	}
-	log.Printf("gen.run: task=%s provider.Generate OK in %s (%d bytes)", taskID, time.Since(genStart), len(out.Data))
-	applog.From(ctx).Info().Str("event", "gen.provider_ok").Str("task", taskID).Int64("duration_ms", time.Since(genStart).Milliseconds()).Int("bytes", len(out.Data)).Msg("provider.Generate ok")
+	// Outpaint-only retry: skip gpt-image-2 and reuse the pre-outpaint snapshot
+	// captured in the first pass. Otherwise run the full generation call.
+	var out Output
+	if p.PreOutpaintData != nil {
+		out = Output{Data: p.PreOutpaintData, Mime: "image/png"}
+	} else {
+		genStart := time.Now()
+		// Log the full prompt sent to the image model so interactions are auditable.
+		// Also log the resolved generation size: for gpt-image-2 this is the legal
+		// enum snapped from the target dims (e.g. 200×200 icon → 1728×1728 gen size,
+		// then downsampled in the convergence step — verifying "small ≠ blurry").
+		applog.From(ctx).Info().
+			Str("event", "gen.provider_call").
+			Str("task", taskID).
+			Str("kind", string(p.Slots.Kind)).
+			Int("gen_w", wantW).Int("gen_h", wantH).
+			Int("refs", len(extraImages)).
+			Str("prompt", prompt).
+			Msg("calling provider.Generate")
+		// Pick the generator: a per-session model override fixes a specific provider
+		// for this task; otherwise use the Service default. Resolved here at run time
+		// so the choice is fixed for the task's lifetime.
+		gen := s.gen
+		if p.ProviderOverride != nil {
+			gen = NewProvider(*p.ProviderOverride)
+		}
+		var genErr error
+		out, genErr = gen.Generate(ctx, Request{
+			Prompt:          prompt,
+			SourceImage:     srcBytes,
+			SourceMime:      srcMime,
+			ReferenceImages: extraImages,
+			Width:           wantW,
+			Height:          wantH,
+		})
+		if genErr != nil {
+			log.Printf("gen.run: task=%s provider.Generate FAILED after %s: %v", taskID, time.Since(genStart), genErr)
+			applog.From(ctx).Error().Str("event", "gen.provider_failed").Str("task", taskID).Int64("duration_ms", time.Since(genStart).Milliseconds()).Err(genErr).Msg("provider.Generate failed")
+			s.fail(taskID, p.SessionID, genErr.Error())
+			return
+		}
+		log.Printf("gen.run: task=%s provider.Generate OK in %s (%d bytes)", taskID, time.Since(genStart), len(out.Data))
+		applog.From(ctx).Info().Str("event", "gen.provider_ok").Str("task", taskID).Int64("duration_ms", time.Since(genStart).Milliseconds()).Int("bytes", len(out.Data)).Msg("provider.Generate ok")
 
-	// If the task was cancelled while the provider was working, drop the result
-	// instead of persisting it — otherwise a cancelled task leaves an orphan
-	// asset that resurfaces on the next workspace refresh.
-	if ctx.Err() != nil {
-		log.Printf("gen.run: task=%s cancelled, discarding product", taskID)
-		return
+		// If the task was cancelled while the provider was working, drop the result
+		// instead of persisting it — otherwise a cancelled task leaves an orphan
+		// asset that resurfaces on the next workspace refresh.
+		if ctx.Err() != nil {
+			log.Printf("gen.run: task=%s cancelled, discarding product", taskID)
+			return
+		}
 	}
 	s.progress(taskID, p.SessionID, 80)
 
@@ -662,6 +676,11 @@ func (s *Service) run(ctx context.Context, taskID string, p GenerateParams) {
 		}
 	}
 
+	// preOutpaintData captures the gpt-image-2 repaint result before the outpaint
+	// step so a quality-gate outpaint-only retry can reuse it without re-calling
+	// the image model. Nil when no outpaint path is taken for this product.
+	var preOutpaintData []byte
+
 	// adapt_platform: same convergence范式 as icon — the provider snaps to its
 	// supported size enum, so converge the product down to the exact target
 	// platform size. Mode is picked per size by convergeMode: scale (clean rescale)
@@ -677,8 +696,11 @@ func (s *Service) run(ctx context.Context, taskID string, p GenerateParams) {
 			// outpainter fill them, then scale to exact. Falls back to ModeContain
 			// (band padding) when no outpainter is wired or the fill fails — never
 			// crops the subject out.
+			// Snapshot the repaint product before scene extension so a quality-gate
+			// outpaint-only retry can skip regeneration and reuse these bytes.
+			preOutpaintData = out.Data
 			s.broker.Publish(taskID, transport.EventOutpaintStarted, p.SessionID, map[string]any{"taskId": taskID})
-			if data, err := s.outpaintConverge(ctx, taskID, out.Data, genW, genH, adaptW, adaptH); err != nil {
+			if data, err := s.outpaintConverge(ctx, taskID, out.Data, genW, genH, adaptW, adaptH, p.QualityHints); err != nil {
 				log.Printf("gen.run: task=%s adapt outpaint to %dx%d FAILED: %v (falling back to contain)", taskID, adaptW, adaptH, err)
 				if conv, cerr := crop.CropBytesWithOptions(out.Data, adaptW, adaptH, crop.Options{Mode: crop.ModeContain}); cerr == nil {
 					out.Data = conv.Data
@@ -727,12 +749,18 @@ func (s *Service) run(ctx context.Context, taskID string, p GenerateParams) {
 				"total":   verdict.Total,
 				"reasons": verdict.Reasons,
 			})
-			// Feed hints (judge note + red-line/low-dim reasons) back to gpt-image-2
-			// and rerun the full pipeline once. The retry reuses THIS taskID so the
-			// frontend keeps the same placeholder card.
+			// Feed hints (judge note + red-line/low-dim reasons) back to the image model
+			// and rerun the pipeline once. The retry reuses THIS taskID so the frontend
+			// keeps the same placeholder card. If the defect is in the outpaint step
+			// only, skip gpt-image-2 and reuse the pre-outpaint snapshot.
 			retry := p
 			retry.Attempt = 1
 			retry.QualityHints = composeHints(verdict)
+			if verdict.FaultSource == "outpaint" && preOutpaintData != nil {
+				// Outpaint-only retry: defect is in scene extension, not the repaint.
+				// Skip gen.Generate() — reuse the repaint snapshot captured before outpaint.
+				retry.PreOutpaintData = preOutpaintData
+			}
 			s.progress(taskID, p.SessionID, 20)
 			s.run(ctx, taskID, retry)
 			return
@@ -842,13 +870,17 @@ func (s *Service) fail(taskID, sessionID, msg string) {
 // black/empty band to keep rather than a fill mask (the observed "black sides"
 // bug). The caller falls back to band padding when no outpainter is wired — never
 // a sliced subject or a distorted stretch.
-func (s *Service) outpaintConverge(ctx context.Context, taskID string, data []byte, genW, genH, dstW, dstH int) ([]byte, error) {
+func (s *Service) outpaintConverge(ctx context.Context, taskID string, data []byte, genW, genH, dstW, dstH int, hints string) ([]byte, error) {
 	if s.outpainter == nil {
 		return nil, fmt.Errorf("no outpainter wired")
 	}
 	start := time.Now()
+	prompt := buildOutpaintPrompt(genW, genH, dstW, dstH)
+	if hints != "" {
+		prompt += " " + hints
+	}
 	out, err := s.outpainter.Generate(ctx, Request{
-		Prompt:      buildOutpaintPrompt(genW, genH, dstW, dstH),
+		Prompt:      prompt,
 		SourceImage: data,
 		SourceMime:  "image/png",
 		Width:       dstW,

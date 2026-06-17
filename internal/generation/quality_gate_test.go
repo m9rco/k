@@ -126,3 +126,91 @@ func promptOf(r *Request) string {
 }
 
 func errContext() error { return context.DeadlineExceeded }
+
+// TestQualityGateFaultOutpaintSkipsRepaint verifies that when the judge reports
+// fault_source="outpaint" and an outpaint snapshot was captured, the retry skips
+// gen.Generate() and only reruns the outpaint step.
+func TestQualityGateFaultOutpaintSkipsRepaint(t *testing.T) {
+	svc, st, _, _ := newAdaptService(t)
+	prov := &countingProvider{name: "p", out: Output{Data: makePNG(400, 300), Mime: "image/png"}}
+	svc.gen = NewFailoverGenerator(prov, nil)
+	// Outpainter produces a wide PNG for the extreme banner size.
+	outpainter := &countingProvider{name: "op", out: Output{Data: makePNG(1920, 640), Mime: "image/png"}}
+	svc.SetOutpainter(outpainter)
+	checker := &stubChecker{verdicts: []QualityVerdict{
+		{Pass: false, Compliant: true, Total: 40, Reasons: []string{"边界割裂"}, Hints: "场景延伸更自然", FaultSource: "outpaint"},
+	}}
+	svc.SetQualityChecker(checker)
+
+	outcomes, err := svc.AdaptToPlatform(context.Background(), "s", []string{"src"}, []string{"extreme.banner.1920x320"}, false, nil, "theme")
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec := waitTask(t, st, "s", outcomes[0].TaskID)
+	if rec.Status != "done" {
+		t.Fatalf("task not done: %q", rec.Error)
+	}
+	// Repaint called once only (retry skips gen.Generate).
+	if got := atomic.LoadInt32(&prov.calls); got != 1 {
+		t.Errorf("expected 1 repaint (outpaint-only retry), got %d", got)
+	}
+	// Outpainter called twice: first pass + retry.
+	if got := atomic.LoadInt32(&outpainter.calls); got != 2 {
+		t.Errorf("expected 2 outpaint calls (first pass + retry), got %d", got)
+	}
+	// Judge called exactly once.
+	if got := atomic.LoadInt32(&checker.calls); got != 1 {
+		t.Errorf("expected 1 review, got %d", got)
+	}
+}
+
+// TestQualityGateFaultRepaintFullRerun verifies fault_source="repaint" triggers
+// a full pipeline rerun (gen.Generate called twice).
+func TestQualityGateFaultRepaintFullRerun(t *testing.T) {
+	svc, st, _, _ := newAdaptService(t)
+	prov := &countingProvider{name: "p", out: Output{Data: makePNG(400, 300), Mime: "image/png"}}
+	svc.gen = NewFailoverGenerator(prov, nil)
+	checker := &stubChecker{verdicts: []QualityVerdict{
+		{Pass: false, Compliant: true, Total: 40, Reasons: []string{"主体偏低"}, FaultSource: "repaint"},
+	}}
+	svc.SetQualityChecker(checker)
+
+	outcomes, err := svc.AdaptToPlatform(context.Background(), "s", []string{"src"}, []string{"flip.square.512x512"}, false, nil, "theme")
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec := waitTask(t, st, "s", outcomes[0].TaskID)
+	if rec.Status != "done" {
+		t.Fatalf("task not done: %q", rec.Error)
+	}
+	// Both passes call gen.Generate.
+	if got := atomic.LoadInt32(&prov.calls); got != 2 {
+		t.Errorf("expected 2 repaint calls on fault_source=repaint, got %d", got)
+	}
+}
+
+// TestQualityGateFaultOutpaintNoSnapshotFullRerun verifies that fault_source="outpaint"
+// with no outpaint snapshot (scale path taken) still triggers a full rerun.
+func TestQualityGateFaultOutpaintNoSnapshotFullRerun(t *testing.T) {
+	svc, st, _, _ := newAdaptService(t)
+	prov := &countingProvider{name: "p", out: Output{Data: makePNG(400, 300), Mime: "image/png"}}
+	svc.gen = NewFailoverGenerator(prov, nil)
+	// same.ratio.800x600 is 4:3 like the gen output → scale path → no outpaint snapshot.
+	checker := &stubChecker{verdicts: []QualityVerdict{
+		{Pass: false, Compliant: true, Total: 40, FaultSource: "outpaint"},
+	}}
+	svc.SetQualityChecker(checker)
+
+	outcomes, err := svc.AdaptToPlatform(context.Background(), "s", []string{"src"}, []string{"same.ratio.800x600"}, false, nil, "theme")
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec := waitTask(t, st, "s", outcomes[0].TaskID)
+	if rec.Status != "done" {
+		t.Fatalf("task not done: %q", rec.Error)
+	}
+	// No snapshot → falls back to full rerun.
+	if got := atomic.LoadInt32(&prov.calls); got != 2 {
+		t.Errorf("expected 2 repaint calls (no snapshot = full rerun), got %d", got)
+	}
+}
