@@ -9,6 +9,7 @@ import { ToolCard } from "./tool-card";
 import { CapsuleBubble } from "./capsule-bubble";
 import { FollowUpBubble } from "./follow-up-bubble";
 import { LoadingBubble } from "./loading-bubble";
+import { AdaptPipeline } from "./adapt-pipeline";
 import { Composer } from "./composer";
 import { ContextBar } from "./context-bar";
 
@@ -144,6 +145,7 @@ export function ChatPanel({ onboarding = false }: { onboarding?: boolean }) {
                 />
               );
             if (it.kind === "loading") return <LoadingBubble key={it.id} level={it.level} />;
+            if (it.kind === "adapt_pipeline") return <AdaptPipeline key={it.id} item={it} />;
             return <ToolCard key={it.id} tool={it.tool} />;
           })}
         </AnimatePresence>

@@ -68,6 +68,9 @@ export function useAppController() {
   // retryCardsRef maps taskId → chat tool-card id for direct retries so the
   // tool card tracks task_done/task_failed without going through the agent WS.
   const retryCardsRef = React.useRef<Map<string, string>>(new Map());
+  // pendingAdaptRef tracks task IDs collected during an adapt_to_platform tool
+  // call so we can create the pipeline timeline chat item when the tool ends.
+  const pendingAdaptRef = React.useRef<string[]>([]);
   const setChat = React.useCallback((fn: (c: ChatItem[]) => ChatItem[]) => {
     setState((s) => ({ ...s, chat: fn(s.chat) }));
   }, []);
@@ -152,20 +155,21 @@ export function useAppController() {
         // evolve the SAME placeholder card and never close the stream. The task
         // still ends with task_done/task_failed.
         else if (type === "review_started")
-          tasks.set(taskId, { ...cur, status: "running", review: "checking" });
+          tasks.set(taskId, { ...cur, status: "running", stage: "reviewing", review: "checking" });
         else if (type === "review_passed")
-          tasks.set(taskId, { ...cur, review: "passed" });
+          tasks.set(taskId, { ...cur, stage: undefined, review: "passed" });
         else if (type === "review_failed")
           tasks.set(taskId, {
             ...cur,
             status: "running",
+            stage: undefined,
             review: "failed",
             reviewReason: Array.isArray(data.reasons) ? (data.reasons as string[]).join("、") : undefined,
           });
         else if (type === "review_skipped") {
-          // Degrade: drop any review marker and continue as plain 生图中.
-          tasks.set(taskId, { ...cur, review: undefined, reviewReason: undefined });
-        }
+          tasks.set(taskId, { ...cur, stage: undefined, review: undefined, reviewReason: undefined });
+        } else if (type === "outpaint_started")
+          tasks.set(taskId, { ...cur, stage: "outpainting" });
         return { ...s, tasks };
       });
       if (type === "task_done") {
@@ -225,7 +229,7 @@ export function useAppController() {
           /* ignore */
         }
       };
-      for (const n of ["task_queued", "task_running", "task_progress", "task_done", "task_failed", "review_started", "review_passed", "review_failed", "review_skipped"])
+      for (const n of ["task_queued", "task_running", "task_progress", "task_done", "task_failed", "review_started", "review_passed", "review_failed", "review_skipped", "outpaint_started"])
         es.addEventListener(n, handle as EventListener);
       es.onmessage = handle;
     },
@@ -590,6 +594,8 @@ export function useAppController() {
     // Capture the agent's understanding of this op so the timeline node can show
     // it once the tool_result (which carries the task_id) arrives.
     lastToolNoteRef.current = describeToolCall(card.name, args);
+    // Reset the adapt task collector when a new adapt call starts.
+    if (card.name === "adapt_to_platform") pendingAdaptRef.current = [];
     setChat((c) => [...c, { kind: "tool", id: card.id!, tool: card }]);
   }, [flushTyper, collapseReasoning, setChat]);
 
@@ -600,10 +606,13 @@ export function useAppController() {
       ensureTaskPlaceholder(sid, data.task_id, ((data.kind as TaskKind) || "generate"), lastToolNoteRef.current);
       lastToolNoteRef.current = undefined;
     } else if (ok && name && SYNC_ASSET_TOOLS.has(name)) {
-      // Synchronous asset-producing tools (e.g. crop_to_sizes) insert assets
-      // directly and never emit a task_done event, so the workspace would only
-      // pick them up on a manual refresh. Pull immediately so 对话内切图即时回填。
       void refreshWorkspace(sid);
+    }
+    // Insert an adapt pipeline timeline after the tool card for adapt_to_platform.
+    if (ok && name === "adapt_to_platform") {
+      const ids = [...pendingAdaptRef.current];
+      if (ids.length > 0)
+        setChat((c) => [...c, { kind: "adapt_pipeline" as const, id: uid("ap"), taskIds: ids }]);
     }
     setChat((c) => {
       // complete the most recent running card matching the name (or any).
@@ -792,7 +801,7 @@ export function useAppController() {
           break;
         }
         case "task_created":
-          if (typeof d.task_id === "string")
+          if (typeof d.task_id === "string") {
             ensureTaskPlaceholder(
               sid,
               d.task_id,
@@ -800,6 +809,10 @@ export function useAppController() {
               undefined,
               typeof d.count === "number" ? d.count : undefined,
             );
+            // Collect task IDs created during an adapt call for the pipeline item.
+            if ((d.kind as TaskKind) === "generate")
+              pendingAdaptRef.current.push(d.task_id);
+          }
           break;
         case "error":
           clearLoading();

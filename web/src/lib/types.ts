@@ -53,6 +53,9 @@ export interface Task {
   // reviewReason is a short failure cause (red line / low dimension) for an
   // optional tooltip; the card does not surface raw scores.
   reviewReason?: string;
+  // stage tracks which pipeline step is currently active (adapt tasks only):
+  // undefined=生图中, "outpainting"=Gemini补全中, "reviewing"=质量审核中.
+  stage?: "outpainting" | "reviewing";
 }
 
 export interface ContextState {
@@ -108,6 +111,15 @@ export interface ToolCardData {
   status: "running" | "done" | "failed";
   summary?: string;
   error?: string;
+}
+
+// AdaptPipelineItem appears in the chat log for adapt_to_platform operations,
+// showing a live 4-step horizontal pipeline timeline (分析→生图→补全→审核)
+// driven by task SSE events. taskIds are the adapt task(s) for this operation.
+export interface AdaptPipelineItem {
+  kind: "adapt_pipeline";
+  id: string;
+  taskIds: string[];
 }
 
 // ModelEntry is one selectable model in the per-session model catalog.

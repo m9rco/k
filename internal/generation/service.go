@@ -677,6 +677,7 @@ func (s *Service) run(ctx context.Context, taskID string, p GenerateParams) {
 			// outpainter fill them, then scale to exact. Falls back to ModeContain
 			// (band padding) when no outpainter is wired or the fill fails — never
 			// crops the subject out.
+			s.broker.Publish(taskID, transport.EventOutpaintStarted, p.SessionID, map[string]any{"taskId": taskID})
 			if data, err := s.outpaintConverge(ctx, taskID, out.Data, genW, genH, adaptW, adaptH); err != nil {
 				log.Printf("gen.run: task=%s adapt outpaint to %dx%d FAILED: %v (falling back to contain)", taskID, adaptW, adaptH, err)
 				if conv, cerr := crop.CropBytesWithOptions(out.Data, adaptW, adaptH, crop.Options{Mode: crop.ModeContain}); cerr == nil {

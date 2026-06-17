@@ -96,6 +96,10 @@ const (
 	EventReviewPassed  EventType = "review_passed"  // product passed the quality gate
 	EventReviewFailed  EventType = "review_failed"  // product failed; regenerating with hints
 	EventReviewSkipped EventType = "review_skipped" // gate degraded/unavailable; carry on
+
+	// EventOutpaintStarted fires just before Gemini outpaints the margin bands,
+	// advancing the frontend pipeline timeline from 生图 to Gemini补全. Additive.
+	EventOutpaintStarted EventType = "outpaint_started"
 )
 
 // Event is the unified envelope sent over both WS and SSE.

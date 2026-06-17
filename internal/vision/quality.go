@@ -137,8 +137,9 @@ func (q *QualityChecker) Check(ctx context.Context, img []byte, mime, themeRepor
 		{Type: "image_url", ImageURL: &imgURL{URL: dataURI}},
 	}
 	payload := map[string]any{
-		"model":      q.model,
-		"max_tokens": 400,
+		"model":           q.model,
+		"max_tokens":      400,
+		"response_format": map[string]string{"type": "json_object"},
 		"messages": []map[string]any{
 			{"role": "user", "content": parts},
 		},
