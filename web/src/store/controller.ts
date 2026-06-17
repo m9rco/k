@@ -642,6 +642,9 @@ export function useAppController() {
     setState((s) => ({ ...s, thinking: false }));
     flushTyper();
     finishPendingTools();
+    // Guard: if summary_confirm was never sent (e.g. backend skipped the gate on
+    // retry), reanalyzing would stay true forever — clear it on turn end.
+    setChat((c) => c.map((it) => (it.kind === "analysis" && it.reanalyzing ? { ...it, reanalyzing: false } : it)));
     // Empty-reply fallback: if the turn produced no body text, no tool, and no
     // capsule, surface a short standby line so the user never sees "thought but
     // said nothing". The backend suppresses the empty done-message; this guards
