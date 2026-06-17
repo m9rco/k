@@ -231,7 +231,7 @@ func run() error {
 	log.Printf("web-search: DDG text + Bing images enabled (no API key)")
 	// Vision pre-stage for platform adaptation: analyze the reference group to
 	// produce a theme report injected into the AI-repaint prompt. The default
-	// provider is gemini (gemini-2.5-flash-all over the native inline API — no COS
+	// provider is gemini (gemini-flash-latest over the native inline API — no COS
 	// upload needed); VISION_PROVIDER=openai selects the legacy image_url path
 	// (which still needs COS). Both are optional; nil disables gracefully.
 	var visionAnalyzer vision.Analyzer

@@ -49,7 +49,7 @@ func NewGemini(baseURL, apiKey, model string) Analyzer {
 		base = "https://generativelanguage.googleapis.com"
 	}
 	if model == "" {
-		model = "gemini-2.5-flash-all"
+		model = "gemini-flash-latest"
 	}
 	return &geminiAnalyzer{
 		baseURL: base,
