@@ -475,10 +475,33 @@ export function useAppController() {
   // countdown reaches 0 (and the user neither edited nor confirmed) auto-submits
   // the original summary as the default — so an untouched analysis flows straight
   // into adaptation with zero clicks.
-  const onSummaryConfirm = React.useCallback((cacheKey: string) => {
+  //
+  // When summary is provided (re-analysis path), the new content is backfilled into
+  // the original editing block instead of starting a fresh countdown on a new block.
+  const onSummaryConfirm = React.useCallback((cacheKey: string, summary?: string) => {
     const id = analysisRef.current.id;
     if (!id || !analysisRef.current.done) return;
     clearSummaryTimer();
+
+    if (summary != null) {
+      // Re-analysis: remove the transient streaming block, update the original
+      // reanalyzing block with new text, and keep it in edit mode (no countdown).
+      let origId = "";
+      setChat((c) => c
+        .filter((it) => !(it.kind === "analysis" && it.id === id))
+        .map((it) => {
+          if (it.kind !== "analysis" || !it.reanalyzing) return it;
+          origId = it.id;
+          return { ...it, text: summary, cacheKey, editing: true, reanalyzing: false };
+        }),
+      );
+      if (origId) {
+        analysisRef.current = { id: origId, done: true, text: summary };
+        pendingConfirmRef.current = { id: origId, cacheKey, confirmed: false };
+      }
+      return;
+    }
+
     pendingConfirmRef.current = { id, cacheKey, confirmed: false };
     setChat((c) => c.map((it) => {
       if (it.kind !== "analysis") return it;
@@ -719,7 +742,7 @@ export function useAppController() {
           // Live analysis finished: open the editable 3s confirmation window on
           // the just-completed analysis block. Cache hits never emit this, so the
           // window only appears when the user can actually steer a fresh report.
-          onSummaryConfirm((d.cacheKey as string) || "");
+          onSummaryConfirm((d.cacheKey as string) || "", d.summary as string | undefined);
           break;
         case "tool_call":
           producedRef.current = true;

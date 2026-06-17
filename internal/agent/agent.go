@@ -359,6 +359,18 @@ func (o *Orchestrator) awaitSummaryConfirm(ctx context.Context, sessionID, cache
 				timerActive = false
 			}
 		case <-gate.reanalyzeCh:
+			// Reset the safety timer so the user gets a fresh confirmation
+			// window after re-analysis finishes (doReanalyze can take seconds,
+			// which would otherwise exhaust the original 8s and auto-release).
+			if timerActive {
+				if !timer.Stop() {
+					select {
+					case <-timer.C:
+					default:
+					}
+				}
+				timer.Reset(8 * time.Second)
+			}
 			if doReanalyze != nil {
 				if r, err := doReanalyze(ctx); err == nil && r != "" {
 					current = r
@@ -674,7 +686,9 @@ func (o *Orchestrator) Handle(ctx context.Context, sessionID, userText string, l
 					hub.Send(sid, transport.Event{
 						Type:      transport.EventSummaryConfirm,
 						SessionID: sid,
-						Data:      map[string]any{"cacheKey": cacheKey},
+						// summary lets the frontend backfill the edit textarea
+						// with the new content (re-analysis path).
+						Data: map[string]any{"cacheKey": cacheKey, "summary": report},
 					})
 					return report, nil
 				}
