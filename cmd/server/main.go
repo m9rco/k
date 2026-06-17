@@ -320,6 +320,12 @@ func run() error {
 			// user_message (sent right after by the client) will then start a new
 			// turn once the cancelled one releases the per-session turn lock.
 			orch.CancelTurn(sessionID)
+		case "summary_confirm":
+			// Release the adapt_to_platform analysis gate: the editable analysis
+			// panel's 3s confirmation window ended (user confirmed/edited, or the
+			// countdown auto-submitted the original). Deliver the final summary to
+			// the gated call; a no-op when none is waiting (late/duplicate).
+			orch.DeliverSummaryConfirm(sessionID, msg.CacheKey, msg.Summary, msg.Edited)
 		}
 	})
 

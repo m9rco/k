@@ -12,7 +12,21 @@ export type ChatItem =
   | { kind: "user"; id: string; text: string }
   | { kind: "assistant"; id: string; text: string; streaming: boolean }
   | { kind: "reasoning"; id: string; text: string; collapsed: boolean; done: boolean }
-  | { kind: "analysis"; id: string; text: string; collapsed: boolean; done: boolean }
+  | {
+      kind: "analysis";
+      id: string;
+      text: string;
+      collapsed: boolean;
+      done: boolean;
+      // Confirmation window (only set on a fresh, non-cached live analysis). The
+      // backend emits a "summary_confirm" signal carrying cacheKey after the report
+      // streams done; the panel then runs a 3s countdown the user can edit during.
+      cacheKey?: string;
+      confirming?: boolean; // in the editable confirmation window
+      confirmed?: boolean; // user submitted / countdown expired — panel disabled
+      editing?: boolean; // user opened the inline editor (countdown paused)
+      secondsLeft?: number; // countdown remaining; undefined once paused (editing)
+    }
   | { kind: "tool"; id: string; tool: ToolCardData }
   | { kind: "capsule"; id: string; question: string; options: CapsuleOption[]; answered: boolean }
   | { kind: "follow_up"; id: string; message: string; options: CapsuleOption[]; dismissed: boolean }

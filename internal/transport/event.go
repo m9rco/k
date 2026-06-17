@@ -61,6 +61,18 @@ const (
 	// proactive suggestion for the user's next action.
 	EventFollowUp EventType = "follow_up"
 
+	// EventSummaryConfirm tells the frontend that a fresh (non-cached) marketing
+	// analysis report has finished streaming and adapt_to_platform is now gated:
+	// the analysis panel should enter its editable confirmation window (3s
+	// countdown + edit affordance). Its Data carries the vision-report cache key
+	// ({"cacheKey": "..."}) the client must echo back on the "summary_confirm"
+	// inbound message so the server can route the confirmation to the gated call
+	// and overwrite that key's cached report when edited. It is additive: clients
+	// that do not recognize it ignore it (per "unknown event types must not
+	// error"); the server's gate then releases on its safety timeout with the
+	// original report, so an un-upgraded client degrades to today's behavior.
+	EventSummaryConfirm EventType = "summary_confirm"
+
 	// EventTaskCreated is broadcast over the conversation (WS) channel the moment
 	// a long task is created, so the workspace can show an immediate placeholder
 	// and subscribe to its SSE progress without waiting for the agent turn to end.

@@ -408,15 +408,19 @@ export function useAppController() {
     pump();
   }, [clearLoading, flushTyper, pump, setChat]);
 
-  // analysisRef tracks the current in-flight analysis block (vision report).
-  const analysisRef = React.useRef<{ id: string; done: boolean }>({ id: "", done: false });
+  // analysisRef tracks the current in-flight analysis block (vision report). It
+  // mirrors the streamed text outside React state so the confirmation countdown
+  // can read the final report synchronously when it auto-submits (a setChat
+  // updater value isn't readable at the call site under React 18 batching).
+  const analysisRef = React.useRef<{ id: string; done: boolean; text: string }>({ id: "", done: false, text: "" });
   const onAnalysisDelta = React.useCallback((text: string, done: boolean) => {
     clearLoading();
     if (!analysisRef.current.id || analysisRef.current.done) {
       const id = uid("an");
-      analysisRef.current = { id, done: false };
+      analysisRef.current = { id, done: false, text: "" };
       setChat((c) => [...c, { kind: "analysis", id, text: "", collapsed: false, done: false }]);
     }
+    analysisRef.current.text += text || "";
     setChat((c) => c.map((it) => {
       if (it.kind !== "analysis" || it.id !== analysisRef.current.id) return it;
       const next = it.text + (text || "");
@@ -424,6 +428,87 @@ export function useAppController() {
     }));
     if (done) analysisRef.current.done = true;
   }, [clearLoading, setChat]);
+
+  // summaryTimerRef holds the active 3s confirmation countdown for an analysis
+  // block: the interval handle plus the block id it ticks. Only one summary
+  // confirmation can be pending at a time (adaptation is a single tool call over
+  // one image group), so a single ref suffices.
+  const summaryTimerRef = React.useRef<{ id: string; timer: ReturnType<typeof setInterval> | null }>({ id: "", timer: null });
+  // pendingConfirmRef mirrors the in-flight confirmation's identity outside React
+  // state: its block id, the cacheKey to echo back, and whether it's already been
+  // submitted. The wire send (and the countdown auto-submit) read cacheKey from
+  // HERE rather than from a setChat updater — under React 18 automatic batching an
+  // updater's body runs deferred, so a value assigned inside it isn't readable at
+  // the call site. Reading the stale "" cacheKey is exactly what made the backend
+  // gate miss the deliver and hang on its 60s safety timeout before generating.
+  const pendingConfirmRef = React.useRef<{ id: string; cacheKey: string; confirmed: boolean }>({ id: "", cacheKey: "", confirmed: false });
+  const clearSummaryTimer = React.useCallback(() => {
+    if (summaryTimerRef.current.timer) clearInterval(summaryTimerRef.current.timer);
+    summaryTimerRef.current = { id: "", timer: null };
+  }, []);
+
+  // submitSummaryConfirm releases the backend adapt gate: it sends the final
+  // summary (edited text or the countdown-default original) over the WS, marks
+  // the block confirmed (disabling further edits), and stops the countdown. A
+  // no-op once the block is already confirmed (idempotent — single confirm only).
+  const submitSummaryConfirm = React.useCallback((id: string, summary: string, edited: boolean) => {
+    const p = pendingConfirmRef.current;
+    // Guard + cacheKey both come from the ref so they're correct synchronously,
+    // regardless of React's batching of the setChat below.
+    if (p.id !== id || p.confirmed) return;
+    p.confirmed = true;
+    const cacheKey = p.cacheKey;
+    clearSummaryTimer();
+    setChat((c) => c.map((it) =>
+      it.kind === "analysis" && it.id === id
+        ? { ...it, confirming: false, editing: false, confirmed: true }
+        : it,
+    ));
+    const ws = wsRef.current;
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ type: "summary_confirm", cacheKey, summary, edited }));
+    }
+  }, [setChat, clearSummaryTimer]);
+
+  // onSummaryConfirm enters the editable confirmation window for the just-finished
+  // analysis block: it records the cache key, starts a 3s countdown, and when the
+  // countdown reaches 0 (and the user neither edited nor confirmed) auto-submits
+  // the original summary as the default — so an untouched analysis flows straight
+  // into adaptation with zero clicks.
+  const onSummaryConfirm = React.useCallback((cacheKey: string) => {
+    const id = analysisRef.current.id;
+    if (!id || !analysisRef.current.done) return;
+    clearSummaryTimer();
+    pendingConfirmRef.current = { id, cacheKey, confirmed: false };
+    setChat((c) => c.map((it) =>
+      it.kind === "analysis" && it.id === id
+        ? { ...it, cacheKey, confirming: true, secondsLeft: 3, editing: false, confirmed: false }
+        : it,
+    ));
+    // Drive the countdown off a local counter (not the setChat updater's return),
+    // so the expiry decision is synchronous and independent of batching. setChat
+    // here only reflects the remaining seconds in the UI.
+    let left = 3;
+    const timer = setInterval(() => {
+      left -= 1;
+      setChat((c) => c.map((it) =>
+        it.kind === "analysis" && it.id === id && !it.editing && !it.confirmed
+          ? { ...it, secondsLeft: Math.max(0, left) }
+          : it,
+      ));
+      if (left <= 0) submitSummaryConfirm(id, analysisRef.current.text, false);
+    }, 1000);
+    summaryTimerRef.current = { id, timer };
+  }, [clearSummaryTimer, setChat, submitSummaryConfirm]);
+
+  // editSummary pauses the countdown and puts the block into edit mode so the
+  // user can rewrite the summary before submitting (no auto-expire while editing).
+  const editSummary = React.useCallback((id: string) => {
+    clearSummaryTimer();
+    setChat((c) => c.map((it) =>
+      it.kind === "analysis" && it.id === id ? { ...it, editing: true } : it,
+    ));
+  }, [clearSummaryTimer, setChat]);
 
   // ============ tool cards ============
   const onToolCall = React.useCallback((data: Record<string, unknown>) => {
@@ -609,6 +694,12 @@ export function useAppController() {
         case "reasoning":
           onReasoning((d.text as string) || "");
           break;
+        case "summary_confirm":
+          // Live analysis finished: open the editable 3s confirmation window on
+          // the just-completed analysis block. Cache hits never emit this, so the
+          // window only appears when the user can actually steer a fresh report.
+          onSummaryConfirm((d.cacheKey as string) || "");
+          break;
         case "tool_call":
           producedRef.current = true;
           onToolCall(d);
@@ -652,7 +743,7 @@ export function useAppController() {
           break;
       }
     };
-  }, [onAssistantDelta, onReasoning, onToolCall, onToolResult, ensureTaskPlaceholder, finishPendingTools, refreshContext, toast, showLoading, escalateWait, onTurnEnd, onCapsule, clearLoading, onTurnReset, renderFollowUp]);
+  }, [onAssistantDelta, onReasoning, onToolCall, onToolResult, ensureTaskPlaceholder, finishPendingTools, refreshContext, toast, showLoading, escalateWait, onTurnEnd, onCapsule, clearLoading, onTurnReset, renderFollowUp, onAnalysisDelta, onSummaryConfirm]);
 
   // ============ actions ============
   // sendMessage routes a user input: when a turn is in flight it joins the
@@ -992,6 +1083,8 @@ export function useAppController() {
       setChat((c) => c.map((it) => (it.kind === "reasoning" && it.id === id ? { ...it, collapsed: !it.collapsed } : it))),
     collapseAnalysisItem: (id: string) =>
       setChat((c) => c.map((it) => (it.kind === "analysis" && it.id === id ? { ...it, collapsed: !it.collapsed } : it))),
+    submitSummaryConfirm,
+    editSummary,
     dismissFollowUp: (id: string) =>
       setChat((c) => c.map((it) => (it.kind === "follow_up" && it.id === id ? { ...it, dismissed: true } : it))),
   } as const;

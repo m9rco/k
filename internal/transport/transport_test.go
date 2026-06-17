@@ -292,3 +292,71 @@ func TestInboundCapsuleSelectParsing(t *testing.T) {
 		})
 	}
 }
+
+// TestInboundSummaryConfirmParsing covers the additive summary_confirm inbound
+// type used to release the adapt_to_platform analysis gate, including the
+// edited-vs-default cases that drive cache write-back.
+func TestInboundSummaryConfirmParsing(t *testing.T) {
+	cases := []struct {
+		name     string
+		raw      string
+		wantKey  string
+		wantSumm string
+		wantEdit bool
+	}{
+		{
+			name:     "countdown default (unedited)",
+			raw:      `{"type":"summary_confirm","cacheKey":"abc123","summary":"原始报告","edited":false}`,
+			wantKey:  "abc123",
+			wantSumm: "原始报告",
+			wantEdit: false,
+		},
+		{
+			name:     "user edited summary",
+			raw:      `{"type":"summary_confirm","cacheKey":"grp:deadbeef","summary":"改过的摘要","edited":true}`,
+			wantKey:  "grp:deadbeef",
+			wantSumm: "改过的摘要",
+			wantEdit: true,
+		},
+		{
+			name:     "edited omitted defaults false",
+			raw:      `{"type":"summary_confirm","cacheKey":"k","summary":"s"}`,
+			wantKey:  "k",
+			wantSumm: "s",
+			wantEdit: false,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var msg Inbound
+			if err := json.Unmarshal([]byte(tc.raw), &msg); err != nil {
+				t.Fatalf("unmarshal: %v", err)
+			}
+			if msg.Type != "summary_confirm" {
+				t.Errorf("type = %q, want summary_confirm", msg.Type)
+			}
+			if msg.CacheKey != tc.wantKey {
+				t.Errorf("cacheKey = %q, want %q", msg.CacheKey, tc.wantKey)
+			}
+			if msg.Summary != tc.wantSumm {
+				t.Errorf("summary = %q, want %q", msg.Summary, tc.wantSumm)
+			}
+			if msg.Edited != tc.wantEdit {
+				t.Errorf("edited = %v, want %v", msg.Edited, tc.wantEdit)
+			}
+		})
+	}
+}
+
+// TestInboundUnknownTypeIgnoredFields verifies an old client that never sends
+// the new fields parses cleanly (additive backward compatibility): a plain
+// user_message leaves CacheKey/Summary/Edited at zero values.
+func TestInboundUnknownTypeIgnoredFields(t *testing.T) {
+	var msg Inbound
+	if err := json.Unmarshal([]byte(`{"type":"user_message","text":"hi"}`), &msg); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if msg.CacheKey != "" || msg.Summary != "" || msg.Edited {
+		t.Errorf("legacy message picked up confirm fields: %+v", msg)
+	}
+}

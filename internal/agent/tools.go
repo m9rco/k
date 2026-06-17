@@ -80,6 +80,16 @@ type ToolDeps struct {
 	// NotifyAnalysis sends vision analysis chunks to the collapsible analysis
 	// panel (distinct from regular assistant bubbles). Nil falls back to Notify.
 	NotifyAnalysis func(text string, done bool)
+	// AwaitSummaryConfirm gates adapt_to_platform between producing a live analysis
+	// report and starting AI repaint: it emits a "summary_confirm" signal to the
+	// frontend (so the editable analysis panel starts its 3s countdown) keyed by
+	// cacheKey, then blocks until the user confirms/edits, the countdown expires
+	// (frontend auto-submits the original), or a server safety timeout elapses.
+	// Returns the final summary and whether the user edited it. Nil disables the
+	// gate (adaptation proceeds immediately with the original report), keeping the
+	// degraded / test paths unchanged. Injected by the orchestrator so tools.go
+	// stays transport-free.
+	AwaitSummaryConfirm func(ctx context.Context, cacheKey, original string) (final string, edited bool)
 	// dedup guards against the model emitting the SAME async-task tool call twice
 	// in one turn (parallel tool_calls), which would otherwise start two
 	// duplicate tasks and concatenate two identical acknowledgments into one
@@ -654,13 +664,16 @@ func visionThemeReport(ctx context.Context, d ToolDeps, refIDs []string) string 
 	}
 	// Check cache first — this path requires only the store, not COS/vision. A
 	// report written by the upload prewarm (or a previous adapt) is returned even
-	// when COS/vision are currently unconfigured (e.g. credentials rotated).
+	// when COS/vision are currently unconfigured (e.g. credentials rotated). A cache
+	// hit still opens the editable confirmation window (the user may want to tweak a
+	// previously-analyzed/edited summary before this adaptation); an edit there is
+	// written back to the same key, so the next reuse picks up the latest version.
 	if cached, err := d.Store.GetVisionReport(cacheKey); err == nil && cached != "" {
 		applog.From(ctx).Info().Str("event", "adapt.analysis_cache_hit").Str("key", cacheKey).Int("refs", len(imgs)).Msg("vision report cache hit")
 		if notifyAnalysis != nil {
 			notifyAnalysis(cached, true)
 		}
-		return cached
+		return gateSummaryConfirm(ctx, d, cacheKey, cached)
 	}
 
 	// No cached report — need live publish + analysis. Both publisher and analyzer
@@ -707,7 +720,42 @@ func visionThemeReport(ctx context.Context, d ToolDeps, refIDs []string) string 
 		applog.From(ctx).Warn().Str("event", "adapt.analysis_cache_miss").Err(err).Msg("failed to cache vision report")
 	}
 	applog.From(ctx).Info().Str("event", "adapt.analysis_ok").Str("key", cacheKey).Int("refs", len(imgs)).Int("report_len", len(report)).Msg("vision theme report produced and cached")
-	return report
+
+	// Gate before AI repaint: give the user a chance to edit the summary in the
+	// frontend's 3s confirmation window (shared with the cache-hit path).
+	return gateSummaryConfirm(ctx, d, cacheKey, report)
+}
+
+// gateSummaryConfirm runs the editable-summary confirmation gate shared by both
+// the live-analysis and cache-hit paths: it blocks adapt_to_platform between
+// having a theme report and starting AI repaint so the user can edit the summary
+// in the frontend's 3s window. It returns the final theme text to anchor the
+// adaptation. When the user edits the summary, the edited text is written back to
+// cacheKey's vision_reports entry so this image group's later adaptations/edits
+// reuse the edited version. When no gate hook is injected (tests / transport-less),
+// it returns the original report unchanged. The hook itself emits the
+// "summary_confirm" signal (carrying cacheKey) and blocks with its own safety
+// timeout, so adaptation never hangs.
+func gateSummaryConfirm(ctx context.Context, d ToolDeps, cacheKey, report string) string {
+	if d.AwaitSummaryConfirm == nil {
+		return report
+	}
+	final, edited := d.AwaitSummaryConfirm(ctx, cacheKey, report)
+	final = strings.TrimSpace(final)
+	if final == "" {
+		final = report
+		edited = false
+	}
+	if edited && final != report {
+		// User edited the summary: overwrite the cached report so this image
+		// group's later adaptations/edits reuse the edited version.
+		if err := d.Store.InsertVisionReport(cacheKey, final); err != nil {
+			applog.From(ctx).Warn().Str("event", "adapt.analysis_edit_cache_miss").Err(err).Msg("failed to write back edited vision report")
+		} else {
+			applog.From(ctx).Info().Str("event", "adapt.analysis_edited").Str("key", cacheKey).Int("report_len", len(final)).Msg("edited vision report cached (overwrote prior report)")
+		}
+	}
+	return final
 }
 
 func (d ToolDeps) newAdaptTool() (tool.InvokableTool, error) {

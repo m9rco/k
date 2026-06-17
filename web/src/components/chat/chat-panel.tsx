@@ -4,6 +4,7 @@ import { useApp } from "@/store/context";
 import { BrandMark } from "@/components/brand-mark";
 import { MessageBubble } from "./message-bubble";
 import { ReasoningBlock } from "./reasoning-block";
+import { AnalysisBlock } from "./analysis-block";
 import { ToolCard } from "./tool-card";
 import { CapsuleBubble } from "./capsule-bubble";
 import { FollowUpBubble } from "./follow-up-bubble";
@@ -57,7 +58,7 @@ function Welcome() {
 }
 
 export function ChatPanel({ onboarding = false }: { onboarding?: boolean }) {
-  const { state, collapseReasoningItem, collapseAnalysisItem, capsuleSelect, dismissFollowUp } = useApp();
+  const { state, collapseReasoningItem, collapseAnalysisItem, capsuleSelect, dismissFollowUp, editSummary, submitSummaryConfirm } = useApp();
   const logRef = React.useRef<HTMLDivElement>(null);
 
   // Keep pinned to newest content when already near the bottom.
@@ -88,7 +89,26 @@ export function ChatPanel({ onboarding = false }: { onboarding?: boolean }) {
                   onToggle={() => collapseReasoningItem(it.id)}
                 />
               );
-            if (it.kind === "analysis")
+            if (it.kind === "analysis") {
+              // While the live report awaits the user's 3s confirmation (or is
+              // being edited), render the interactive AnalysisBlock; otherwise the
+              // plain collapsible ReasoningBlock suffices (streaming / settled).
+              if (it.confirming || it.editing)
+                return (
+                  <AnalysisBlock
+                    key={it.id}
+                    text={it.text}
+                    collapsed={it.collapsed}
+                    done={it.done}
+                    confirming={!!it.confirming}
+                    confirmed={!!it.confirmed}
+                    secondsLeft={it.secondsLeft ?? 0}
+                    editing={!!it.editing}
+                    onToggle={() => collapseAnalysisItem(it.id)}
+                    onEdit={() => editSummary(it.id)}
+                    onSubmit={(text, edited) => submitSummaryConfirm(it.id, text, edited)}
+                  />
+                );
               return (
                 <ReasoningBlock
                   key={it.id}
@@ -99,6 +119,7 @@ export function ChatPanel({ onboarding = false }: { onboarding?: boolean }) {
                   label={it.done ? "宣发分析" : "分析中"}
                 />
               );
+            }
             if (it.kind === "capsule")
               return (
                 <CapsuleBubble

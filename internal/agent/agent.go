@@ -82,6 +82,18 @@ type Orchestrator struct {
 	// disables the pre-stage so adaptation falls back to the standard harness.
 	refPublisher   *cos.Uploader
 	visionAnalyzer *vision.Analyzer
+	// summaryConfirms holds the per-(session|cacheKey) channel a gated
+	// adapt_to_platform call waits on after producing a live analysis report. The
+	// inbound "summary_confirm" handler delivers the user's final summary (edited
+	// or countdown-default) here to release the gate before AI repaint begins.
+	summaryConfirms map[string]chan summaryConfirm
+}
+
+// summaryConfirm carries the user's decision from the editable analysis panel's
+// confirmation window back to the gated adapt_to_platform call.
+type summaryConfirm struct {
+	summary string
+	edited  bool
 }
 
 // NewOrchestrator builds the orchestrator from config and backing services. The
@@ -93,22 +105,23 @@ func NewOrchestrator(cfg *config.Config, gen *generation.Service, cr *crop.Servi
 		mc = cfg.ChatTest
 	}
 	return &Orchestrator{
-		model:        newChatModel(mc),
-		cfg:          cfg,
-		models:       usermodel.NewManager(cfg, st),
-		gen:          gen,
-		crop:         cr,
-		video:        vid,
-		crawl:        cw,
-		budget:       cfg.ContextTokenBudget,
-		keepRecent:   6,
-		hub:          hub,
-		store:        st,
-		newID:        newID,
-		windows:      make(map[string]*Window),
-		cancels:      make(map[string]context.CancelFunc),
-		turnMu:       make(map[string]*sync.Mutex),
-		lastProduced: make(map[string]string),
+		model:           newChatModel(mc),
+		cfg:             cfg,
+		models:          usermodel.NewManager(cfg, st),
+		gen:             gen,
+		crop:            cr,
+		video:           vid,
+		crawl:           cw,
+		budget:          cfg.ContextTokenBudget,
+		keepRecent:      6,
+		hub:             hub,
+		store:           st,
+		newID:           newID,
+		windows:         make(map[string]*Window),
+		cancels:         make(map[string]context.CancelFunc),
+		turnMu:          make(map[string]*sync.Mutex),
+		lastProduced:    make(map[string]string),
+		summaryConfirms: make(map[string]chan summaryConfirm),
 	}
 }
 
@@ -277,6 +290,70 @@ func (o *Orchestrator) CancelTurn(sessionID string) {
 	o.mu.Unlock()
 	if cancel != nil {
 		cancel()
+	}
+}
+
+// confirmKey scopes a pending summary confirmation to a session + cache key, so
+// concurrent sessions (or, in theory, two image groups) never cross-deliver.
+func confirmKey(sessionID, cacheKey string) string { return sessionID + "|" + cacheKey }
+
+// awaitSummaryConfirm registers a confirmation channel for (sessionID, cacheKey)
+// and blocks until the frontend delivers the user's decision (confirm, edit, or
+// countdown-default), the turn context is cancelled (user interrupt), or the
+// server safety timeout elapses. It returns the final summary and whether it was
+// edited; on cancel/timeout it returns (original, false) so adaptation proceeds
+// with the grok report rather than hanging. The channel is always unregistered
+// before returning. The 3s countdown lives entirely on the frontend; this 8s
+// timeout is only a backstop for an absent/old client whose confirm never
+// arrives — it sits just above the 3s window so a stalled client costs a few
+// seconds, not a minute (see realtime-transport).
+func (o *Orchestrator) awaitSummaryConfirm(ctx context.Context, sessionID, cacheKey, original string) (string, bool) {
+	key := confirmKey(sessionID, cacheKey)
+	ch := make(chan summaryConfirm, 1)
+	o.mu.Lock()
+	o.summaryConfirms[key] = ch
+	o.mu.Unlock()
+	defer func() {
+		o.mu.Lock()
+		delete(o.summaryConfirms, key)
+		o.mu.Unlock()
+	}()
+
+	// Backstop only for an absent/old client (the real 3s countdown lives on the
+	// frontend). Kept just above the frontend window so a normal confirm always
+	// wins the race; if the client never echoes back, adaptation proceeds in a few
+	// seconds instead of stalling a full minute.
+	const safetyTimeout = 8 * time.Second
+	timer := time.NewTimer(safetyTimeout)
+	defer timer.Stop()
+	select {
+	case c := <-ch:
+		summary := strings.TrimSpace(c.summary)
+		if summary == "" {
+			return original, false
+		}
+		return summary, c.edited
+	case <-ctx.Done():
+		return original, false
+	case <-timer.C:
+		return original, false
+	}
+}
+
+// DeliverSummaryConfirm routes an inbound "summary_confirm" message to the gated
+// adapt_to_platform call waiting on (sessionID, cacheKey). It is non-blocking and
+// a no-op when no call is waiting (stale/duplicate confirm), so a late frontend
+// message after the safety timeout is harmlessly dropped.
+func (o *Orchestrator) DeliverSummaryConfirm(sessionID, cacheKey, summary string, edited bool) {
+	o.mu.Lock()
+	ch := o.summaryConfirms[confirmKey(sessionID, cacheKey)]
+	o.mu.Unlock()
+	if ch == nil {
+		return
+	}
+	select {
+	case ch <- summaryConfirm{summary: summary, edited: edited}:
+	default:
 	}
 }
 
@@ -497,6 +574,20 @@ func (o *Orchestrator) Handle(ctx context.Context, sessionID, userText string, l
 				SessionID: sid,
 				Data:      map[string]any{"text": text, "done": done, "analysis": true},
 			})
+		}
+		// Gate adapt_to_platform between a live analysis report and AI repaint:
+		// emit a summary_confirm signal (carrying the cache key) so the frontend's
+		// editable analysis panel starts its 3s countdown, then block until the
+		// user confirms/edits, the countdown auto-submits, or the safety timeout
+		// elapses. The 3s countdown lives on the frontend; awaitSummaryConfirm only
+		// backstops an absent/old client.
+		deps.AwaitSummaryConfirm = func(ctx context.Context, cacheKey, original string) (string, bool) {
+			o.hub.Send(sid, transport.Event{
+				Type:      transport.EventSummaryConfirm,
+				SessionID: sid,
+				Data:      map[string]any{"cacheKey": cacheKey},
+			})
+			return o.awaitSummaryConfirm(ctx, sid, cacheKey, original)
 		}
 	}
 	tools, err := deps.Tools()

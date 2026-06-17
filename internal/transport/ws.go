@@ -12,7 +12,8 @@ import (
 
 // Inbound is a client→server message received over the WebSocket.
 type Inbound struct {
-	// Type is "user_message", "capsule_select", or "cancel_turn".
+	// Type is "user_message", "capsule_select", "cancel_turn", or
+	// "summary_confirm".
 	Type string `json:"type"`
 	// Text carries a free-form user message.
 	Text string `json:"text,omitempty"`
@@ -39,6 +40,20 @@ type Inbound struct {
 	// Pointer so an omitted field defaults to enabled while an explicit false
 	// disables it.
 	Lossless *bool `json:"lossless,omitempty"`
+	// CacheKey is the vision-report cache key (md5 of a single ref / composite
+	// fingerprint of a group) the server emitted when the editable analysis panel
+	// entered its confirmation window. Echoed back on a "summary_confirm" message
+	// so the server can route the confirmation to the gated adapt_to_platform call
+	// and (when edited) overwrite that key's cached report.
+	CacheKey string `json:"cacheKey,omitempty"`
+	// Summary carries the final marketing-analysis summary text on a
+	// "summary_confirm" message: the user's edited text when Edited is true, else
+	// the original grok report (countdown-expired default).
+	Summary string `json:"summary,omitempty"`
+	// Edited marks whether the user modified the summary in the confirmation
+	// window. True triggers a cache write-back overwriting the grok report; false
+	// (confirm-as-is / countdown default) keeps the original cached report.
+	Edited bool `json:"edited,omitempty"`
 }
 
 // InboundHandler processes a client message for a session. Implementations
