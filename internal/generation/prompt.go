@@ -444,11 +444,15 @@ func extremeRatioHint(genW, genH, dstW, dstH int) string {
 	}
 	switch {
 	case ar >= extremeRatioWidthThreshold:
-		pct := int(math.Round(safeBandFraction(gw, gh, dstW, dstH) * 100))
-		return fmt.Sprintf("This is an ultra-wide panoramic banner that will be cropped to the final wide shape. Compose for a SAFE ZONE: place the main subject, any LOGO and the core marketing copy inside the central horizontal band — roughly the middle %d%% of the height (中央约 %d%% 高度带) — and let ONLY expendable background and scenery fill the top and bottom regions, which may be cropped away. Keep nothing essential near the top or bottom edges.", pct, pct)
+		frac := safeBandFraction(gw, gh, dstW, dstH)
+		pct := int(math.Round(frac * 100))
+		edge := int(math.Round((1 - frac) / 2 * 100))
+		return fmt.Sprintf("CRITICAL FRAMING CONSTRAINT — this image WILL be mechanically center-cropped to an ultra-wide banner: the top %d%% AND bottom %d%% of the height (%d%% total) are DELETED, only the central %d%% horizontal band (中央 %d%% 高度带) survives. This crop is automatic and unavoidable. Therefore: (1) place the ENTIRE main subject, ALL characters' heads and faces, the LOGO and all marketing copy WHOLLY INSIDE that central band — scale them DOWN if needed so they fit with margin to spare; nothing essential may touch or cross the band's edges. (2) Fill the top %d%% and bottom %d%% ONLY with expendable, croppable background, sky, ground or atmosphere — absolutely NO faces, text, logos or subject parts there. Treat the top/bottom strips as throw-away padding. A subject that fills the full frame height WILL be decapitated by the crop.", edge, edge, edge*2, pct, pct, edge, edge)
 	case ar <= 1.0/extremeRatioWidthThreshold:
-		pct := int(math.Round(safeBandFraction(gw, gh, dstW, dstH) * 100))
-		return fmt.Sprintf("This is an ultra-tall vertical strip that will be cropped to the final tall shape. Compose for a SAFE ZONE: place the main subject, any LOGO and the core marketing copy inside the central vertical band — roughly the middle %d%% of the width (中央约 %d%% 宽度带) — and let ONLY expendable background and scenery fill the left and right regions, which may be cropped away. Keep nothing essential near the left or right edges.", pct, pct)
+		frac := safeBandFraction(gw, gh, dstW, dstH)
+		pct := int(math.Round(frac * 100))
+		edge := int(math.Round((1 - frac) / 2 * 100))
+		return fmt.Sprintf("CRITICAL FRAMING CONSTRAINT — this image WILL be mechanically center-cropped to an ultra-tall strip: the left %d%% AND right %d%% of the width (%d%% total) are DELETED, only the central %d%% vertical band (中央 %d%% 宽度带) survives. This crop is automatic and unavoidable. Therefore: (1) place the ENTIRE main subject, ALL characters' faces, the LOGO and all marketing copy WHOLLY INSIDE that central band — scale them DOWN if needed so they fit with margin to spare; nothing essential may touch or cross the band's edges. (2) Fill the left %d%% and right %d%% ONLY with expendable, croppable background or atmosphere — absolutely NO faces, text, logos or subject parts there. Treat the left/right strips as throw-away padding. A subject that fills the full frame width WILL be sliced by the crop.", edge, edge, edge*2, pct, pct, edge, edge)
 	default:
 		return ""
 	}

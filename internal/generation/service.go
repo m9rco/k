@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"image"
 	"log"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -87,6 +88,11 @@ type Service struct {
 	// pixel, when set, runs a fast algorithmic quality check (blur + border fill)
 	// before the AI judge. Wired via SetPixelChecker; nil skips pixel checking.
 	pixel PixelChecker
+	// subject, when set, locates the main subject before an extreme-ratio cover
+	// crop so the crop anchors on the subject rather than the geometric center
+	// (which decapitates an off-center subject on a 5:1/6:1 banner). Wired via
+	// SetSubjectDetector; nil keeps extreme-ratio crops center-anchored.
+	subject SubjectDetector
 
 	// params caches each task's request so a failed product can be retried
 	// without the caller re-supplying inputs (short-term in-memory store, D7).
@@ -156,6 +162,22 @@ type PixelChecker interface {
 	Check(img []byte, mime string) (PixelVerdict, error)
 }
 
+// SubjectDetector locates the main subject's normalized center in a product
+// image so an extreme-ratio cover crop can anchor on the subject. Implemented by
+// internal/vision.SubjectDetector; kept local so generation does not import vision.
+type SubjectDetector interface {
+	Configured() bool
+	Detect(ctx context.Context, img []byte, mime string) (SubjectBox, error)
+}
+
+// SubjectBox mirrors vision.SubjectBox's consumed fields: the subject's
+// normalized center (origin top-left) and a 0-100 confidence.
+type SubjectBox struct {
+	CenterX    float64
+	CenterY    float64
+	Confidence int
+}
+
 // PixelVerdict mirrors vision.PixelVerdict's consumed fields.
 type PixelVerdict struct {
 	Pass    bool
@@ -187,6 +209,17 @@ func (s *Service) SetQualityChecker(q QualityChecker) {
 
 // SetPixelChecker installs the pixel-level pre-filter. nil disables it.
 func (s *Service) SetPixelChecker(p PixelChecker) { s.pixel = p }
+
+// SetSubjectDetector installs the subject locator used to anchor extreme-ratio
+// cover crops on the main subject. Optional: nil (or an unconfigured detector)
+// keeps extreme-ratio crops center-anchored (pre-feature behavior).
+func (s *Service) SetSubjectDetector(d SubjectDetector) {
+	if d == nil || !d.Configured() {
+		s.subject = nil
+		return
+	}
+	s.subject = d
+}
 
 // composeHints builds the regeneration hint string fed back to the image model
 // from a failed verdict: the judge's note plus the flagged reasons.
@@ -763,16 +796,26 @@ func (s *Service) run(ctx context.Context, taskID string, p GenerateParams) {
 			} else {
 				out.Data = data
 			}
-		} else if conv, err := crop.CropBytesWithOptions(out.Data, adaptW, adaptH, crop.Options{Mode: mode}); err != nil {
-			log.Printf("gen.run: task=%s adapt converge to %dx%d (%s) FAILED: %v (keeping provider output)", taskID, adaptW, adaptH, mode, err)
 		} else {
-			out.Data = conv.Data
-			applog.From(ctx).Info().Str("event", "gen.converge").Str("task", taskID).
-				Str("kind", "adapt").
-				Int("gen_w", genW).Int("gen_h", genH).
-				Int("dst_w", adaptW).Int("dst_h", adaptH).
-				Str("mode", string(mode)).
-				Msg("adapt converged to target size")
+			// Non-outpaint convergence (scale / contain / cover). For an extreme-ratio
+			// cover crop, try to anchor on the detected subject so an off-center
+			// subject isn't sliced; everything else (and any detection miss) uses the
+			// mode's default center crop.
+			opts := crop.Options{Mode: mode}
+			if mode == crop.ModeCover {
+				opts = s.coverCropOptions(ctx, taskID, out.Data, out.Mime, genW, genH, adaptW, adaptH)
+			}
+			if conv, err := crop.CropBytesWithOptions(out.Data, adaptW, adaptH, opts); err != nil {
+				log.Printf("gen.run: task=%s adapt converge to %dx%d (%s) FAILED: %v (keeping provider output)", taskID, adaptW, adaptH, opts.Mode, err)
+			} else {
+				out.Data = conv.Data
+				applog.From(ctx).Info().Str("event", "gen.converge").Str("task", taskID).
+					Str("kind", "adapt").
+					Int("gen_w", genW).Int("gen_h", genH).
+					Int("dst_w", adaptW).Int("dst_h", adaptH).
+					Str("mode", string(opts.Mode)).
+					Msg("adapt converged to target size")
+			}
 		}
 	}
 
@@ -985,6 +1028,58 @@ func (s *Service) outpaintConverge(ctx context.Context, taskID string, data []by
 		Int64("fill_ms", time.Since(start).Milliseconds()).
 		Msg("adapt converged to target size via outpaint")
 	return conv.Data, nil
+}
+
+// coverCropOptions decides the cover-crop anchor for a converging adapt product.
+// For an extreme-ratio target (the only case where the crop discards a large
+// fraction of one axis) with a wired subject detector, it runs one vision call
+// to locate the subject and returns ModeFocal anchored on the subject's center
+// along the cropped axis (vertical for wide banners, horizontal for tall
+// strips), holding the other axis at 0.5. For ordinary ratios, a low-confidence
+// detection, a detector error, or no detector, it returns a plain center cover —
+// the deterministic pre-feature behavior, so the result is never worse than today.
+func (s *Service) coverCropOptions(ctx context.Context, taskID string, data []byte, mime string, genW, genH, dstW, dstH int) crop.Options {
+	center := crop.Options{Mode: crop.ModeCover}
+	if s.subject == nil || dstW <= 0 || dstH <= 0 {
+		return center
+	}
+	// Only extreme ratios crop away enough to need subject anchoring; ordinary
+	// near-square/near-target ratios keep the cheap deterministic center crop.
+	ratio := math.Max(float64(dstW)/float64(dstH), float64(dstH)/float64(dstW))
+	if ratio < extremeConvergeRatio {
+		return center
+	}
+
+	detectCtx, cancel := context.WithTimeout(ctx, subjectDetectTimeout)
+	box, err := s.subject.Detect(detectCtx, data, mime)
+	cancel()
+	if err != nil {
+		applog.From(ctx).Info().Str("event", "gen.subject_detect").Str("task", taskID).
+			Bool("anchored", false).Err(err).Msg("subject detect failed; center-cropping")
+		return center
+	}
+	if box.Confidence < subjectConfidenceMin {
+		applog.From(ctx).Info().Str("event", "gen.subject_detect").Str("task", taskID).
+			Bool("anchored", false).Int("confidence", box.Confidence).
+			Float64("center_x", box.CenterX).Float64("center_y", box.CenterY).
+			Msg("subject confidence below threshold; center-cropping")
+		return center
+	}
+
+	// Anchor only on the cropped axis; hold the other at 0.5. A wide banner
+	// (dstW>=dstH) crops vertically → use the subject's CenterY; a tall strip
+	// crops horizontally → use CenterX.
+	opts := crop.Options{Mode: crop.ModeFocal, FocalX: 0.5, FocalY: 0.5}
+	if dstW >= dstH {
+		opts.FocalY = box.CenterY
+	} else {
+		opts.FocalX = box.CenterX
+	}
+	applog.From(ctx).Info().Str("event", "gen.subject_detect").Str("task", taskID).
+		Bool("anchored", true).Int("confidence", box.Confidence).
+		Float64("focal_x", opts.FocalX).Float64("focal_y", opts.FocalY).
+		Msg("anchoring extreme-ratio crop on detected subject")
+	return opts
 }
 
 // decodeDimensions reads an image's pixel dimensions; returns (0,0) if the

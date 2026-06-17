@@ -153,6 +153,19 @@ func run() error {
 		log.Printf("pixel-filter: blur_threshold=%d border_max_ratio=%.2f", cfg.PixelBlurThreshold, cfg.PixelBorderMaxRatio)
 	}
 
+	// Subject locator: for extreme-ratio banners/strips (≥3:1) the cover crop
+	// discards up to half of one axis, so a center crop can decapitate an
+	// off-center subject. When configured (reusing the quality-gate vision
+	// credentials/model — it already understands subject placement) the converge
+	// step runs one vision call to anchor the crop on the detected subject; no
+	// key, low confidence, or any error falls back to the center crop.
+	if sd := vision.NewSubjectDetector(cfg.Quality.BaseURL, cfg.Quality.APIKey, cfg.Quality.Model); sd != nil {
+		genSvc.SetSubjectDetector(subjectDetectorAdapter{sd})
+		log.Printf("subject-locator: %s enabled for extreme-ratio crop anchoring", cfg.Quality.Model)
+	} else {
+		log.Printf("subject-locator: not configured, extreme-ratio crops stay center-anchored")
+	}
+
 	// Image-to-video service (happyhorse). The provider fetches the source image
 	// by public URL, so video requires a COS uploader to publish the local frame
 	// first. Without COS configured the uploader stays nil, Service.Configured()
@@ -553,6 +566,18 @@ type pixelCheckerAdapter struct{ pc *vision.PixelChecker }
 func (a pixelCheckerAdapter) Check(img []byte, mime string) (generation.PixelVerdict, error) {
 	v, err := a.pc.Check(img, mime)
 	return generation.PixelVerdict{Pass: v.Pass, Reasons: v.Reasons, Hints: v.Hints}, err
+}
+
+// subjectDetectorAdapter bridges vision.SubjectDetector to the generation
+// package's local SubjectDetector interface (which uses generation.SubjectBox),
+// keeping the generation package free of a vision import.
+type subjectDetectorAdapter struct{ d *vision.SubjectDetector }
+
+func (a subjectDetectorAdapter) Configured() bool { return a.d.Configured() }
+
+func (a subjectDetectorAdapter) Detect(ctx context.Context, img []byte, mime string) (generation.SubjectBox, error) {
+	b, err := a.d.Detect(ctx, img, mime)
+	return generation.SubjectBox{CenterX: b.CenterX, CenterY: b.CenterY, Confidence: b.Confidence}, err
 }
 
 func (a taskAnnouncer) AnnounceTask(sessionID, taskID, kind string, count int) {

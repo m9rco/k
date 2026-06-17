@@ -48,6 +48,13 @@ const (
 	// ModeRect crops a caller-supplied normalized region of the source first,
 	// then scales that region to the target box (cover-fit within the rect).
 	ModeRect Mode = "rect"
+	// ModeFocal behaves like cover but crops toward an arbitrary focal point
+	// (Options.FocalX/FocalY ∈ [0,1]) instead of a nine-grid anchor. Used by
+	// content-aware extreme-ratio adaptation: a vision detector reports the main
+	// subject's normalized center, and the cover crop keeps that point in frame
+	// rather than blindly center-cropping (which decapitates an off-center
+	// subject on a 5:1/6:1 banner). Fractions out of range are clamped.
+	ModeFocal Mode = "focal"
 	// ModeOutpaint is NOT a pixel operation this package performs — CropImage
 	// rejects it. It is a signal from platform adaptation's convergeMode that the
 	// AI product's aspect ratio diverges so far from the target that padding would
@@ -90,6 +97,11 @@ type Options struct {
 	Anchor Anchor
 	// Rect is required (and only used) when Mode == ModeRect.
 	Rect *Rect
+	// FocalX/FocalY are the normalized crop focal point ∈ [0,1], used only when
+	// Mode == ModeFocal. The zero value (0,0) would crop toward the top-left, so
+	// callers must set these explicitly (0.5,0.5 reproduces a center cover crop).
+	FocalX float64
+	FocalY float64
 	// Background fills the padded area in ModeContain. Nil means transparent
 	// (which JPEG encoding flattens to white).
 	Background color.Color
@@ -131,6 +143,19 @@ func CoverCrop(src image.Image, targetW, targetH int) (image.Image, error) {
 // coverCropAnchored scales src to cover the target box, then crops the overflow
 // toward the given anchor (center keeps the middle, top keeps the top, etc.).
 func coverCropAnchored(src image.Image, targetW, targetH int, anchor Anchor) (image.Image, error) {
+	fx, fy, ok := anchorFraction(anchor)
+	if !ok {
+		return nil, fmt.Errorf("invalid anchor %q", anchor)
+	}
+	return coverCropFraction(src, targetW, targetH, fx, fy)
+}
+
+// coverCropFraction scales src to cover the target box, then crops the overflow
+// toward an arbitrary focal point (fx, fy) ∈ [0,1], where 0 keeps the left/top
+// edge and 1 keeps the right/bottom edge. The nine-grid anchors are the discrete
+// special cases (center = 0.5,0.5); content-aware cropping passes a detected
+// subject center directly. Out-of-range fractions are clamped to [0,1].
+func coverCropFraction(src image.Image, targetW, targetH int, fx, fy float64) (image.Image, error) {
 	if targetW <= 0 || targetH <= 0 {
 		return nil, fmt.Errorf("invalid target size %dx%d", targetW, targetH)
 	}
@@ -139,9 +164,15 @@ func coverCropAnchored(src image.Image, targetW, targetH int, anchor Anchor) (im
 	if srcW == 0 || srcH == 0 {
 		return nil, fmt.Errorf("empty source image")
 	}
-	fx, fy, ok := anchorFraction(anchor)
-	if !ok {
-		return nil, fmt.Errorf("invalid anchor %q", anchor)
+	if fx < 0 {
+		fx = 0
+	} else if fx > 1 {
+		fx = 1
+	}
+	if fy < 0 {
+		fy = 0
+	} else if fy > 1 {
+		fy = 1
 	}
 
 	// Scale factor that makes the source cover the target in both dimensions.
@@ -262,6 +293,8 @@ func CropImage(src image.Image, targetW, targetH int, opts Options) (image.Image
 			anchor = AnchorCenter
 		}
 		return coverCropAnchored(src, targetW, targetH, anchor)
+	case ModeFocal:
+		return coverCropFraction(src, targetW, targetH, opts.FocalX, opts.FocalY)
 	case ModeContain:
 		return ContainCrop(src, targetW, targetH, opts.Background)
 	case ModeScale:

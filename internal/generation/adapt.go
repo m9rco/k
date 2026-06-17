@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"math"
+	"time"
 
 	"gameasset/internal/config"
 	"gameasset/internal/crop"
@@ -205,6 +206,17 @@ const convergeTolerance = 0.18
 // passes of drift. A deterministic cover is zero extra AI, zero randomness, and
 // batch-stable. See design D1.
 const extremeConvergeRatio = gptImage2MaxRatio
+
+// subjectConfidenceMin is the minimum detector confidence (0-100) at/above which
+// a detected subject center is trusted to anchor an extreme-ratio cover crop.
+// Below it (or on any detector error) the crop falls back to a center anchor —
+// the deterministic pre-feature behavior, never worse than today.
+const subjectConfidenceMin = 60
+
+// subjectDetectTimeout bounds the extra vision call that locates the subject
+// before an extreme-ratio cover crop, so a slow detector degrades to a center
+// crop instead of stalling the adapt pipeline.
+const subjectDetectTimeout = 20 * time.Second
 
 // convergeMode picks how an adaptation product is converged to the exact target
 // size. A non-empty pin (from the size catalog) wins outright; otherwise the

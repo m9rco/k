@@ -32,9 +32,10 @@ func TestSafeBandFraction(t *testing.T) {
 // TestExtremeRatioHint asserts the safe-zone cue carries the dynamic central
 // percentage and the right axis wording, and is empty for ordinary ratios.
 func TestExtremeRatioHint(t *testing.T) {
-	// 6:1 banner, generated at the 3:1 clamp → central 约 50% 高度带.
+	// 6:1 banner, generated at the 3:1 clamp → central 50% 高度带, with the
+	// hard-constraint framing (deleted edges, decapitation warning).
 	h61 := extremeRatioHint(3008, 1008, 1008, 168)
-	for _, sub := range []string{"中央", "约 50%", "高度带", "background", "cropped"} {
+	for _, sub := range []string{"中央 50%", "高度带", "DELETED", "throw-away", "decapitated"} {
 		if !strings.Contains(h61, sub) {
 			t.Errorf("6:1 hint missing %q: %s", sub, h61)
 		}
@@ -43,24 +44,24 @@ func TestExtremeRatioHint(t *testing.T) {
 		t.Errorf("6:1 banner hint should not mention 宽度带: %s", h61)
 	}
 
-	// 4:1 banner → central 约 75% 高度带 (band grows as ratio relaxes).
+	// 4:1 banner → central 75% 高度带 (band grows as ratio relaxes).
 	h41 := extremeRatioHint(3008, 1008, 1120, 280)
-	if !strings.Contains(h41, "约 75%") {
-		t.Errorf("4:1 hint should say 约 75%%: %s", h41)
+	if !strings.Contains(h41, "中央 75%") {
+		t.Errorf("4:1 hint should say 中央 75%%: %s", h41)
 	}
 
-	// Extreme vertical strip → symmetric 中央 N% 宽度带 wording.
+	// Extreme vertical strip → symmetric 中央 N% 宽度带 wording, left+right edges.
 	hStrip := extremeRatioHint(1008, 3008, 168, 1008)
-	for _, sub := range []string{"中央", "宽度带", "left and right"} {
+	for _, sub := range []string{"中央", "宽度带", "left", "right", "sliced"} {
 		if !strings.Contains(hStrip, sub) {
 			t.Errorf("strip hint missing %q: %s", sub, hStrip)
 		}
 	}
 
-	// Unknown gen dims fall back to the 3:1 clamp → 6:1 still yields 约 50%.
+	// Unknown gen dims fall back to the 3:1 clamp → 6:1 still yields 中央 50%.
 	hFallback := extremeRatioHint(0, 0, 1008, 168)
-	if !strings.Contains(hFallback, "约 50%") {
-		t.Errorf("fallback (no gen dims) 6:1 hint should say 约 50%%: %s", hFallback)
+	if !strings.Contains(hFallback, "中央 50%") {
+		t.Errorf("fallback (no gen dims) 6:1 hint should say 中央 50%%: %s", hFallback)
 	}
 
 	// Ordinary ratios get no safe-zone cue.
@@ -88,7 +89,7 @@ func TestBuildPromptExtremeSafeZone(t *testing.T) {
 	if err != nil {
 		t.Fatalf("BuildPrompt extreme: %v", err)
 	}
-	for _, sub := range []string{"中央", "约 50%", "THEME:", "PRESERVE:", "MODIFY:"} {
+	for _, sub := range []string{"中央 50%", "THEME:", "PRESERVE:", "MODIFY:"} {
 		if !strings.Contains(got, sub) {
 			t.Errorf("extreme prompt missing %q:\n%s", sub, got)
 		}
