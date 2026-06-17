@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"gameasset/internal/config"
@@ -27,6 +28,26 @@ type Service struct {
 	// byID is a flattened index of every size in the catalog, keyed by its
 	// globally-unique id, with the owning channel recorded for result labelling.
 	byID map[string]sizeRef
+
+	// byCollapsed maps an id with its middle asset-type segment dropped
+	// ("channel.slug") back to the full id. Catalog ids are "channel.assetType.slug";
+	// the agent sometimes transcribes a size id into a tool call while dropping the
+	// middle segment, so this lets resolveID recover the intended size. Keys that
+	// would collide (two full ids collapsing to the same "channel.slug") are removed
+	// so an ambiguous abbreviation falls through to a hard error instead of guessing.
+	byCollapsed map[string]string
+}
+
+// collapseID drops the middle asset-type segment of a "channel.assetType.slug"
+// id, yielding "channel.slug". For ids that are not exactly three dot-separated
+// segments it returns "" (no collapsed form), so only the well-formed catalog
+// shape participates in tolerant matching.
+func collapseID(id string) string {
+	parts := strings.SplitN(id, ".", 3)
+	if len(parts) != 3 || parts[0] == "" || parts[1] == "" || parts[2] == "" {
+		return ""
+	}
+	return parts[0] + "." + parts[2]
 }
 
 // sizeRef is a catalog size plus the channel/asset-type it belongs to. The
@@ -61,6 +82,21 @@ func NewService(channels []config.Channel, assetDir string, st *store.Store, new
 				s.byID[sz.ID] = sizeRef{size: sz, channelID: ch.ID, channelName: ch.Name, assetTypeKey: at.Type, assetTypeName: at.Name}
 			}
 		}
+	}
+	// Build the collapsed-id index from the now-complete byID set. A collapsed key
+	// that maps to more than one full id is ambiguous, so we drop it (recorded as
+	// "") — resolveID then refuses to guess and surfaces the unknown-id error.
+	s.byCollapsed = make(map[string]string)
+	for fullID := range s.byID {
+		ck := collapseID(fullID)
+		if ck == "" || ck == fullID {
+			continue
+		}
+		if existing, seen := s.byCollapsed[ck]; seen && existing != fullID {
+			s.byCollapsed[ck] = "" // ambiguous: refuse to resolve
+			continue
+		}
+		s.byCollapsed[ck] = fullID
 	}
 	return s
 }
@@ -131,10 +167,25 @@ type SizeSpec struct {
 	ConvergeMode string
 }
 
+// resolveID maps a requested size id to its catalog entry. It first tries an
+// exact match, then tolerates the agent dropping the middle "assetType" segment
+// (e.g. "taptap.video-cover-900x500" → "taptap.banner.video-cover-900x500") by
+// matching on the collapsed "channel.slug" form. Ambiguous abbreviations and
+// genuinely unknown ids both return ok=false.
+func (s *Service) resolveID(id string) (sizeRef, bool) {
+	if ref, ok := s.byID[id]; ok {
+		return ref, true
+	}
+	if full, ok := s.byCollapsed[id]; ok && full != "" {
+		return s.byID[full], true
+	}
+	return sizeRef{}, false
+}
+
 // SizeSpec looks up a single size by its globally-unique id. ok is false when
 // no size carries that id.
 func (s *Service) SizeSpec(sizeID string) (SizeSpec, bool) {
-	ref, ok := s.byID[sizeID]
+	ref, ok := s.resolveID(sizeID)
 	if !ok {
 		return SizeSpec{}, false
 	}
@@ -244,7 +295,7 @@ func (s *Service) resolveSizeIDs(ids []string) ([]sizeRef, error) {
 	}
 	out := make([]sizeRef, 0, len(ids))
 	for _, id := range ids {
-		ref, ok := s.byID[id]
+		ref, ok := s.resolveID(id)
 		if !ok {
 			return nil, fmt.Errorf("unknown size id %q", id)
 		}

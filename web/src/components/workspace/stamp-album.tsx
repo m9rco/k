@@ -1,6 +1,6 @@
 import * as React from "react";
-import { Download, Eye, RefreshCw } from "lucide-react";
-import type { Asset, Channel, SizePreset } from "@/lib/types";
+import { Download, Eye, RefreshCw, AlertTriangle, Sparkles } from "lucide-react";
+import type { Asset, Channel, SizePreset, Task } from "@/lib/types";
 import { useApp } from "@/store/context";
 import { Button } from "@/components/ui/button";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
@@ -57,15 +57,40 @@ export function StampAlbum({ onPreview }: { onPreview: (a: Asset) => void }) {
     return map;
   }, [assets]);
 
+  // sizeId → its adapt task, split by lifecycle. A task carries sizeId from the
+  // task_queued event (Start/Retry); the album maps it back to the slot since it
+  // submits over the agent WS and never sees the taskId. activeBySize keeps the
+  // spinner alive when local `pending` was lost (page reload); failedBySize drives
+  // the failure affordance. A non-terminal task wins over a terminal one for the
+  // same size (a retry re-runs the SAME taskId, so collisions are transient).
+  const { activeBySize, failedBySize } = React.useMemo(() => {
+    const active = new Map<string, Task>();
+    const failed = new Map<string, Task>();
+    for (const t of state.tasks.values()) {
+      if (!t.sizeId) continue;
+      if (t.status === "running" || t.status === "queued") active.set(t.sizeId, t);
+      else if (t.status === "failed") failed.set(t.sizeId, t);
+    }
+    // An active retry supersedes a stale failure for the same slot.
+    for (const sid of active.keys()) failed.delete(sid);
+    return { activeBySize: active, failedBySize: failed };
+  }, [state.tasks]);
+
+  // Clear local `pending` once a slot resolves either way (filled OR failed) so a
+  // failed task stops the spinner and reveals the retry affordance instead of
+  // hanging forever. (Originally only `filledBySize` cleared it — the gap that
+  // left failed slots spinning with no recovery path.)
   React.useEffect(() => {
     setPending((prev) => {
       if (!prev.size) return prev;
       const next = new Set(prev);
       let changed = false;
-      for (const sid of prev) { if (filledBySize.has(sid)) { next.delete(sid); changed = true; } }
+      for (const sid of prev) {
+        if (filledBySize.has(sid) || failedBySize.has(sid)) { next.delete(sid); changed = true; }
+      }
       return changed ? next : prev;
     });
-  }, [filledBySize]);
+  }, [filledBySize, failedBySize]);
 
   const toggleRef = (id: string) => {
     setRefIds((prev) =>
@@ -116,6 +141,17 @@ export function StampAlbum({ onPreview }: { onPreview: (a: Asset) => void }) {
       ref,
       [sz.id],
     );
+  };
+
+  // Retry a failed slot in place. The backend re-runs the SAME taskId (reusing its
+  // cached params + sizeId), so the slot re-binds automatically; we only need to
+  // flip it back to the spinner. Falls back to a fresh adapt if the failed task is
+  // gone (e.g. cleared), so the slot is never a dead end.
+  const retrySlot = (ch: Channel, sz: SizePreset) => {
+    const failed = failedBySize.get(sz.id);
+    setPending((prev) => new Set([...prev, sz.id]));
+    if (failed) app.retryTask(failed.id);
+    else regenerateSlot(ch, sz);
   };
 
   return (
@@ -203,9 +239,13 @@ export function StampAlbum({ onPreview }: { onPreview: (a: Asset) => void }) {
                       key={sz.id}
                       size={sz}
                       asset={filledBySize.get(sz.id)}
-                      generating={pending.has(sz.id)}
+                      generating={pending.has(sz.id) || activeBySize.has(sz.id)}
+                      failed={failedBySize.has(sz.id)}
+                      failReason={failedBySize.get(sz.id)?.error}
+                      hasRefs={hasRefs}
                       onPreview={onPreview}
                       onRegenerate={() => regenerateSlot(ch, sz)}
+                      onRetry={() => retrySlot(ch, sz)}
                     />
                   ))
                 )}
@@ -218,12 +258,16 @@ export function StampAlbum({ onPreview }: { onPreview: (a: Asset) => void }) {
   );
 }
 
-function Slot({ size, asset, generating, onPreview, onRegenerate }: {
+function Slot({ size, asset, generating, failed, failReason, hasRefs, onPreview, onRegenerate, onRetry }: {
   size: SizePreset;
   asset?: Asset;
   generating: boolean;
+  failed: boolean;
+  failReason?: string;
+  hasRefs: boolean;
   onPreview: (a: Asset) => void;
   onRegenerate: () => void;
+  onRetry: () => void;
 }) {
   if (!size.producible) {
     return (
@@ -262,10 +306,33 @@ function Slot({ size, asset, generating, onPreview, onRegenerate }: {
       </div>
     );
   }
+  if (failed) {
+    return (
+      <button
+        type="button"
+        onClick={onRetry}
+        title={failReason ? `生成失败：${failReason}（点击重试）` : "生成失败，点击重试"}
+        className="group flex aspect-square flex-col items-center justify-center gap-1.5 rounded-lg border border-danger/40 bg-danger/5 px-2 transition-all duration-200 ease-out hover:border-danger/60 hover:bg-danger/10"
+      >
+        <AlertTriangle className="size-4 text-danger/80" />
+        <span className="text-[10px] text-danger/90">生成失败</span>
+        <span className="flex items-center gap-1 text-[9px] text-fg-mute group-hover:text-fg-dim">
+          <RefreshCw className="size-2.5" /> 重试
+        </span>
+      </button>
+    );
+  }
   return (
-    <div className="flex aspect-square flex-col items-center justify-center gap-1 rounded-lg border border-dashed border-line bg-bg-elev/50 px-2">
+    <button
+      type="button"
+      onClick={onRegenerate}
+      disabled={!hasRefs}
+      title={hasRefs ? `生成：${size.name}` : "请先选择参考图"}
+      className="group flex aspect-square flex-col items-center justify-center gap-1 rounded-lg border border-dashed border-line bg-bg-elev/50 px-2 transition-all duration-200 ease-out hover:border-accent/50 hover:bg-accent/5 disabled:cursor-not-allowed disabled:hover:border-line disabled:hover:bg-bg-elev/50"
+    >
+      <Sparkles className="size-3.5 text-fg-mute transition-colors group-hover:text-accent group-disabled:text-fg-mute" />
       <span className="text-center text-[10px] leading-tight text-fg-dim">{size.name}</span>
       <span className="text-[9px] tabular-nums text-fg-mute">{size.width}×{size.height}</span>
-    </div>
+    </button>
   );
 }

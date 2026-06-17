@@ -60,6 +60,10 @@ export interface Task {
   // can distinguish "补全完成" from "补全跳过" (not every size needs outpaint — only
   // extreme-ratio reshapes; near-ratio sizes converge by plain scale).
   outpainted?: boolean;
+  // sizeId binds an adapt task to its platform-size slot. Client-only: derived
+  // from the task_queued event (the /tasks API does not return it) so the stamp
+  // album can map a task_failed back to the slot and offer an in-place retry.
+  sizeId?: string;
 }
 
 export interface ContextState {

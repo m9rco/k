@@ -96,7 +96,20 @@ type Service struct {
 	// user-initiated cancel can abort the underlying provider HTTP request and
 	// stop the pipeline before it persists an orphan product.
 	cancels map[string]context.CancelFunc
+
+	// submitLimiter paces provider submissions so a batch (e.g. adapting one
+	// source to 16 sizes, which fans out into 16 concurrent run goroutines)
+	// arrives staggered rather than all at once. nil disables throttling.
+	submitLimiter *rateLimiter
 }
+
+// defaultSubmitRate is the steady-state provider-submission ceiling: at most 3
+// generation calls start per second. Burst is 3 so up to three queued tasks can
+// fire back-to-back, after which submissions are spaced ~1/3s apart.
+const (
+	defaultSubmitRate  = 3.0
+	defaultSubmitBurst = 3
+)
 
 // TaskAnnouncer broadcasts a task-created notice to a session's live clients.
 // kind is one of "generate" / "video" / "search" so the frontend can pick a
@@ -227,6 +240,8 @@ func NewService(gen generator, st *store.Store, broker *transport.TaskBroker, as
 		newID:    newID,
 		params:   make(map[string]GenerateParams),
 		cancels:  make(map[string]context.CancelFunc),
+
+		submitLimiter: newRateLimiter(defaultSubmitRate, defaultSubmitBurst),
 	}
 }
 
@@ -335,7 +350,14 @@ func (s *Service) Start(ctx context.Context, p GenerateParams) (string, error) {
 	if s.announce != nil {
 		s.announce.AnnounceTask(p.SessionID, taskID, "generate", 1)
 	}
-	s.broker.Publish(taskID, transport.EventTaskQueued, p.SessionID, map[string]string{"intent": string(p.Slots.Kind)})
+	// Carry the adapt sizeId so the stamp-album view can map this task back to its
+	// slot — it submits over the agent WS and never sees the taskId directly, so a
+	// later task_failed must be correlated by sizeId to surface a retry affordance.
+	queued := map[string]string{"intent": string(p.Slots.Kind)}
+	if p.AdaptSizeID != "" {
+		queued["sizeId"] = p.AdaptSizeID
+	}
+	s.broker.Publish(taskID, transport.EventTaskQueued, p.SessionID, queued)
 
 	runCtx, cancel := context.WithCancel(context.WithoutCancel(ctx))
 	s.mu.Lock()
@@ -379,7 +401,13 @@ func (s *Service) Retry(ctx context.Context, sessionID, taskID string) error {
 	// task_failed) and the retry's live events never reach the client — the UI
 	// would freeze on the old failure even though the re-run actually executes.
 	s.broker.Reset(taskID)
-	s.broker.Publish(taskID, transport.EventTaskQueued, sessionID, map[string]string{"intent": string(p.Slots.Kind), "retry": "true"})
+	// Re-carry the sizeId (see Start) plus the retry marker so the album re-binds
+	// this stream's events to the same slot after Reset wiped the prior history.
+	requeued := map[string]string{"intent": string(p.Slots.Kind), "retry": "true"}
+	if p.AdaptSizeID != "" {
+		requeued["sizeId"] = p.AdaptSizeID
+	}
+	s.broker.Publish(taskID, transport.EventTaskQueued, sessionID, requeued)
 
 	runCtx, cancel := context.WithCancel(context.WithoutCancel(ctx))
 	s.mu.Lock()
@@ -629,6 +657,14 @@ func (s *Service) run(ctx context.Context, taskID string, p GenerateParams) {
 	if p.PreOutpaintData != nil {
 		out = Output{Data: p.PreOutpaintData, Mime: "image/png"}
 	} else {
+		// Stagger provider submissions: a batch adapt fans out into many
+		// concurrent run goroutines that would otherwise call the image provider
+		// in the same instant. Block here until a token frees up (≤3/s). A
+		// cancelled task aborts the wait and exits without a provider call.
+		if err := s.submitLimiter.Wait(ctx); err != nil {
+			log.Printf("gen.run: task=%s aborted while waiting for submit slot: %v", taskID, err)
+			return
+		}
 		genStart := time.Now()
 		// Log the full prompt sent to the image model so interactions are auditable.
 		// Also log the resolved generation size: for gpt-image-2 this is the legal

@@ -110,7 +110,7 @@ export function useAppController() {
             if (!old) return [t.id, t] as const;
             const forward = (STATUS_ORD[t.status] ?? 0) >= (STATUS_ORD[old.status] ?? 0);
             const base = forward ? t : { ...t, status: old.status, progress: old.progress };
-            return [t.id, { ...base, count: base.count ?? old.count, note: base.note ?? old.note, outpainted: old.outpainted, review: old.review, reviewReason: old.reviewReason }] as const;
+            return [t.id, { ...base, count: base.count ?? old.count, note: base.note ?? old.note, outpainted: old.outpainted, review: old.review, reviewReason: old.reviewReason, sizeId: base.sizeId ?? old.sizeId }] as const;
           }),
         );
         // Merge assets (spread existing + incoming) so a stale concurrent refresh
@@ -145,6 +145,10 @@ export function useAppController() {
   const applyTaskEvent = React.useCallback(
     (sid: string, taskId: string, type: string, data: Record<string, unknown>) => {
       const progress = typeof data.progress === "number" ? data.progress : undefined;
+      // sizeId rides the task_queued event for adapt tasks (Start/Retry). Capture
+      // it so a later task_failed can be mapped back to the stamp-album slot; once
+      // set it persists via the {...cur} spread across subsequent events.
+      const sizeId = typeof data.sizeId === "string" ? data.sizeId : undefined;
       // Capture the task kind from the last committed state BEFORE the enqueued
       // setState below — the task_done auto-select needs it, and reading it after
       // setState would race the not-yet-applied update.
@@ -152,6 +156,7 @@ export function useAppController() {
       setState((s) => {
         const tasks = new Map(s.tasks);
         const cur: Task = tasks.get(taskId) || { id: taskId, kind: "generate", status: "queued", progress: 0 };
+        if (sizeId && cur.sizeId !== sizeId) cur.sizeId = sizeId;
         if (type === "task_queued") tasks.set(taskId, { ...cur, status: "queued" });
         else if (type === "task_running" || type === "task_progress")
           tasks.set(taskId, { ...cur, status: "running", progress: progress ?? cur.progress });

@@ -314,6 +314,22 @@ func newCropService(t *testing.T) (*Service, *store.Store, string) {
 				{ID: "test.wide", Name: "Wide", Width: 400, Height: 100, Orientation: "landscape", Producible: true},
 				{ID: "test.video", Name: "Video", Width: 1280, Height: 720, Orientation: "landscape", Producible: false},
 			},
+		}, {
+			// Three-segment ids ("channel.assetType.slug") mirror the real catalog
+			// shape so collapsed-id resolution can be exercised. "test.banner.cover"
+			// and "test.icon.cover" collapse to the same "test.cover" key (ambiguous).
+			Type: "banner",
+			Name: "横幅",
+			Sizes: []config.Size{
+				{ID: "test.banner.promo-900x500", Name: "Promo", Width: 900, Height: 500, Orientation: "landscape", Producible: true},
+				{ID: "test.banner.cover", Name: "Banner Cover", Width: 900, Height: 600, Orientation: "landscape", Producible: true},
+			},
+		}, {
+			Type: "icon",
+			Name: "图标",
+			Sizes: []config.Size{
+				{ID: "test.icon.cover", Name: "Icon Cover", Width: 512, Height: 512, Orientation: "square", Producible: true},
+			},
 		}},
 	}}
 	var counter int
@@ -396,5 +412,39 @@ func TestResolveSizeIDsErrors(t *testing.T) {
 	}
 	if len(refs) != 2 || refs[0].size.ID != "test.square" || refs[1].channelID != "test" {
 		t.Errorf("unexpected refs: %+v", refs)
+	}
+}
+
+// TestResolveCollapsedSizeID covers the agent dropping the middle asset-type
+// segment of a "channel.assetType.slug" id: the collapsed "channel.slug" form
+// must resolve back to the full catalog id, while an abbreviation that is
+// ambiguous (collapses from >1 real id) stays a hard error.
+func TestResolveCollapsedSizeID(t *testing.T) {
+	svc, _, _ := newCropService(t)
+
+	// Unique collapse: "test.promo-900x500" → "test.banner.promo-900x500".
+	if ref, ok := svc.resolveID("test.promo-900x500"); !ok || ref.size.ID != "test.banner.promo-900x500" {
+		t.Errorf("collapsed id did not resolve to full id: ok=%v ref=%+v", ok, ref)
+	}
+	// resolveSizeIDs surfaces the canonical full id, not the abbreviation.
+	got, err := svc.resolveSizeIDs([]string{"test.promo-900x500"})
+	if err != nil {
+		t.Fatalf("resolveSizeIDs(collapsed): %v", err)
+	}
+	if len(got) != 1 || got[0].size.ID != "test.banner.promo-900x500" {
+		t.Errorf("canonical id not returned: %+v", got)
+	}
+	// Exact id still wins and is unaffected.
+	if ref, ok := svc.resolveID("test.banner.promo-900x500"); !ok || ref.size.ID != "test.banner.promo-900x500" {
+		t.Errorf("exact id regressed: ok=%v ref=%+v", ok, ref)
+	}
+	// Ambiguous collapse ("test.cover" ← test.banner.cover / test.icon.cover)
+	// must NOT resolve.
+	if _, ok := svc.resolveID("test.cover"); ok {
+		t.Error("ambiguous collapsed id should not resolve")
+	}
+	// SizeSpec goes through the same resolver.
+	if spec, ok := svc.SizeSpec("test.promo-900x500"); !ok || spec.SizeID != "test.banner.promo-900x500" {
+		t.Errorf("SizeSpec collapsed resolution failed: ok=%v spec=%+v", ok, spec)
 	}
 }
