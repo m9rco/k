@@ -21,11 +21,12 @@ export function WorkspacePanel() {
   const { state } = app;
   const [preview, setPreview] = React.useState<Asset | null>(null);
   const [cropFor, setCropFor] = React.useState<string[] | null>(null);
-  // View mode: grid (show-all, default) or timeline (production line). Persisted
-  // in sessionStorage so a reload keeps the user's choice.
+  // View mode: stamp (集邮册/宣发清单, default), grid (show-all), or timeline
+  // (production line). Persisted in sessionStorage so a reload keeps the user's
+  // choice; absent any stored value we land on the stamp album.
   const [view, setView] = React.useState<ViewMode>(() => {
     const v = typeof sessionStorage !== "undefined" ? sessionStorage.getItem(VIEW_KEY) : null;
-    return v === "timeline" ? "timeline" : v === "stamp" ? "stamp" : "grid";
+    return v === "timeline" ? "timeline" : v === "grid" ? "grid" : "stamp";
   });
   const pickView = (v: ViewMode) => {
     setView(v);
