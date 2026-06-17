@@ -7,14 +7,16 @@ import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import * as api from "@/lib/api";
 import { cn } from "@/lib/utils";
 
-// StampAlbum — 集邮册视图：参考图 + 全渠道尺寸插槽，支持一键按渠道批量生成。
+const MAX_REFS = 16;
+
+// StampAlbum — 集邮册视图：参考图行（上传图多选，最多16张）+ 全渠道尺寸插槽。
 export function StampAlbum({ onPreview }: { onPreview: (a: Asset) => void }) {
   const app = useApp();
   const { state } = app;
   const [channels, setChannels] = React.useState<Channel[]>([]);
   const [group, setGroup] = React.useState("all");
-  const [refId, setRefId] = React.useState<string | null>(null);
-  // pendingSizeIds: sizeIds dispatched by "生成全部" not yet arrived as assets
+  // refIds: ordered list of selected upload asset ids (sent to gpt-image-2)
+  const [refIds, setRefIds] = React.useState<string[]>([]);
   const [pending, setPending] = React.useState<Set<string>>(new Set());
 
   React.useEffect(() => {
@@ -23,16 +25,25 @@ export function StampAlbum({ onPreview }: { onPreview: (a: Asset) => void }) {
 
   const assets = React.useMemo(() => [...state.assets.values()], [state.assets]);
 
-  // Auto-select newest generated/upload asset as reference (only if current refId gone)
+  // uploads in creation order (the source pool for the reference row)
+  const uploads = React.useMemo(
+    () => assets
+      .filter((a) => a.kind === "upload")
+      .sort((a, b) => (a.createdAt ? Date.parse(a.createdAt) : 0) - (b.createdAt ? Date.parse(b.createdAt) : 0)),
+    [assets],
+  );
+
+  // Auto-add new uploads to refIds (up to MAX_REFS); remove stale ids
   React.useEffect(() => {
-    setRefId((prev) => {
-      if (prev && state.assets.has(prev)) return prev;
-      const newest = assets
-        .filter((a) => a.kind === "generated" || a.kind === "upload")
-        .sort((a, b) => (b.createdAt ? Date.parse(b.createdAt) : 0) - (a.createdAt ? Date.parse(a.createdAt) : 0))[0];
-      return newest?.id ?? null;
+    setRefIds((prev) => {
+      const valid = prev.filter((id) => state.assets.has(id));
+      const incoming = uploads
+        .map((a) => a.id)
+        .filter((id) => !valid.includes(id));
+      const next = [...valid, ...incoming].slice(0, MAX_REFS);
+      return next.length === prev.length && next.every((id, i) => id === prev[i]) ? prev : next;
     });
-  }, [assets]);
+  }, [uploads, state.assets]);
 
   // sizeId → newest filled asset
   const filledBySize = React.useMemo(() => {
@@ -46,7 +57,6 @@ export function StampAlbum({ onPreview }: { onPreview: (a: Asset) => void }) {
     return map;
   }, [assets]);
 
-  // Remove pending sizeIds that have now been filled
   React.useEffect(() => {
     setPending((prev) => {
       if (!prev.size) return prev;
@@ -56,6 +66,14 @@ export function StampAlbum({ onPreview }: { onPreview: (a: Asset) => void }) {
       return changed ? next : prev;
     });
   }, [filledBySize]);
+
+  const toggleRef = (id: string) => {
+    setRefIds((prev) =>
+      prev.includes(id)
+        ? prev.filter((x) => x !== id)
+        : prev.length < MAX_REFS ? [...prev, id] : prev,
+    );
+  };
 
   const groups = React.useMemo(() => {
     const set = new Set<string>();
@@ -68,11 +86,11 @@ export function StampAlbum({ onPreview }: { onPreview: (a: Asset) => void }) {
     [channels, group],
   );
 
-  const refAsset = refId ? state.assets.get(refId) : undefined;
-  const refCandidates = assets.filter((a) => a.kind === "generated" || a.kind === "upload");
+  const hasRefs = refIds.length > 0;
+  const ref = hasRefs ? (refIds.length === 1 ? refIds[0] : refIds) : undefined;
 
   const generateChannel = (ch: Channel) => {
-    if (!refId) return;
+    if (!hasRefs) return;
     const sizeIds = ch.assetTypes
       .flatMap((at) => at.sizes)
       .filter((s) => s.producible && !filledBySize.has(s.id) && !pending.has(s.id))
@@ -84,47 +102,65 @@ export function StampAlbum({ onPreview }: { onPreview: (a: Asset) => void }) {
       .join("、");
     setPending((prev) => new Set([...prev, ...sizeIds]));
     app.sendMessage(
-      `把这张图适配到以下平台尺寸，保留主体与核心宣发意图、不改变原图逻辑：${labels}`,
-      refId,
+      `把${refIds.length > 1 ? `这 ${refIds.length} 张参考图` : "这张图"}适配到以下平台尺寸，保留主体与核心宣发意图、不改变原图逻辑：${labels}`,
+      ref,
       sizeIds,
     );
   };
 
   const regenerateSlot = (ch: Channel, sz: SizePreset) => {
-    if (!refId) return;
+    if (!hasRefs) return;
     setPending((prev) => new Set([...prev, sz.id]));
     app.sendMessage(
-      `把这张图适配到：${ch.name} · ${sz.name}，保留主体与核心宣发意图`,
-      refId,
+      `把${refIds.length > 1 ? `这 ${refIds.length} 张参考图` : "这张图"}适配到：${ch.name} · ${sz.name}，保留主体与核心宣发意图`,
+      ref,
       [sz.id],
     );
   };
 
   return (
     <div className="flex h-full min-h-0 flex-col gap-4">
-      {/* 参考图区 */}
-      <div className="flex items-center gap-3 rounded-lg border border-line bg-bg-elev px-4 py-3">
-        {refAsset ? (
-          <>
-            <img src={refAsset.url} alt="参考图" className="h-16 w-24 rounded-md object-cover" />
-            <div className="flex flex-col gap-0.5">
-              <span className="text-xs font-medium text-fg">参考图</span>
-              {refAsset.width && <span className="text-[11px] tabular-nums text-fg-mute">{refAsset.width}×{refAsset.height}</span>}
-            </div>
-            {refCandidates.length > 1 && (
-              <select
-                className="ml-auto rounded-md border border-line bg-bg px-2 py-1 text-xs text-fg"
-                value={refId ?? ""}
-                onChange={(e) => setRefId(e.target.value)}
-              >
-                {refCandidates.map((a, i) => (
-                  <option key={a.id} value={a.id}>图 {i + 1}</option>
-                ))}
-              </select>
-            )}
-          </>
+      {/* 参考图行：上传图一行排开，点击切换选中，最多16张 */}
+      <div className="rounded-lg border border-line bg-bg-elev px-4 py-3">
+        <div className="mb-2 flex items-center gap-2">
+          <span className="text-xs font-medium text-fg">参考图</span>
+          {uploads.length > 0 && (
+            <span className="text-[11px] text-fg-mute">
+              已选 {refIds.length}/{Math.min(uploads.length, MAX_REFS)}
+            </span>
+          )}
+        </div>
+        {uploads.length === 0 ? (
+          <p className="text-xs text-fg-mute">请先上传图片作为参考图，再使用集邮册</p>
         ) : (
-          <p className="text-xs text-fg-mute">请先上传或生成一张参考图，再使用集邮册</p>
+          <div className="flex gap-2 overflow-x-auto pb-1">
+            {uploads.map((a) => {
+              const selected = refIds.includes(a.id);
+              const disabled = !selected && refIds.length >= MAX_REFS;
+              return (
+                <button
+                  key={a.id}
+                  type="button"
+                  disabled={disabled}
+                  onClick={() => toggleRef(a.id)}
+                  className={cn(
+                    "relative size-16 shrink-0 overflow-hidden rounded-md border-2 transition-all duration-150",
+                    selected
+                      ? "border-accent shadow-[0_0_0_2px] shadow-accent/30"
+                      : "border-transparent opacity-60 hover:opacity-90",
+                    disabled && "cursor-not-allowed opacity-30",
+                  )}
+                >
+                  <img src={a.url} alt="" className="h-full w-full object-cover" />
+                  {selected && (
+                    <span className="absolute bottom-0.5 right-0.5 flex h-4 w-4 items-center justify-center rounded-full bg-accent text-[9px] font-bold text-white">
+                      {refIds.indexOf(a.id) + 1}
+                    </span>
+                  )}
+                </button>
+              );
+            })}
+          </div>
         )}
       </div>
 
@@ -143,7 +179,7 @@ export function StampAlbum({ onPreview }: { onPreview: (a: Asset) => void }) {
       <div className="flex-1 space-y-8 overflow-y-auto pb-6">
         {visible.map((ch) => {
           const allSizes = ch.assetTypes.flatMap((at) => at.sizes.filter((s) => s.producible));
-          const canGenerate = allSizes.some((s) => !filledBySize.has(s.id) && !pending.has(s.id));
+          const canGenerate = hasRefs && allSizes.some((s) => !filledBySize.has(s.id) && !pending.has(s.id));
           return (
             <section key={ch.id}>
               <div className="mb-3 flex items-center gap-2">
@@ -153,11 +189,11 @@ export function StampAlbum({ onPreview }: { onPreview: (a: Asset) => void }) {
                   size="sm"
                   variant="ghost"
                   className="ml-auto text-xs"
-                  disabled={!refId || !canGenerate}
-                  title={!refId ? "请先选择参考图" : !canGenerate ? "全部已生成" : undefined}
+                  disabled={!canGenerate}
+                  title={!hasRefs ? "请先选择参考图" : undefined}
                   onClick={() => generateChannel(ch)}
                 >
-                  {canGenerate ? "生成全部 →" : "全部已生成"}
+                  {hasRefs && !canGenerate ? "全部已生成" : "生成全部 →"}
                 </Button>
               </div>
               <div className="grid grid-cols-[repeat(auto-fill,minmax(110px,1fr))] gap-2">
@@ -197,7 +233,6 @@ function Slot({ size, asset, generating, onPreview, onRegenerate }: {
       </div>
     );
   }
-
   if (generating) {
     return (
       <div className="flex aspect-square flex-col items-center justify-center gap-1.5 rounded-lg border border-dashed border-accent/40 bg-accent/5">
@@ -206,22 +241,18 @@ function Slot({ size, asset, generating, onPreview, onRegenerate }: {
       </div>
     );
   }
-
   if (asset) {
     return (
       <div className="group relative aspect-square overflow-hidden rounded-lg border border-line">
         <img src={asset.url} alt={size.name} className="h-full w-full object-cover" />
-        <div className={cn(
-          "absolute inset-0 flex items-end justify-center gap-1.5 bg-black/50 p-2",
-          "opacity-0 transition-opacity duration-150 group-hover:opacity-100",
-        )}>
-          <button onClick={() => onPreview(asset)} className="grid size-7 place-items-center rounded-md bg-white/15 text-white backdrop-blur-sm hover:bg-white/25 transition-colors">
+        <div className="absolute inset-0 flex items-end justify-center gap-1.5 bg-black/50 p-2 opacity-0 transition-opacity duration-150 group-hover:opacity-100">
+          <button onClick={() => onPreview(asset)} className="grid size-7 place-items-center rounded-md bg-white/15 text-white backdrop-blur-sm transition-colors hover:bg-white/25">
             <Eye className="size-3.5" />
           </button>
-          <a href={asset.url} download className="grid size-7 place-items-center rounded-md bg-white/15 text-white backdrop-blur-sm hover:bg-white/25 transition-colors">
+          <a href={asset.url} download className="grid size-7 place-items-center rounded-md bg-white/15 text-white backdrop-blur-sm transition-colors hover:bg-white/25">
             <Download className="size-3.5" />
           </a>
-          <button onClick={onRegenerate} className="grid size-7 place-items-center rounded-md bg-white/15 text-white backdrop-blur-sm hover:bg-white/25 transition-colors">
+          <button onClick={onRegenerate} className="grid size-7 place-items-center rounded-md bg-white/15 text-white backdrop-blur-sm transition-colors hover:bg-white/25">
             <RefreshCw className="size-3.5" />
           </button>
         </div>
@@ -231,8 +262,6 @@ function Slot({ size, asset, generating, onPreview, onRegenerate }: {
       </div>
     );
   }
-
-  // empty
   return (
     <div className="flex aspect-square flex-col items-center justify-center gap-1 rounded-lg border border-dashed border-line bg-bg-elev/50 px-2">
       <span className="text-center text-[10px] leading-tight text-fg-dim">{size.name}</span>
