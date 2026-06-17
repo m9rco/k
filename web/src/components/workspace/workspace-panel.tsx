@@ -1,6 +1,7 @@
 import * as React from "react";
-import { Download, Trash2, CheckCheck, Crop, LayoutGrid, GitCommitVertical } from "lucide-react";
+import { Download, Trash2, CheckCheck, LayoutGrid, GitCommitVertical, Stamp } from "lucide-react";
 import type { Asset } from "@/lib/types";
+import { StampAlbum } from "./stamp-album";
 import { useApp } from "@/store/context";
 import { Button } from "@/components/ui/button";
 import { BrandMark } from "@/components/brand-mark";
@@ -12,7 +13,7 @@ import { buildTimeline, assetLabels } from "@/lib/timeline";
 import { cn } from "@/lib/utils";
 import * as api from "@/lib/api";
 
-type ViewMode = "grid" | "timeline";
+type ViewMode = "grid" | "timeline" | "stamp";
 const VIEW_KEY = "gas_workspace_view";
 
 export function WorkspacePanel() {
@@ -24,7 +25,7 @@ export function WorkspacePanel() {
   // in sessionStorage so a reload keeps the user's choice.
   const [view, setView] = React.useState<ViewMode>(() => {
     const v = typeof sessionStorage !== "undefined" ? sessionStorage.getItem(VIEW_KEY) : null;
-    return v === "timeline" ? "timeline" : "grid";
+    return v === "timeline" ? "timeline" : v === "stamp" ? "stamp" : "grid";
   });
   const pickView = (v: ViewMode) => {
     setView(v);
@@ -89,16 +90,19 @@ export function WorkspacePanel() {
           >
             <GitCommitVertical className="size-3.5" />
           </button>
+          <button
+            type="button"
+            title="集邮册（宣发清单）"
+            onClick={() => pickView("stamp")}
+            className={cn("grid size-6 place-items-center rounded transition-colors", view === "stamp" ? "bg-bg-elev-2 text-fg" : "text-fg-mute hover:text-fg")}
+          >
+            <Stamp className="size-3.5" />
+          </button>
         </div>
         <div className="ml-auto flex items-center gap-1.5">
           {state.assets.size > 0 && (
             <Button variant="ghost" size="sm" onClick={() => (allSelected ? app.clearSelection() : app.selectAll())}>
               <CheckCheck className="size-3.5" /> {allSelected ? "取消全选" : "全选"}
-            </Button>
-          )}
-          {state.selected.size > 0 && (
-            <Button variant="ghost" size="sm" onClick={() => setCropFor([...state.selected])}>
-              <Crop className="size-3.5" /> 批量切尺寸
             </Button>
           )}
           {state.selected.size > 0 && (
@@ -129,7 +133,9 @@ export function WorkspacePanel() {
       </div>
 
       <div className="flex-1 overflow-y-auto px-5 py-4">
-        {isEmpty ? (
+        {view === "stamp" ? (
+          <StampAlbum onPreview={setPreview} />
+        ) : isEmpty ? (
           <div className="h-full" />
         ) : view === "timeline" ? (
           <Timeline
