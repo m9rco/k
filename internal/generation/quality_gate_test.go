@@ -134,7 +134,7 @@ func TestQualityGateFaultOutpaintSkipsRepaint(t *testing.T) {
 	svc, st, _, _ := newAdaptService(t)
 	prov := &countingProvider{name: "p", out: Output{Data: makePNG(400, 300), Mime: "image/png"}}
 	svc.gen = NewFailoverGenerator(prov, nil)
-	// Outpainter produces a wide PNG for the extreme banner size.
+	// Outpainter produces a wide PNG for the medium-ratio banner (2:1 → outpaint).
 	outpainter := &countingProvider{name: "op", out: Output{Data: makePNG(1920, 640), Mime: "image/png"}}
 	svc.SetOutpainter(outpainter)
 	checker := &stubChecker{verdicts: []QualityVerdict{
@@ -142,7 +142,7 @@ func TestQualityGateFaultOutpaintSkipsRepaint(t *testing.T) {
 	}}
 	svc.SetQualityChecker(checker)
 
-	outcomes, err := svc.AdaptToPlatform(context.Background(), "s", []string{"src"}, []string{"extreme.banner.1920x320"}, false, nil, "theme")
+	outcomes, err := svc.AdaptToPlatform(context.Background(), "s", []string{"src"}, []string{"medium.banner.1600x800"}, false, nil, "theme")
 	if err != nil {
 		t.Fatal(err)
 	}

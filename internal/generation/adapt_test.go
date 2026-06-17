@@ -78,8 +78,12 @@ var testCatalog = map[string]crop.SizeSpec{
 	"flip.portrait.720x1280":   {SizeID: "flip.portrait.720x1280", ChannelID: "ch", ChannelName: "TestCh", AssetTypeName: "Story", Width: 720, Height: 1280, Orientation: "portrait", Producible: true},
 	"flip.square.512x512":      {SizeID: "flip.square.512x512", ChannelID: "ch", ChannelName: "TestCh", AssetTypeName: "Icon", Width: 512, Height: 512, Orientation: "square", Producible: true},
 	"nonprod.video":            {SizeID: "nonprod.video", ChannelID: "ch", ChannelName: "TestCh", AssetTypeName: "Video", Width: 1920, Height: 1080, Orientation: "landscape", Producible: false},
-	// extreme aspect ratio: triggers outpaint path (log-ratio diff >> 0.18)
+	// extreme aspect ratio: target ratio ≥ extremeConvergeRatio → deterministic
+	// cover path (never outpaint), regardless of the gen product's ratio.
 	"extreme.banner.1920x320": {SizeID: "extreme.banner.1920x320", ChannelID: "ch", ChannelName: "TestCh", AssetTypeName: "Banner", Width: 1920, Height: 320, Orientation: "landscape", Producible: true},
+	// medium ratio gap (2:1 target vs 4:3 gen output): dstRatio < extreme threshold
+	// but log-ratio gap >> 0.18 → triggers the outpaint convergence path.
+	"medium.banner.1600x800": {SizeID: "medium.banner.1600x800", ChannelID: "ch", ChannelName: "TestCh", AssetTypeName: "Banner", Width: 1600, Height: 800, Orientation: "landscape", Producible: true},
 	// same 4:3 ratio as gen output (400×300): never triggers outpaint (diff=0)
 	"same.ratio.800x600": {SizeID: "same.ratio.800x600", ChannelID: "ch", ChannelName: "TestCh", AssetTypeName: "Banner", Width: 800, Height: 600, Orientation: "landscape", Producible: true},
 }
@@ -354,17 +358,25 @@ func TestConvergeMode(t *testing.T) {
 		{"contain", 1536, 1024, 1280, 320, crop.ModeContain, "pin contain on extreme target"},
 		{"cover", 1024, 1024, 1024, 1024, crop.ModeCover, "pin cover on identical ratio"},
 		{"outpaint", 1024, 1024, 1024, 1024, crop.ModeOutpaint, "pin outpaint wins outright"},
+		{"scale", 1008, 336, 1008, 168, crop.ModeScale, "pin scale on extreme target wins over auto cover"},
 		// Auto: close ratios rescale (scale).
 		{"", 1536, 1024, 1280, 720, crop.ModeScale, "3:2 product → 16:9 target (close)"},
 		{"", 1024, 1024, 1080, 1080, crop.ModeScale, "square → square"},
-		// Auto: extreme gap outpaints (AI extends the scene to the new ratio).
-		{"", 1536, 1024, 1280, 320, crop.ModeOutpaint, "3:2 product → 4:1 banner (far)"},
-		{"", 1024, 1536, 1080, 1920, crop.ModeScale, "2:3 product → 9:16 (close)"},
+		// Auto: extreme TARGET ratio (≥3:1) → deterministic cover, never outpaint.
+		{"", 1008, 336, 1008, 168, crop.ModeCover, "6:1 banner target → cover"},
+		{"", 1008, 336, 1008, 202, crop.ModeCover, "5:1 banner target → cover"},
+		{"", 1120, 373, 1120, 280, crop.ModeCover, "4:1 banner target → cover"},
+		{"", 336, 1008, 168, 1008, crop.ModeCover, "1:6 vertical strip target → cover (symmetric)"},
+		{"", 1024, 1024, 1280, 320, crop.ModeCover, "1:1 product → 4:1 extreme target → cover (not outpaint)"},
+		// Auto: medium gap but target ratio < extreme threshold → outpaint.
+		{"", 1024, 1024, 1280, 640, crop.ModeOutpaint, "1:1 product → 2:1 target (medium gap, legal ratio)"},
+		// 临界: just under 3:1 with matching gen → scale (no extreme, gap tiny).
+		{"", 1488, 512, 1440, 496, crop.ModeScale, "~2.9:1 matched gen → scale (below extreme)"},
 		// Invalid dims fall back to scale.
 		{"", 0, 1024, 1280, 720, crop.ModeScale, "zero genW"},
 		{"", 1536, 1024, 1280, 0, crop.ModeScale, "zero dstH"},
-		// Unknown pin string is ignored → auto.
-		{"bogus", 1536, 1024, 1280, 320, crop.ModeOutpaint, "unknown pin → auto outpaint"},
+		// Unknown pin string is ignored → auto (extreme target → cover).
+		{"bogus", 1536, 1024, 1280, 320, crop.ModeCover, "unknown pin → auto cover on extreme target"},
 	}
 	for _, c := range cases {
 		got := convergeMode(c.pin, c.genW, c.genH, c.dstW, c.dstH)
@@ -390,8 +402,8 @@ func TestResolveAndConvergeAgree(t *testing.T) {
 		{720, 1280, crop.ModeScale, "9:16 same-ratio → scale"},
 		{512, 512, crop.ModeScale, "square icon → scale (downsample)"},
 		{900, 600, crop.ModeScale, "3:2 cover → scale"},
-		{1120, 280, crop.ModeOutpaint, "4:1 banner (clamped 3:1 gen) → outpaint"},
-		{1008, 168, crop.ModeOutpaint, "6:1 strip (clamped 3:1 gen) → outpaint"},
+		{1120, 280, crop.ModeCover, "4:1 banner (extreme target) → cover"},
+		{1008, 168, crop.ModeCover, "6:1 strip (extreme target) → cover"},
 		{2732, 2048, crop.ModeScale, "iOS 4:3 (>2K) → scale (upsample)"},
 	}
 	for _, c := range cases {

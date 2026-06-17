@@ -2,6 +2,7 @@ package generation
 
 import (
 	"fmt"
+	"math"
 	"regexp"
 	"strings"
 )
@@ -275,7 +276,7 @@ func BuildPrompt(slots Slots, palette []PaletteColor) (string, error) {
 			b.WriteString(placement)
 			b.WriteString(". ")
 		}
-		if hint := extremeRatioHint(slots.TargetWidth, slots.TargetHeight); hint != "" {
+		if hint := extremeRatioHint(slots.GenWidth, slots.GenHeight, slots.TargetWidth, slots.TargetHeight); hint != "" {
 			b.WriteString(hint)
 			b.WriteString(" ")
 		}
@@ -379,28 +380,75 @@ func assetTypeGuide(key string) string {
 }
 
 // extremeRatioWidthThreshold is the long:short aspect ratio at/above which a
-// target counts as an extreme banner/strip. gpt-image-2 clamps generation to
-// 3:1 (resolveGptImage2Size), so a 4:1+ target can never be generated at its
-// true ratio — the prompt must coach the model to compose for the wide format
-// inside the clamped frame so the later outpaint has well-placed content to
-// extend, not a centered subject with dead sides.
-const extremeRatioWidthThreshold = 3.0
+// target counts as an extreme banner/strip. It is sourced from gptImage2MaxRatio
+// (the 3:1 generation clamp) so this prompt-side threshold and the converge-side
+// extremeConvergeRatio are the same constant: a target at/above it can never be
+// generated at its true ratio, so the prompt must coach the model to compose for
+// the final narrow canvas inside the clamped frame — placing subject/logo/copy in
+// a central safe band so the later deterministic cover crops only background, not
+// the subject.
+const extremeRatioWidthThreshold = gptImage2MaxRatio
 
-// extremeRatioHint returns a composition cue when the target is an extreme
-// banner (≥3:1) or strip (≤1:3), nudging gpt-image-2 to keep the subject
-// centered with clean, continuable background toward the long edges. Empty for
-// ordinary ratios. Mirrors the "降维打击" guidance: a master image whose
-// composition survives the ratio clamp + outpaint without breaking.
-func extremeRatioHint(w, h int) string {
-	if w <= 0 || h <= 0 {
+// safeBandFraction returns the central fraction (0,1] of the generated canvas that
+// survives a cover crop from the generation ratio to the target ratio — i.e. the
+// safe band the subject must stay inside. keepFrac ≈ genRatio / dstRatio, where
+// both ratios are long:short (so the result is symmetric for banners and strips):
+// a 3:1 gen cover-cropped to a 6:1 target keeps the central 50% of the long-axis-
+// perpendicular dimension; to a 4:1 target, ~75%. Rounded to a 5% grid (models
+// reason better about coarse fractions than precise percentages) and clamped to
+// [0.25, 0.95] so the cue stays sane even at pathological ratios. Returns 0 for
+// any non-positive dimension.
+func safeBandFraction(genW, genH, dstW, dstH int) float64 {
+	if genW <= 0 || genH <= 0 || dstW <= 0 || dstH <= 0 {
+		return 0
+	}
+	genRatio := math.Max(float64(genW)/float64(genH), float64(genH)/float64(genW))
+	dstRatio := math.Max(float64(dstW)/float64(dstH), float64(dstH)/float64(dstW))
+	if dstRatio <= genRatio {
+		return 1 // target no more extreme than gen — nothing is cropped away
+	}
+	frac := genRatio / dstRatio
+	// Round to the nearest 5% grid.
+	frac = math.Round(frac*20) / 20
+	if frac < 0.25 {
+		frac = 0.25
+	}
+	if frac > 0.95 {
+		frac = 0.95
+	}
+	return frac
+}
+
+// extremeRatioHint returns a safe-zone composition cue when the target is an
+// extreme banner (≥3:1) or strip (≤1:3). Because gpt-image-2 clamps generation to
+// 3:1, an extreme target is generated narrower than its final shape and converged
+// by a deterministic cover crop — so the model must keep the subject, logo and
+// copy inside the central band that survives that crop (computed by
+// safeBandFraction), leaving only croppable background toward the cropped edges.
+// genW/genH are the resolved generation dims (0 falls back to assuming the 3:1
+// clamp). Empty for ordinary ratios. See design D2.
+func extremeRatioHint(genW, genH, dstW, dstH int) string {
+	if dstW <= 0 || dstH <= 0 {
 		return ""
 	}
-	ar := float64(w) / float64(h)
+	ar := float64(dstW) / float64(dstH)
+	// Fall back to the 3:1 clamp when gen dims are unknown, so the percentage is
+	// still computable (and matches what the resolver would produce).
+	gw, gh := genW, genH
+	if gw <= 0 || gh <= 0 {
+		if ar >= 1 {
+			gw, gh = 3, 1
+		} else {
+			gw, gh = 1, 3
+		}
+	}
 	switch {
 	case ar >= extremeRatioWidthThreshold:
-		return "This is an ultra-wide panoramic banner. Use a landscape banner composition: keep the main subject centered, and let the background and scene elements extend cleanly toward the far left and far right so the wide format reads as one continuous scene with no dead space."
+		pct := int(math.Round(safeBandFraction(gw, gh, dstW, dstH) * 100))
+		return fmt.Sprintf("This is an ultra-wide panoramic banner that will be cropped to the final wide shape. Compose for a SAFE ZONE: place the main subject, any LOGO and the core marketing copy inside the central horizontal band — roughly the middle %d%% of the height (中央约 %d%% 高度带) — and let ONLY expendable background and scenery fill the top and bottom regions, which may be cropped away. Keep nothing essential near the top or bottom edges.", pct, pct)
 	case ar <= 1.0/extremeRatioWidthThreshold:
-		return "This is an ultra-tall vertical strip. Use a portrait column composition: keep the main subject centered, and let the background and scene elements extend cleanly toward the top and bottom so the tall format reads as one continuous scene with no dead space."
+		pct := int(math.Round(safeBandFraction(gw, gh, dstW, dstH) * 100))
+		return fmt.Sprintf("This is an ultra-tall vertical strip that will be cropped to the final tall shape. Compose for a SAFE ZONE: place the main subject, any LOGO and the core marketing copy inside the central vertical band — roughly the middle %d%% of the width (中央约 %d%% 宽度带) — and let ONLY expendable background and scenery fill the left and right regions, which may be cropped away. Keep nothing essential near the left or right edges.", pct, pct)
 	default:
 		return ""
 	}
@@ -442,7 +490,7 @@ func buildOutpaintPrompt(genW, genH, dstW, dstH int) string {
 	} else {
 		b.WriteString("EXTEND the existing scene outward to fill the new frame, seamlessly continuing the scenery. ")
 	}
-	if hint := extremeRatioHint(dstW, dstH); hint != "" {
+	if hint := extremeRatioHint(genW, genH, dstW, dstH); hint != "" {
 		b.WriteString(hint)
 		b.WriteString(" ")
 	}

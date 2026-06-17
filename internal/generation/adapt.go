@@ -193,16 +193,34 @@ func orientationOf(w, h int) string {
 // gpt-image-2 size enum.
 const convergeTolerance = 0.18
 
+// extremeConvergeRatio is the target long:short aspect ratio at/above which
+// convergence MUST take the deterministic cover crop rather than an AI outpaint.
+// It is sourced from gptImage2MaxRatio (the 3:1 generation clamp) so the two
+// thresholds stay the same constant: once a target's own ratio reaches 3:1, the
+// generation step has necessarily clamped to 3:1 and CANNOT have matched the
+// target ratio, so the convergence gap is large by construction. At that point an
+// outpaint is worse than useless — the outpainter's size enum doesn't cover
+// extreme ratios (a 6:1 target comes back closer to 2.36:1, i.e. NARROWER than
+// the 3:1 input), so its extension axis fights the crop axis and stacks two AI
+// passes of drift. A deterministic cover is zero extra AI, zero randomness, and
+// batch-stable. See design D1.
+const extremeConvergeRatio = gptImage2MaxRatio
+
 // convergeMode picks how an adaptation product is converged to the exact target
 // size. A non-empty pin (from the size catalog) wins outright; otherwise the
-// mode is auto-selected by the log-ratio gap between the provider output and the
-// target. Any zero/invalid dimension falls back to scale (never crops blindly).
+// mode is auto-selected from the target's own ratio and the log-ratio gap between
+// the provider output and the target. Any zero/invalid dimension falls back to
+// scale (never crops blindly).
 //
-// Auto selection:
-//   - gap ≤ convergeTolerance → ModeScale (imperceptible stretch to exact size)
-//   - gap >  convergeTolerance → ModeOutpaint (AI extends the scene to the new
-//     ratio; the generation service falls back to ModeContain when no outpainter
-//     is wired, so a band-padded result is the worst case, never a sliced subject)
+// Auto selection (priority order):
+//   - dstRatio ≥ extremeConvergeRatio → ModeCover (extreme banner/strip: the gen
+//     step was clamped to 3:1 and can't match the target, so converge by a
+//     deterministic crop — no outpaint, no drift; design D1)
+//   - gap > convergeTolerance → ModeOutpaint (target ratio is legal & gen-matchable
+//     but the product diverged; AI extends the scene to the new ratio. The
+//     generation service falls back to ModeContain when no outpainter is wired, so
+//     a band-padded result is the worst case, never a sliced subject)
+//   - else → ModeScale (imperceptible stretch to exact size)
 func convergeMode(pin string, genW, genH, dstW, dstH int) crop.Mode {
 	switch crop.Mode(pin) {
 	case crop.ModeContain:
@@ -216,6 +234,14 @@ func convergeMode(pin string, genW, genH, dstW, dstH int) crop.Mode {
 	}
 	if genW <= 0 || genH <= 0 || dstW <= 0 || dstH <= 0 {
 		return crop.ModeScale
+	}
+	// Extreme-ratio档: judged on the TARGET's own long:short ratio (symmetric for
+	// banners and strips), independent of the gen product — once the target itself
+	// is ≥3:1 the gen step was clamped and outpaint can't help. Placed before the
+	// outpaint gap check so it wins for extreme targets.
+	dstRatio := math.Max(float64(dstW)/float64(dstH), float64(dstH)/float64(dstW))
+	if dstRatio >= extremeConvergeRatio {
+		return crop.ModeCover
 	}
 	diff := math.Abs(math.Log(float64(genW)/float64(genH)) - math.Log(float64(dstW)/float64(dstH)))
 	if diff > convergeTolerance {
