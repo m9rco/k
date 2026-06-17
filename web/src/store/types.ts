@@ -26,6 +26,7 @@ export type ChatItem =
       confirmed?: boolean; // user submitted / countdown expired — panel disabled
       editing?: boolean; // user opened the inline editor (countdown paused)
       secondsLeft?: number; // countdown remaining; undefined once paused (editing)
+      reanalyzing?: boolean; // fresh grok analysis in progress (disables submit)
     }
   | { kind: "tool"; id: string; tool: ToolCardData }
   | { kind: "capsule"; id: string; question: string; options: CapsuleOption[]; answered: boolean }

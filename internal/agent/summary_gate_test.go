@@ -13,7 +13,7 @@ import (
 // newGateOrch builds a bare orchestrator with just the maps the summary-confirm
 // gate touches, so the tests exercise await/deliver without a full agent wiring.
 func newGateOrch() *Orchestrator {
-	return &Orchestrator{summaryConfirms: make(map[string]chan summaryConfirm)}
+	return &Orchestrator{summaryGates: make(map[string]*summaryGate)}
 }
 
 // TestAwaitSummaryConfirmDelivered covers the happy path: a confirmation arrives
@@ -31,7 +31,7 @@ func TestAwaitSummaryConfirmDelivered(t *testing.T) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		got, edited = o.awaitSummaryConfirm(context.Background(), sid, key, "原始报告")
+		got, edited = o.awaitSummaryConfirm(context.Background(), sid, key, "原始报告", nil)
 	}()
 
 	// Wait for registration so the deliver isn't dropped as a no-op.
@@ -44,7 +44,7 @@ func TestAwaitSummaryConfirmDelivered(t *testing.T) {
 	}
 	// Channel must be unregistered after return.
 	o.mu.Lock()
-	_, still := o.summaryConfirms[confirmKey(sid, key)]
+	_, still := o.summaryGates[confirmKey(sid, key)]
 	o.mu.Unlock()
 	if still {
 		t.Error("confirm channel not unregistered after return")
@@ -61,7 +61,7 @@ func TestAwaitSummaryConfirmCancelled(t *testing.T) {
 	var got string
 	var edited bool
 	go func() {
-		got, edited = o.awaitSummaryConfirm(ctx, "s2", "k2", "原始报告")
+		got, edited = o.awaitSummaryConfirm(ctx, "s2", "k2", "原始报告", nil)
 		close(done)
 	}()
 	waitForPending(t, o, "s2", "k2")
@@ -86,7 +86,7 @@ func TestAwaitSummaryConfirmEmptyFallsBackToOriginal(t *testing.T) {
 	var got string
 	var edited bool
 	go func() {
-		got, edited = o.awaitSummaryConfirm(context.Background(), sid, key, "原始报告")
+		got, edited = o.awaitSummaryConfirm(context.Background(), sid, key, "原始报告", nil)
 		close(done)
 	}()
 	waitForPending(t, o, sid, key)
@@ -126,11 +126,11 @@ func TestGateSummaryConfirmEditWritesBack(t *testing.T) {
 	d := ToolDeps{
 		Store: st,
 		// Simulate the user editing the summary in the confirmation window.
-		AwaitSummaryConfirm: func(_ context.Context, _ string, _ string) (string, bool) {
+		AwaitSummaryConfirm: func(_ context.Context, _ string, _ string, _ func(context.Context) (string, error)) (string, bool) {
 			return "编辑后的报告", true
 		},
 	}
-	final := gateSummaryConfirm(context.Background(), d, key, "原始报告")
+	final := gateSummaryConfirm(context.Background(), d, key, "原始报告", nil)
 	if final != "编辑后的报告" {
 		t.Fatalf("final theme = %q, want 编辑后的报告", final)
 	}
@@ -159,11 +159,11 @@ func TestGateSummaryConfirmDefaultKeepsCache(t *testing.T) {
 	d := ToolDeps{
 		Store: st,
 		// Countdown default: returns the original, not edited.
-		AwaitSummaryConfirm: func(_ context.Context, _ string, original string) (string, bool) {
+		AwaitSummaryConfirm: func(_ context.Context, _ string, original string, _ func(context.Context) (string, error)) (string, bool) {
 			return original, false
 		},
 	}
-	final := gateSummaryConfirm(context.Background(), d, key, "原始报告")
+	final := gateSummaryConfirm(context.Background(), d, key, "原始报告", nil)
 	if final != "原始报告" {
 		t.Fatalf("final theme = %q, want 原始报告", final)
 	}
@@ -183,18 +183,53 @@ func TestGateSummaryConfirmNoHookPassthrough(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = st.Close() })
 
-	final := gateSummaryConfirm(context.Background(), ToolDeps{Store: st}, "k-nohook", "原始报告")
+	final := gateSummaryConfirm(context.Background(), ToolDeps{Store: st}, "k-nohook", "原始报告", nil)
 	if final != "原始报告" {
 		t.Fatalf("final theme = %q, want 原始报告 (passthrough)", final)
 	}
 }
 
-// waitForPending spins until the gate channel for (sid,key) is registered.
+// TestAwaitSummaryConfirmEditingCancelsTimeout verifies that a "summary_editing"
+// signal cancels the 8s safety timeout so a confirm arriving after the original
+// timeout window is still delivered and returns the edited summary.
+func TestAwaitSummaryConfirmEditingCancelsTimeout(t *testing.T) {
+	o := newGateOrch()
+	const sid, key = "s-edit", "k-edit"
+
+	done := make(chan struct{})
+	var got string
+	var edited bool
+	go func() {
+		got, edited = o.awaitSummaryConfirm(context.Background(), sid, key, "原始报告", nil)
+		close(done)
+	}()
+	waitForPending(t, o, sid, key)
+
+	// Signal edit mode first — this must cancel the safety timeout.
+	o.DeliverSummaryEditing(sid, key)
+
+	// Deliver confirm well after the original 8s would have fired
+	// (test uses a short sleep; the real guard is that without the fix the
+	// channel is gone by now and Deliver is a no-op).
+	time.Sleep(20 * time.Millisecond)
+	o.DeliverSummaryConfirm(sid, key, "编辑后的报告", true)
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("awaitSummaryConfirm did not return after editing + confirm")
+	}
+	if got != "编辑后的报告" || !edited {
+		t.Fatalf("got (%q, edited=%v), want (编辑后的报告, true)", got, edited)
+	}
+}
+
+// waitForPending spins until the gate for (sid,key) is registered.
 func waitForPending(t *testing.T, o *Orchestrator, sid, key string) {
 	t.Helper()
 	for i := 0; i < 200; i++ {
 		o.mu.Lock()
-		_, ok := o.summaryConfirms[confirmKey(sid, key)]
+		_, ok := o.summaryGates[confirmKey(sid, key)]
 		o.mu.Unlock()
 		if ok {
 			return

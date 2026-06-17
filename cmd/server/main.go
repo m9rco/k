@@ -321,11 +321,14 @@ func run() error {
 			// turn once the cancelled one releases the per-session turn lock.
 			orch.CancelTurn(sessionID)
 		case "summary_confirm":
-			// Release the adapt_to_platform analysis gate: the editable analysis
-			// panel's 3s confirmation window ended (user confirmed/edited, or the
-			// countdown auto-submitted the original). Deliver the final summary to
-			// the gated call; a no-op when none is waiting (late/duplicate).
 			orch.DeliverSummaryConfirm(sessionID, msg.CacheKey, msg.Summary, msg.Edited)
+		case "summary_editing":
+			// User entered edit mode: cancel the backend safety timeout so the gate
+			// waits indefinitely for an explicit confirm rather than auto-proceeding.
+			orch.DeliverSummaryEditing(sessionID, msg.CacheKey)
+		case "summary_reanalyze":
+			// User requested fresh grok analysis on the same reference group.
+			orch.DeliverSummaryReanalyze(sessionID, msg.CacheKey)
 		}
 	})
 

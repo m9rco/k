@@ -480,11 +480,12 @@ export function useAppController() {
     if (!id || !analysisRef.current.done) return;
     clearSummaryTimer();
     pendingConfirmRef.current = { id, cacheKey, confirmed: false };
-    setChat((c) => c.map((it) =>
-      it.kind === "analysis" && it.id === id
-        ? { ...it, cacheKey, confirming: true, secondsLeft: 3, editing: false, confirmed: false }
-        : it,
-    ));
+    setChat((c) => c.map((it) => {
+      if (it.kind !== "analysis") return it;
+      // Clear reanalyzing loading state on any prior block before re-arming.
+      if (it.id !== id) return it.reanalyzing ? { ...it, reanalyzing: false } : it;
+      return { ...it, cacheKey, confirming: true, secondsLeft: 3, editing: false, confirmed: false, reanalyzing: false };
+    }));
     // Drive the countdown off a local counter (not the setChat updater's return),
     // so the expiry decision is synchronous and independent of batching. setChat
     // here only reflects the remaining seconds in the UI.
@@ -501,14 +502,34 @@ export function useAppController() {
     summaryTimerRef.current = { id, timer };
   }, [clearSummaryTimer, setChat, submitSummaryConfirm]);
 
-  // editSummary pauses the countdown and puts the block into edit mode so the
-  // user can rewrite the summary before submitting (no auto-expire while editing).
+  // editSummary pauses the countdown, puts the block into edit mode, and
+  // notifies the backend to cancel its safety timeout so an edit taking longer
+  // than the original 8s backstop is still delivered and written back.
   const editSummary = React.useCallback((id: string) => {
     clearSummaryTimer();
     setChat((c) => c.map((it) =>
       it.kind === "analysis" && it.id === id ? { ...it, editing: true } : it,
     ));
+    const ws = wsRef.current;
+    const cacheKey = pendingConfirmRef.current.cacheKey;
+    if (ws && ws.readyState === WebSocket.OPEN && cacheKey) {
+      ws.send(JSON.stringify({ type: "summary_editing", cacheKey }));
+    }
   }, [clearSummaryTimer, setChat]);
+
+  // reanalyzeSummary sends a fresh-analysis request to the backend, which will
+  // re-run grok on the same reference group and stream the new report back.
+  // The current block enters "reanalyzing" loading state (submit disabled).
+  const reanalyzeSummary = React.useCallback((id: string) => {
+    setChat((c) => c.map((it) =>
+      it.kind === "analysis" && it.id === id ? { ...it, reanalyzing: true } : it,
+    ));
+    const ws = wsRef.current;
+    const cacheKey = pendingConfirmRef.current.cacheKey;
+    if (ws && ws.readyState === WebSocket.OPEN && cacheKey) {
+      ws.send(JSON.stringify({ type: "summary_reanalyze", cacheKey }));
+    }
+  }, [setChat]);
 
   // ============ tool cards ============
   const onToolCall = React.useCallback((data: Record<string, unknown>) => {
@@ -1085,6 +1106,7 @@ export function useAppController() {
       setChat((c) => c.map((it) => (it.kind === "analysis" && it.id === id ? { ...it, collapsed: !it.collapsed } : it))),
     submitSummaryConfirm,
     editSummary,
+    reanalyzeSummary,
     dismissFollowUp: (id: string) =>
       setChat((c) => c.map((it) => (it.kind === "follow_up" && it.id === id ? { ...it, dismissed: true } : it))),
   } as const;

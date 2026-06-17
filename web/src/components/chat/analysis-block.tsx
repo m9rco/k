@@ -1,6 +1,6 @@
 import * as React from "react";
 import { motion } from "framer-motion";
-import { ChevronRight, Sparkles, Pencil, CornerDownLeft } from "lucide-react";
+import { ChevronRight, Sparkles, Pencil, CornerDownLeft, RefreshCw } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 
@@ -22,9 +22,11 @@ export function AnalysisBlock({
   secondsLeft,
   editing,
   confirmed,
+  reanalyzing,
   onToggle,
   onEdit,
   onSubmit,
+  onReanalyze,
 }: {
   text: string;
   collapsed: boolean;
@@ -33,9 +35,11 @@ export function AnalysisBlock({
   secondsLeft?: number;
   editing?: boolean;
   confirmed?: boolean;
+  reanalyzing?: boolean;
   onToggle: () => void;
   onEdit: () => void;
   onSubmit: (summary: string, edited: boolean) => void;
+  onReanalyze?: () => void;
 }) {
   const [draft, setDraft] = React.useState(text);
   const taRef = React.useRef<HTMLTextAreaElement>(null);
@@ -108,11 +112,25 @@ export function AnalysisBlock({
               if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) submitEdit();
             }}
             rows={Math.min(8, Math.max(4, draft.split("\n").length))}
-            className="w-full resize-y rounded-md border border-line bg-bg px-2.5 py-2 text-[13px] leading-relaxed text-fg outline-none transition-all duration-200 ease-out focus:border-accent"
+            disabled={reanalyzing}
+            className="w-full resize-y rounded-md border border-line bg-bg px-2.5 py-2 text-[13px] leading-relaxed text-fg outline-none transition-all duration-200 ease-out focus:border-accent disabled:opacity-50"
           />
           <div className="flex items-center justify-end gap-2">
             <span className="mr-auto text-xs text-fg-mute">按 4 行格式修改：核心主题 / 主体 / 宣发意图 / 必须保留</span>
-            <Button size="sm" variant="default" onClick={submitEdit} title="提交修改并继续适配 (⌘/Ctrl+Enter)">
+            {onReanalyze && (
+              <Button
+                size="sm"
+                variant="ghost"
+                onClick={onReanalyze}
+                disabled={reanalyzing}
+                title="重新调用 grok 分析同一批参考图"
+                className="gap-1"
+              >
+                <RefreshCw className={cn("size-3.5", reanalyzing && "animate-spin")} />
+                {reanalyzing ? "分析中…" : "重新分析"}
+              </Button>
+            )}
+            <Button size="sm" variant="default" onClick={submitEdit} disabled={reanalyzing} title="提交修改并继续适配 (⌘/Ctrl+Enter)">
               <CornerDownLeft className="size-3.5" /> 用这份继续
             </Button>
           </div>

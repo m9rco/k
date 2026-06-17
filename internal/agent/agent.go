@@ -82,11 +82,10 @@ type Orchestrator struct {
 	// disables the pre-stage so adaptation falls back to the standard harness.
 	refPublisher   *cos.Uploader
 	visionAnalyzer *vision.Analyzer
-	// summaryConfirms holds the per-(session|cacheKey) channel a gated
-	// adapt_to_platform call waits on after producing a live analysis report. The
-	// inbound "summary_confirm" handler delivers the user's final summary (edited
-	// or countdown-default) here to release the gate before AI repaint begins.
-	summaryConfirms map[string]chan summaryConfirm
+	// summaryGates holds per-(session|cacheKey) gate state for a gated
+	// adapt_to_platform call. Inbound signals (confirm / editing / reanalyze)
+	// are delivered into the gate's channels to drive the wait loop.
+	summaryGates map[string]*summaryGate
 }
 
 // summaryConfirm carries the user's decision from the editable analysis panel's
@@ -94,6 +93,17 @@ type Orchestrator struct {
 type summaryConfirm struct {
 	summary string
 	edited  bool
+}
+
+// summaryGate holds the channels a gated adapt_to_platform call selects on while
+// waiting for the user's decision in the editable analysis panel. confirmCh
+// carries the final decision (confirm / edit / countdown-default); editingCh
+// signals the user entered edit mode (cancels the safety timeout); reanalyzeCh
+// signals a fresh-analysis request (re-runs grok within the gate).
+type summaryGate struct {
+	confirmCh   chan summaryConfirm
+	editingCh   chan struct{}
+	reanalyzeCh chan struct{}
 }
 
 // NewOrchestrator builds the orchestrator from config and backing services. The
@@ -105,23 +115,23 @@ func NewOrchestrator(cfg *config.Config, gen *generation.Service, cr *crop.Servi
 		mc = cfg.ChatTest
 	}
 	return &Orchestrator{
-		model:           newChatModel(mc),
-		cfg:             cfg,
-		models:          usermodel.NewManager(cfg, st),
-		gen:             gen,
-		crop:            cr,
-		video:           vid,
-		crawl:           cw,
-		budget:          cfg.ContextTokenBudget,
-		keepRecent:      6,
-		hub:             hub,
-		store:           st,
-		newID:           newID,
-		windows:         make(map[string]*Window),
-		cancels:         make(map[string]context.CancelFunc),
-		turnMu:          make(map[string]*sync.Mutex),
-		lastProduced:    make(map[string]string),
-		summaryConfirms: make(map[string]chan summaryConfirm),
+		model:        newChatModel(mc),
+		cfg:          cfg,
+		models:       usermodel.NewManager(cfg, st),
+		gen:          gen,
+		crop:         cr,
+		video:        vid,
+		crawl:        cw,
+		budget:       cfg.ContextTokenBudget,
+		keepRecent:   6,
+		hub:          hub,
+		store:        st,
+		newID:        newID,
+		windows:      make(map[string]*Window),
+		cancels:      make(map[string]context.CancelFunc),
+		turnMu:       make(map[string]*sync.Mutex),
+		lastProduced: make(map[string]string),
+		summaryGates: make(map[string]*summaryGate),
 	}
 }
 
@@ -297,62 +307,115 @@ func (o *Orchestrator) CancelTurn(sessionID string) {
 // concurrent sessions (or, in theory, two image groups) never cross-deliver.
 func confirmKey(sessionID, cacheKey string) string { return sessionID + "|" + cacheKey }
 
-// awaitSummaryConfirm registers a confirmation channel for (sessionID, cacheKey)
-// and blocks until the frontend delivers the user's decision (confirm, edit, or
-// countdown-default), the turn context is cancelled (user interrupt), or the
-// server safety timeout elapses. It returns the final summary and whether it was
-// edited; on cancel/timeout it returns (original, false) so adaptation proceeds
-// with the grok report rather than hanging. The channel is always unregistered
-// before returning. The 3s countdown lives entirely on the frontend; this 8s
-// timeout is only a backstop for an absent/old client whose confirm never
-// arrives — it sits just above the 3s window so a stalled client costs a few
-// seconds, not a minute (see realtime-transport).
-func (o *Orchestrator) awaitSummaryConfirm(ctx context.Context, sessionID, cacheKey, original string) (string, bool) {
+// awaitSummaryConfirm registers the gate for (sessionID, cacheKey) and blocks
+// until the frontend delivers a confirm, the turn is cancelled, or the safety
+// timeout elapses (only while the user has NOT entered edit mode). When the
+// frontend sends a "summary_editing" signal the safety timeout is cancelled and
+// the gate waits indefinitely for an explicit confirm or turn interrupt — this
+// ensures an edit that takes longer than the original 8s backstop can still be
+// delivered and written back. When a "summary_reanalyze" signal arrives,
+// doReanalyze (wired by the orchestrator) streams new analysis output, updates
+// the cache, and re-emits summary_confirm so the frontend re-arms its
+// confirmation window; the gate then continues waiting on the new report.
+// doReanalyze may be nil (cache-hit path when COS/vision is unconfigured).
+func (o *Orchestrator) awaitSummaryConfirm(ctx context.Context, sessionID, cacheKey, original string, doReanalyze func(context.Context) (string, error)) (string, bool) {
 	key := confirmKey(sessionID, cacheKey)
-	ch := make(chan summaryConfirm, 1)
+	gate := &summaryGate{
+		confirmCh:   make(chan summaryConfirm, 1),
+		editingCh:   make(chan struct{}, 1),
+		reanalyzeCh: make(chan struct{}, 1),
+	}
 	o.mu.Lock()
-	o.summaryConfirms[key] = ch
+	o.summaryGates[key] = gate
 	o.mu.Unlock()
 	defer func() {
 		o.mu.Lock()
-		delete(o.summaryConfirms, key)
+		delete(o.summaryGates, key)
 		o.mu.Unlock()
 	}()
 
-	// Backstop only for an absent/old client (the real 3s countdown lives on the
-	// frontend). Kept just above the frontend window so a normal confirm always
-	// wins the race; if the client never echoes back, adaptation proceeds in a few
-	// seconds instead of stalling a full minute.
-	const safetyTimeout = 8 * time.Second
-	timer := time.NewTimer(safetyTimeout)
+	current := original
+	// Safety timeout: backstop for absent/old clients that never echo back.
+	// Cancelled once the user enters edit mode so edits are never silently dropped.
+	timer := time.NewTimer(8 * time.Second)
 	defer timer.Stop()
-	select {
-	case c := <-ch:
-		summary := strings.TrimSpace(c.summary)
-		if summary == "" {
-			return original, false
+	timerActive := true
+
+	for {
+		var timerCh <-chan time.Time
+		if timerActive {
+			timerCh = timer.C
 		}
-		return summary, c.edited
-	case <-ctx.Done():
-		return original, false
-	case <-timer.C:
-		return original, false
+		select {
+		case c := <-gate.confirmCh:
+			s := strings.TrimSpace(c.summary)
+			if s == "" {
+				return current, false
+			}
+			return s, c.edited
+		case <-gate.editingCh:
+			if timerActive {
+				timer.Stop()
+				timerActive = false
+			}
+		case <-gate.reanalyzeCh:
+			if doReanalyze != nil {
+				if r, err := doReanalyze(ctx); err == nil && r != "" {
+					current = r
+				}
+			}
+		case <-ctx.Done():
+			return current, false
+		case <-timerCh:
+			return current, false
+		}
 	}
 }
 
 // DeliverSummaryConfirm routes an inbound "summary_confirm" message to the gated
-// adapt_to_platform call waiting on (sessionID, cacheKey). It is non-blocking and
-// a no-op when no call is waiting (stale/duplicate confirm), so a late frontend
-// message after the safety timeout is harmlessly dropped.
+// adapt_to_platform call waiting on (sessionID, cacheKey). Non-blocking; no-op
+// when no call is waiting (stale/duplicate confirm).
 func (o *Orchestrator) DeliverSummaryConfirm(sessionID, cacheKey, summary string, edited bool) {
 	o.mu.Lock()
-	ch := o.summaryConfirms[confirmKey(sessionID, cacheKey)]
+	gate := o.summaryGates[confirmKey(sessionID, cacheKey)]
 	o.mu.Unlock()
-	if ch == nil {
+	if gate == nil {
 		return
 	}
 	select {
-	case ch <- summaryConfirm{summary: summary, edited: edited}:
+	case gate.confirmCh <- summaryConfirm{summary: summary, edited: edited}:
+	default:
+	}
+}
+
+// DeliverSummaryEditing signals that the user entered edit mode in the
+// analysis panel, causing the gate to cancel its safety timeout and wait
+// indefinitely for an explicit confirm or turn interrupt.
+func (o *Orchestrator) DeliverSummaryEditing(sessionID, cacheKey string) {
+	o.mu.Lock()
+	gate := o.summaryGates[confirmKey(sessionID, cacheKey)]
+	o.mu.Unlock()
+	if gate == nil {
+		return
+	}
+	select {
+	case gate.editingCh <- struct{}{}:
+	default:
+	}
+}
+
+// DeliverSummaryReanalyze signals that the user requested a fresh grok
+// analysis while the gate is waiting. The gate will run doReanalyze, update
+// the current report, and re-arm the frontend confirmation window.
+func (o *Orchestrator) DeliverSummaryReanalyze(sessionID, cacheKey string) {
+	o.mu.Lock()
+	gate := o.summaryGates[confirmKey(sessionID, cacheKey)]
+	o.mu.Unlock()
+	if gate == nil {
+		return
+	}
+	select {
+	case gate.reanalyzeCh <- struct{}{}:
 	default:
 	}
 }
@@ -575,19 +638,48 @@ func (o *Orchestrator) Handle(ctx context.Context, sessionID, userText string, l
 				Data:      map[string]any{"text": text, "done": done, "analysis": true},
 			})
 		}
-		// Gate adapt_to_platform between a live analysis report and AI repaint:
-		// emit a summary_confirm signal (carrying the cache key) so the frontend's
-		// editable analysis panel starts its 3s countdown, then block until the
-		// user confirms/edits, the countdown auto-submits, or the safety timeout
-		// elapses. The 3s countdown lives on the frontend; awaitSummaryConfirm only
-		// backstops an absent/old client.
-		deps.AwaitSummaryConfirm = func(ctx context.Context, cacheKey, original string) (string, bool) {
+		// Gate adapt_to_platform between a live analysis report and AI repaint.
+		// Emits summary_confirm so the frontend starts its 3s countdown; then
+		// blocks until the user confirms/edits, the countdown auto-submits, the
+		// safety timeout elapses, or the user triggers a reanalysis (which streams
+		// fresh grok output and re-arms the confirmation window).
+		deps.AwaitSummaryConfirm = func(ctx context.Context, cacheKey, original string, reanalyzeFn func(context.Context) (string, error)) (string, bool) {
 			o.hub.Send(sid, transport.Event{
 				Type:      transport.EventSummaryConfirm,
 				SessionID: sid,
 				Data:      map[string]any{"cacheKey": cacheKey},
 			})
-			return o.awaitSummaryConfirm(ctx, sid, cacheKey, original)
+			var doReanalyze func(context.Context) (string, error)
+			if reanalyzeFn != nil {
+				st := o.store
+				hub := o.hub
+				doReanalyze = func(ctx context.Context) (string, error) {
+					report, err := reanalyzeFn(ctx)
+					if err != nil {
+						hub.Send(sid, transport.Event{
+							Type:      transport.EventMessage,
+							SessionID: sid,
+							Data:      map[string]any{"text": "（重新分析失败，请继续编辑或取消）", "done": true},
+						})
+						return "", err
+					}
+					hub.Send(sid, transport.Event{
+						Type:      transport.EventMessage,
+						SessionID: sid,
+						Data:      map[string]any{"text": "", "done": true, "analysis": true},
+					})
+					if st != nil {
+						_ = st.InsertVisionReport(cacheKey, report)
+					}
+					hub.Send(sid, transport.Event{
+						Type:      transport.EventSummaryConfirm,
+						SessionID: sid,
+						Data:      map[string]any{"cacheKey": cacheKey},
+					})
+					return report, nil
+				}
+			}
+			return o.awaitSummaryConfirm(ctx, sid, cacheKey, original, doReanalyze)
 		}
 	}
 	tools, err := deps.Tools()

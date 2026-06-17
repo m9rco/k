@@ -58,7 +58,7 @@ function Welcome() {
 }
 
 export function ChatPanel({ onboarding = false }: { onboarding?: boolean }) {
-  const { state, collapseReasoningItem, collapseAnalysisItem, capsuleSelect, dismissFollowUp, editSummary, submitSummaryConfirm } = useApp();
+  const { state, collapseReasoningItem, collapseAnalysisItem, capsuleSelect, dismissFollowUp, editSummary, reanalyzeSummary, submitSummaryConfirm } = useApp();
   const logRef = React.useRef<HTMLDivElement>(null);
 
   // Keep pinned to newest content when already near the bottom.
@@ -93,7 +93,7 @@ export function ChatPanel({ onboarding = false }: { onboarding?: boolean }) {
               // While the live report awaits the user's 3s confirmation (or is
               // being edited), render the interactive AnalysisBlock; otherwise the
               // plain collapsible ReasoningBlock suffices (streaming / settled).
-              if (it.confirming || it.editing)
+              if (it.confirming || it.editing || it.reanalyzing)
                 return (
                   <AnalysisBlock
                     key={it.id}
@@ -104,9 +104,11 @@ export function ChatPanel({ onboarding = false }: { onboarding?: boolean }) {
                     confirmed={!!it.confirmed}
                     secondsLeft={it.secondsLeft ?? 0}
                     editing={!!it.editing}
+                    reanalyzing={!!it.reanalyzing}
                     onToggle={() => collapseAnalysisItem(it.id)}
                     onEdit={() => editSummary(it.id)}
                     onSubmit={(text, edited) => submitSummaryConfirm(it.id, text, edited)}
+                    onReanalyze={() => reanalyzeSummary(it.id)}
                   />
                 );
               return (
