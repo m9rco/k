@@ -84,6 +84,9 @@ type Service struct {
 	// verdict regenerates once with the judge's hints. Wired via SetQualityChecker;
 	// nil disables the gate (every product passes), matching the pre-gate flow.
 	quality QualityChecker
+	// pixel, when set, runs a fast algorithmic quality check (blur + border fill)
+	// before the AI judge. Wired via SetPixelChecker; nil skips pixel checking.
+	pixel PixelChecker
 
 	// params caches each task's request so a failed product can be retried
 	// without the caller re-supplying inputs (short-term in-memory store, D7).
@@ -134,6 +137,19 @@ type QualityChecker interface {
 	Check(ctx context.Context, img []byte, mime, themeReport, specLabel string) (QualityVerdict, error)
 }
 
+// PixelChecker performs fast algorithmic pre-checks (blur + border fill) before
+// the AI judge. Implemented by internal/vision.PixelChecker.
+type PixelChecker interface {
+	Check(img []byte, mime string) (PixelVerdict, error)
+}
+
+// PixelVerdict mirrors vision.PixelVerdict's consumed fields.
+type PixelVerdict struct {
+	Pass    bool
+	Reasons []string
+	Hints   string
+}
+
 // QualityVerdict mirrors vision.QualityVerdict's consumed fields. The judge's own
 // wording is never the verdict — Pass is the server-evaluated decision (red line
 // + threshold); Hints/Reasons feed the regeneration prompt.
@@ -155,6 +171,9 @@ func (s *Service) SetQualityChecker(q QualityChecker) {
 	}
 	s.quality = q
 }
+
+// SetPixelChecker installs the pixel-level pre-filter. nil disables it.
+func (s *Service) SetPixelChecker(p PixelChecker) { s.pixel = p }
 
 // composeHints builds the regeneration hint string fed back to the image model
 // from a failed verdict: the judge's note plus the flagged reasons.
@@ -718,6 +737,29 @@ func (s *Service) run(ctx context.Context, taskID string, p GenerateParams) {
 				Int("dst_w", adaptW).Int("dst_h", adaptH).
 				Str("mode", string(mode)).
 				Msg("adapt converged to target size")
+		}
+	}
+
+	// Pixel pre-filter: fast algorithmic check (blur + border fill) before the
+	// AI judge. Skips the AI judge entirely on failure → saves 5–15s per product.
+	if p.Slots.Kind == EditAdaptPlatform && p.Attempt == 0 && s.pixel != nil {
+		pv, perr := s.pixel.Check(out.Data, out.Mime)
+		if perr != nil {
+			applog.From(ctx).Warn().Str("event", "gen.pixel_skipped").Str("task", taskID).Err(perr).Msg("pixel check error; degrading to pass")
+		} else if !pv.Pass {
+			applog.From(ctx).Info().Str("event", "gen.pixel_failed").Str("task", taskID).Strs("reasons", pv.Reasons).Msg("pixel check failed; regenerating once")
+			s.broker.Publish(taskID, transport.EventReviewFailed, p.SessionID, map[string]any{
+				"taskId":  taskID,
+				"attempt": p.Attempt,
+				"total":   0,
+				"reasons": pv.Reasons,
+			})
+			retry := p
+			retry.Attempt = 1
+			retry.QualityHints = pv.Hints
+			s.progress(taskID, p.SessionID, 20)
+			s.run(ctx, taskID, retry)
+			return
 		}
 	}
 

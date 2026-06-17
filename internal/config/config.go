@@ -196,6 +196,14 @@ type Config struct {
 	// QualityThreshold is the weighted-total score (0-100) at/above which an adapt
 	// product passes the quality gate (compliance is a separate hard red line).
 	QualityThreshold int
+	// PixelBlurThreshold is the Laplacian-variance lower bound for the pixel
+	// pre-filter. Adapt products below this are flagged blurry and regenerated
+	// once before the AI judge. 0 disables blur detection.
+	PixelBlurThreshold int
+	// PixelBorderMaxRatio is the maximum fraction of edge width/height that may
+	// be a uniform-color band. Exceeding it flags the product and triggers
+	// regeneration. 0 disables border detection.
+	PixelBorderMaxRatio float64
 
 	// Video is the image-to-video provider (happyhorse R2V). It may be unset, in
 	// which case the video capability degrades to "not configured".
@@ -474,7 +482,18 @@ func Load(platformsPath string) (*Config, error) {
 			APIKey:   qualityEP.apiKey,
 			Model:    qualityEP.model,
 		},
-		QualityThreshold: envInt("QUALITY_THRESHOLD", 75),
+		QualityThreshold:   envInt("QUALITY_THRESHOLD", 75),
+		PixelBlurThreshold: envInt("PIXEL_BLUR_THRESHOLD", 80),
+		PixelBorderMaxRatio: func() float64 {
+			v := strings.TrimSpace(os.Getenv("PIXEL_BORDER_MAX_RATIO"))
+			if v == "" {
+				return 0.15
+			}
+			if f, err := strconv.ParseFloat(v, 64); err == nil {
+				return f
+			}
+			return 0.15
+		}(),
 
 		// Image-to-video (happyhorse R2V). APIKey/Model empty means the video
 		// capability reports "not configured" rather than failing.

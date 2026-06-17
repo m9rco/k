@@ -147,6 +147,12 @@ func run() error {
 		log.Printf("quality-gate: not configured, adapt products pass without review")
 	}
 
+	// Pixel pre-filter: fast algorithmic blur+border check before the AI judge.
+	if pc := vision.NewPixelChecker(cfg.PixelBlurThreshold, cfg.PixelBorderMaxRatio); pc != nil {
+		genSvc.SetPixelChecker(pixelCheckerAdapter{pc})
+		log.Printf("pixel-filter: blur_threshold=%d border_max_ratio=%.2f", cfg.PixelBlurThreshold, cfg.PixelBorderMaxRatio)
+	}
+
 	// Image-to-video service (happyhorse). The provider fetches the source image
 	// by public URL, so video requires a COS uploader to publish the local frame
 	// first. Without COS configured the uploader stays nil, Service.Configured()
@@ -539,6 +545,14 @@ func (a qualityCheckerAdapter) Check(ctx context.Context, img []byte, mime, them
 		Hints:       v.Hints,
 		FaultSource: v.FaultSource,
 	}, err
+}
+
+// pixelCheckerAdapter bridges vision.PixelChecker to generation.PixelChecker.
+type pixelCheckerAdapter struct{ pc *vision.PixelChecker }
+
+func (a pixelCheckerAdapter) Check(img []byte, mime string) (generation.PixelVerdict, error) {
+	v, err := a.pc.Check(img, mime)
+	return generation.PixelVerdict{Pass: v.Pass, Reasons: v.Reasons, Hints: v.Hints}, err
 }
 
 func (a taskAnnouncer) AnnounceTask(sessionID, taskID, kind string, count int) {
