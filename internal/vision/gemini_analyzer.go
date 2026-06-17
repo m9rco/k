@@ -80,7 +80,17 @@ type geminiContent struct {
 }
 
 type geminiRequest struct {
-	Contents []geminiContent `json:"contents"`
+	Contents         []geminiContent  `json:"contents"`
+	GenerationConfig *geminiGenConfig `json:"generationConfig,omitempty"`
+}
+
+// geminiGenConfig carries native generateContent generation options. Only
+// ResponseMimeType is used so far: set to "application/json" it forces the model
+// to emit a bare JSON object (the constraint Gemini actually honors, unlike the
+// OpenAI-compat response_format). Omitted (nil) for the analysis path, which
+// wants free-form text.
+type geminiGenConfig struct {
+	ResponseMimeType string `json:"responseMimeType,omitempty"`
 }
 
 // Analyze sends the fixed analysis prompt plus each image's inline bytes to

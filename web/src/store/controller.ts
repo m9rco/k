@@ -106,7 +106,7 @@ export function useAppController() {
         const merged = new Map(
           tasks.map((t) => {
             const old = prev.get(t.id);
-            return [t.id, old ? { ...t, count: t.count ?? old.count, note: t.note ?? old.note } : t] as const;
+            return [t.id, old ? { ...t, count: t.count ?? old.count, note: t.note ?? old.note, outpainted: old.outpainted, review: old.review, reviewReason: old.reviewReason } : t] as const;
           }),
         );
         return { ...s, assets: new Map(assets.map((a) => [a.id, a])), tasks: merged };

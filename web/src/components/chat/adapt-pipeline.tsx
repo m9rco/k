@@ -56,11 +56,15 @@ function TaskPipeline({ taskId }: { taskId: string }) {
   const task = state.tasks.get(taskId);
   const stages = stagesFor(task);
 
+  // When review failed and the task is still running, a retry is in progress.
+  const retrying = task?.review === "failed" && task?.status === "running";
+
   return (
     <div className="flex items-center gap-1.5 text-[11px]">
       {STEPS.map((label, i) => (
         <React.Fragment key={label}>
           <div
+            title={i === 3 && stages[i] === "error" && task?.reviewReason ? task.reviewReason : undefined}
             className={
               "flex items-center gap-1 " +
               (stages[i] === "active"
@@ -78,6 +82,9 @@ function TaskPipeline({ taskId }: { taskId: string }) {
           {i < STEPS.length - 1 && <span className="text-fg-mute/30">→</span>}
         </React.Fragment>
       ))}
+      {retrying && (
+        <span className="text-[10px] text-amber-500/80 ml-1">按建议重绘中…</span>
+      )}
     </div>
   );
 }

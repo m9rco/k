@@ -30,7 +30,7 @@ func TestEvaluateThreshold(t *testing.T) {
 	}{
 		{
 			name:     "above threshold passes",
-			content:  `{"compliance":{"pass":true},"scores":{"subject_consistency":90,"character_appeal":80,"overall_quality":85},"total":85,"hints":""}`,
+			content:  `{"compliance":{"pass":true},"scores":{"subject_consistency":90,"character_appeal":80,"overall_quality":85,"canvas_fill":90},"total":85,"hints":""}`,
 			wantPass: true,
 		},
 		{
