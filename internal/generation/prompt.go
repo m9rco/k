@@ -98,6 +98,11 @@ type Slots struct {
 	// and must-preserve elements. The report is Sanitized before templating.
 	// Only set for adapt_platform when COS upload + vision analysis are available.
 	ThemeReport string
+	// QualityHints, when set, carries the quality-gate judge's improvement note
+	// from a failed first-pass review. A REVISE segment is injected after THEME so
+	// the regeneration (fed back to the same image model) addresses the flagged
+	// compliance/subject/appeal issues. Sanitized before templating.
+	QualityHints string
 }
 
 // injectionPatterns match attempts to override system behavior. Matches are
@@ -315,7 +320,11 @@ func BuildPrompt(slots Slots, palette []PaletteColor) (string, error) {
 	if t := Sanitize(slots.ThemeReport); t != "" {
 		theme = "\nTHEME: " + t
 	}
-	return contextClause + "\n" + preserve + theme + "\nMODIFY: " + b.String() + "\n" + avoidClause, nil
+	revise := ""
+	if h := Sanitize(slots.QualityHints); h != "" {
+		revise = "\nREVISE: A prior attempt was rejected by quality review. Fix these issues this time: " + h
+	}
+	return contextClause + "\n" + preserve + theme + revise + "\nMODIFY: " + b.String() + "\n" + avoidClause, nil
 }
 
 // buildPlacementPhrase composes the sanitized "<orientation> WxH <channel>

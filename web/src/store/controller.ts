@@ -148,6 +148,24 @@ export function useAppController() {
         else if (type === "task_done") tasks.set(taskId, { ...cur, status: "done", progress: 100 });
         else if (type === "task_failed")
           tasks.set(taskId, { ...cur, status: "failed", error: (data.error as string) || "生成失败" });
+        // Quality-gate review sub-states (platform adaptation). Non-terminal: they
+        // evolve the SAME placeholder card and never close the stream. The task
+        // still ends with task_done/task_failed.
+        else if (type === "review_started")
+          tasks.set(taskId, { ...cur, status: "running", review: "checking" });
+        else if (type === "review_passed")
+          tasks.set(taskId, { ...cur, review: "passed" });
+        else if (type === "review_failed")
+          tasks.set(taskId, {
+            ...cur,
+            status: "running",
+            review: "failed",
+            reviewReason: Array.isArray(data.reasons) ? (data.reasons as string[]).join("、") : undefined,
+          });
+        else if (type === "review_skipped") {
+          // Degrade: drop any review marker and continue as plain 生图中.
+          tasks.set(taskId, { ...cur, review: undefined, reviewReason: undefined });
+        }
         return { ...s, tasks };
       });
       if (type === "task_done") {
@@ -207,7 +225,7 @@ export function useAppController() {
           /* ignore */
         }
       };
-      for (const n of ["task_queued", "task_running", "task_progress", "task_done", "task_failed"])
+      for (const n of ["task_queued", "task_running", "task_progress", "task_done", "task_failed", "review_started", "review_passed", "review_failed", "review_skipped"])
         es.addEventListener(n, handle as EventListener);
       es.onmessage = handle;
     },

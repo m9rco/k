@@ -24,6 +24,11 @@ export interface Asset {
 
 export type TaskStatus = "queued" | "running" | "done" | "failed";
 export type TaskKind = "generate" | "video" | "crawl" | "search";
+// ReviewState tracks the platform-adaptation quality gate's sub-state on a
+// generate task's placeholder card: "checking" while the judge scores, "passed"
+// (✓) when it clears, "failed" (✗, then regenerating with hints). Absent when
+// the task has no quality gate or the gate was skipped/degraded.
+export type ReviewState = "checking" | "passed" | "failed";
 
 export interface Task {
   id: string;
@@ -41,6 +46,13 @@ export interface Task {
   // operation (derived from the tool-call args), shown on the timeline node —
   // e.g. "换背景 · 淡紫色渐变".
   note?: string;
+  // review is the quality-gate sub-state (platform adaptation only). Driven by
+  // review_started/passed/failed events on this task's SSE stream; the card shows
+  // a lightweight 审核中 / ✓ / ✗按建议重绘中 marker without exposing scores.
+  review?: ReviewState;
+  // reviewReason is a short failure cause (red line / low dimension) for an
+  // optional tooltip; the card does not surface raw scores.
+  reviewReason?: string;
 }
 
 export interface ContextState {

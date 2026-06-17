@@ -69,10 +69,11 @@ type ToolDeps struct {
 	// the vision analyzer can read them by public URL. Nil disables the
 	// publish → analyze pre-stage (adapt falls back to no theme report).
 	RefPublisher *cos.Uploader
-	// VisionAnalyzer, when non-nil and Configured, runs grok-4-fast marketing
-	// analysis over the published URLs to produce a theme report injected into
-	// the AI-repaint prompt. Nil/unconfigured disables analysis (graceful).
-	VisionAnalyzer *vision.Analyzer
+	// VisionAnalyzer, when non-nil and Configured, runs marketing analysis to
+	// produce a theme report injected into the AI-repaint prompt. The default
+	// (gemini) reads images inline (no COS); the openai variant needs published
+	// URLs. Nil/unconfigured disables analysis (graceful).
+	VisionAnalyzer vision.Analyzer
 	// Notify, when set, pushes a chat-visible stage message: done=false for
 	// streaming chunks (analysis report), done=true to finalize a message.
 	// Injected by the orchestrator so tools.go stays transport-free.
@@ -605,11 +606,45 @@ func adaptProvider(d ToolDeps) *config.ImageProviderConfig {
 	return d.ImageOverride
 }
 
-// visionThemeReport runs the publish → analyze pre-stage for platform adaptation
+// refImg is one reference image's bytes + metadata, loaded for the vision
+// pre-stage. md5 keys the report cache (and de-dups COS uploads on the openai path).
+type refImg struct {
+	data []byte
+	mime string
+	md5  string
+}
+
+// buildVisionImages turns loaded references into analyzer inputs. When needsURL
+// is true (openai image_url path) each image is published to COS (md5-deduped)
+// and carried as a URL; references that fail to publish are skipped. When false
+// (gemini inline path) the raw bytes are carried inline with no COS dependency.
+func buildVisionImages(ctx context.Context, d ToolDeps, imgs []refImg, needsURL bool) ([]vision.Image, error) {
+	out := make([]vision.Image, 0, len(imgs))
+	if !needsURL {
+		for _, im := range imgs {
+			out = append(out, vision.Image{Data: im.data, Mime: im.mime})
+		}
+		return out, nil
+	}
+	if d.RefPublisher == nil {
+		return nil, fmt.Errorf("ref publisher not configured")
+	}
+	for _, im := range imgs {
+		url, err := d.RefPublisher.UploadIfAbsent(ctx, im.data, im.mime, d.Store)
+		if err != nil {
+			applog.From(ctx).Warn().Str("event", "adapt.publish_failed").Err(err).Msg("ref publish failed; skipping that reference")
+			continue
+		}
+		out = append(out, vision.Image{URL: url})
+	}
+	return out, nil
+}
+
+// visionThemeReport runs the (publish →) analyze pre-stage for platform adaptation
 // and returns the marketing theme report to anchor the AI repaint. It analyzes the
 // WHOLE ordered reference group (anchor first), so multi-image adaptations feed
-// every reference to grok-4-fast. Returns "" — and the caller proceeds with the
-// standard harness — whenever COS/vision are unconfigured, no reference can be
+// every reference to the vision model. Returns "" — and the caller proceeds with the
+// standard harness — whenever vision is unconfigured, no reference can be
 // read, or any step fails. Stage progress is surfaced to chat: upload/error via
 // d.Notify, analysis chunks via d.NotifyAnalysis (collapsible panel), falling back
 // to d.Notify when NotifyAnalysis is nil.
@@ -623,11 +658,6 @@ func visionThemeReport(ctx context.Context, d ToolDeps, refIDs []string) string 
 	}
 	// Load each reference's bytes in order; skip any that can't be read rather
 	// than failing the whole pre-stage (a missing auxiliary ref must not block).
-	type refImg struct {
-		data []byte
-		mime string
-		md5  string
-	}
 	var imgs []refImg
 	for _, id := range refIDs {
 		if id == "" {
@@ -663,30 +693,27 @@ func visionThemeReport(ctx context.Context, d ToolDeps, refIDs []string) string 
 		}
 		cacheKey = fmt.Sprintf("%x", md5.Sum([]byte("group:"+strings.Join(parts, ","))))
 	}
-	// reanalyzeFn is passed to the gate so the user can re-run grok on the same
-	// reference group without re-uploading (UploadIfAbsent is md5-idempotent).
-	// Built before the cache check so it works for both cache-hit and live paths.
+	// reanalyzeFn is passed to the gate so the user can re-run analysis on the same
+	// reference group without re-uploading. The default (gemini) analyzer reads
+	// images inline (no COS); the openai analyzer needs published URLs (md5-deduped
+	// UploadIfAbsent). Built before the cache check so it works for both paths.
 	var reanalyzeFn func(context.Context) (string, error)
-	if d.RefPublisher != nil && d.VisionAnalyzer != nil && d.VisionAnalyzer.Configured() {
-		capturedImgs := imgs
-		notifyAn := notifyAnalysis
-		reanalyzeFn = func(ctx context.Context) (string, error) {
-			var reURLs []string
-			for _, im := range capturedImgs {
-				url, err := d.RefPublisher.UploadIfAbsent(ctx, im.data, im.mime, d.Store)
-				if err != nil {
-					continue
+	if d.VisionAnalyzer != nil && d.VisionAnalyzer.Configured() {
+		inlineOK := !d.VisionAnalyzer.NeedsPublicURL()
+		if inlineOK || d.RefPublisher != nil {
+			capturedImgs := imgs
+			notifyAn := notifyAnalysis
+			reanalyzeFn = func(ctx context.Context) (string, error) {
+				images, err := buildVisionImages(ctx, d, capturedImgs, d.VisionAnalyzer.NeedsPublicURL())
+				if err != nil || len(images) == 0 {
+					return "", fmt.Errorf("no analyzable references for reanalysis")
 				}
-				reURLs = append(reURLs, url)
+				return d.VisionAnalyzer.Analyze(ctx, images, func(chunk string) {
+					if notifyAn != nil {
+						notifyAn(chunk, false)
+					}
+				})
 			}
-			if len(reURLs) == 0 {
-				return "", fmt.Errorf("no publishable references for reanalysis")
-			}
-			return d.VisionAnalyzer.Analyze(ctx, reURLs, func(chunk string) {
-				if notifyAn != nil {
-					notifyAn(chunk, false)
-				}
-			})
 		}
 	}
 
@@ -704,32 +731,29 @@ func visionThemeReport(ctx context.Context, d ToolDeps, refIDs []string) string 
 		return gateSummaryConfirm(ctx, d, cacheKey, cached, reanalyzeFn)
 	}
 
-	// No cached report — need live publish + analysis. Both publisher and analyzer
-	// must be configured; otherwise degrade gracefully.
-	if d.RefPublisher == nil || d.VisionAnalyzer == nil || !d.VisionAnalyzer.Configured() {
+	// No cached report — need live analysis. The analyzer must be configured; the
+	// inline (gemini) path needs no COS, the openai path needs a publisher.
+	if d.VisionAnalyzer == nil || !d.VisionAnalyzer.Configured() {
+		return ""
+	}
+	needsURL := d.VisionAnalyzer.NeedsPublicURL()
+	if needsURL && d.RefPublisher == nil {
 		return ""
 	}
 
 	if d.Notify != nil {
 		d.Notify("⏫ 正在分析参考图的宣发要素，请稍候…\n\n", false)
 	}
-	// Publish every reference (md5-deduped); collect the public URLs in order.
-	var urls []string
-	for _, im := range imgs {
-		url, err := d.RefPublisher.UploadIfAbsent(ctx, im.data, im.mime, d.Store)
-		if err != nil {
-			applog.From(ctx).Warn().Str("event", "adapt.publish_failed").Err(err).Msg("ref publish failed; skipping that reference")
-			continue
-		}
-		urls = append(urls, url)
-	}
-	if len(urls) == 0 {
+	// Build analyzer inputs: inline bytes for the gemini path, or published URLs
+	// (md5-deduped) for the openai path.
+	images, err := buildVisionImages(ctx, d, imgs, needsURL)
+	if err != nil || len(images) == 0 {
 		if d.Notify != nil {
 			d.Notify("（参考图发布暂不可用，按默认适配）", true)
 		}
 		return ""
 	}
-	report, err := d.VisionAnalyzer.Analyze(ctx, urls, func(chunk string) {
+	report, err := d.VisionAnalyzer.Analyze(ctx, images, func(chunk string) {
 		if notifyAnalysis != nil {
 			notifyAnalysis(chunk, false)
 		}

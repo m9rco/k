@@ -1,5 +1,5 @@
 import { motion } from "framer-motion";
-import { RotateCcw, Trash2, Loader2, X } from "lucide-react";
+import { RotateCcw, Trash2, Loader2, X, ShieldCheck, ShieldAlert, ScanSearch } from "lucide-react";
 import type { Task } from "@/lib/types";
 import { useApp } from "@/store/context";
 import { Button } from "@/components/ui/button";
@@ -23,6 +23,21 @@ function stageLabel(p: number, kind: string): string {
   return "完成";
 }
 
+// reviewLabel maps the quality-gate sub-state to a lightweight label. Scores are
+// intentionally not surfaced — the user keeps a "生图中" feel.
+function reviewLabel(review: Task["review"]): string {
+  switch (review) {
+    case "checking":
+      return "审核中 · 合规与卖相";
+    case "passed":
+      return "审核通过";
+    case "failed":
+      return "按建议重绘中";
+    default:
+      return "";
+  }
+}
+
 // TaskCard renders a running placeholder (skeleton + performed progress) or a
 // failed card (error + retry/remove) in the grid view. The timeline view has its
 // own active-node renderer; this is the grid equivalent.
@@ -31,6 +46,7 @@ export function TaskCard({ task }: { task: Task }) {
   const pct = usePerformedProgress(task);
   const elapsed = useElapsed(task);
   const failed = task.status === "failed";
+  const review = task.review;
 
   return (
     <motion.div
@@ -47,7 +63,15 @@ export function TaskCard({ task }: { task: Task }) {
             <div className="absolute inset-0 bg-bg-elev-2" />
             <div className="absolute inset-0 -translate-x-full animate-shimmer bg-gradient-to-r from-transparent via-fg/10 to-transparent" />
             <div className="absolute inset-0 grid place-items-center">
-              <Loader2 className="size-6 animate-spin text-accent/80" />
+              {review === "checking" ? (
+                <ScanSearch className="size-6 animate-pulse text-accent/80" />
+              ) : review === "passed" ? (
+                <ShieldCheck className="size-6 text-emerald-500" />
+              ) : review === "failed" ? (
+                <ShieldAlert className="size-6 text-amber-500" />
+              ) : (
+                <Loader2 className="size-6 animate-spin text-accent/80" />
+              )}
             </div>
           </>
         )}
@@ -56,7 +80,9 @@ export function TaskCard({ task }: { task: Task }) {
         {!failed ? (
           <>
             <div className="flex items-center gap-2">
-              <span className="text-fg-dim">{task.note || stageLabel(pct, task.kind)}</span>
+              <span className="text-fg-dim" title={task.reviewReason}>
+                {reviewLabel(review) || task.note || stageLabel(pct, task.kind)}
+              </span>
               <button
                 type="button"
                 title="取消任务"

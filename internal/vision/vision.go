@@ -50,25 +50,50 @@ const analysisPrompt = `分析以下游戏宣发图，按固定格式输出，�
 // stays well under this; the cap only guards a runaway model.
 const maxReportLen = 500
 
-// Analyzer calls a vision-capable OpenAI-compatible model to produce a
-// structured marketing analysis report.
-type Analyzer struct {
+// Image is one analysis input. An analyzer uses whichever fields it needs:
+// the OpenAI-compatible path reads URL (a public https image_url); the Gemini
+// native path reads Data/Mime inline (no public URL required).
+type Image struct {
+	URL  string // public https URL (OpenAI-compatible image_url path)
+	Data []byte // raw image bytes (Gemini inline path)
+	Mime string // mime for Data (e.g. image/png)
+}
+
+// Analyzer produces a structured marketing-analysis report from a set of game
+// promo images. Two implementations exist: an OpenAI-compatible one (image_url,
+// needs public URLs / COS) and a Gemini-native one (inline base64, no COS).
+type Analyzer interface {
+	// Configured reports whether the analyzer is ready to use.
+	Configured() bool
+	// NeedsPublicURL reports whether Analyze requires Image.URL to be set. When
+	// false, the analyzer reads Image.Data/Mime inline and the caller may skip
+	// publishing the image to a public URL entirely.
+	NeedsPublicURL() bool
+	// Analyze streams the report; onChunk is called with each text delta (may be
+	// nil). Returns the full report text. Graceful on errors: returns ("", err).
+	Analyze(ctx context.Context, images []Image, onChunk func(string)) (string, error)
+}
+
+// openAIAnalyzer calls a vision-capable OpenAI-compatible model (e.g. grok-4-fast)
+// to produce a structured marketing analysis report via /chat/completions with
+// image_url content parts (requires public URLs).
+type openAIAnalyzer struct {
 	baseURL string
 	apiKey  string
 	model   string
 	client  *http.Client
 }
 
-// New returns an Analyzer. Returns nil when baseURL or apiKey is empty
-// (caller should treat nil as "not configured").
-func New(baseURL, apiKey, model string) *Analyzer {
+// NewOpenAI returns an OpenAI-compatible analyzer (image_url path). Returns nil
+// when baseURL or apiKey is empty (caller treats nil as "not configured").
+func NewOpenAI(baseURL, apiKey, model string) Analyzer {
 	if strings.TrimSpace(baseURL) == "" || strings.TrimSpace(apiKey) == "" {
 		return nil
 	}
 	if model == "" {
 		model = "grok-4-fast"
 	}
-	return &Analyzer{
+	return &openAIAnalyzer{
 		baseURL: strings.TrimRight(baseURL, "/"),
 		apiKey:  apiKey,
 		model:   model,
@@ -77,18 +102,30 @@ func New(baseURL, apiKey, model string) *Analyzer {
 }
 
 // Configured reports whether the analyzer is ready to use.
-func (a *Analyzer) Configured() bool { return a != nil }
+func (a *openAIAnalyzer) Configured() bool { return a != nil }
 
-// Analyze sends imageURLs to the vision model with the fixed analysis prompt and
-// streams the response. onChunk is called with each text delta (may be called
-// many times); the full report text is returned when streaming is complete.
-// Graceful on network errors: returns ("", err) so callers can degrade cleanly.
-func (a *Analyzer) Analyze(ctx context.Context, imageURLs []string, onChunk func(string)) (string, error) {
-	if a == nil || len(imageURLs) == 0 {
+// NeedsPublicURL is true: the image_url path requires public URLs.
+func (a *openAIAnalyzer) NeedsPublicURL() bool { return true }
+
+// Analyze sends each image's URL to the vision model with the fixed analysis
+// prompt and streams the response. onChunk is called with each text delta (may
+// be called many times); the full report text is returned when streaming is
+// complete. Graceful on network errors: returns ("", err) so callers can
+// degrade cleanly.
+func (a *openAIAnalyzer) Analyze(ctx context.Context, images []Image, onChunk func(string)) (string, error) {
+	if a == nil || len(images) == 0 {
 		return "", fmt.Errorf("vision: analyzer not configured or no images")
 	}
+	imageURLs := make([]string, 0, len(images))
+	for _, im := range images {
+		if im.URL != "" {
+			imageURLs = append(imageURLs, im.URL)
+		}
+	}
+	if len(imageURLs) == 0 {
+		return "", fmt.Errorf("vision: no image URLs provided")
+	}
 
-	// Build multimodal user message: text instruction + one image_url part per URL.
 	type imgURL struct {
 		URL string `json:"url"`
 	}

@@ -199,6 +199,20 @@ function ActiveNode({ node }: { node: TimelineNode }) {
           <div className="relative h-20 overflow-hidden rounded-md bg-bg-elev-2">
             <div className="absolute inset-0 -translate-x-full animate-shimmer bg-gradient-to-r from-transparent via-fg/10 to-transparent" />
           </div>
+          {task.review && (
+            <div
+              className={
+                task.review === "passed"
+                  ? "text-[11px] text-emerald-500"
+                  : task.review === "failed"
+                    ? "text-[11px] text-amber-500"
+                    : "text-[11px] text-fg-dim"
+              }
+              title={task.reviewReason}
+            >
+              {task.review === "checking" ? "🔍 审核中" : task.review === "passed" ? "✓ 审核通过" : "✗ 按建议重绘中"}
+            </div>
+          )}
           <div className="h-1 overflow-hidden rounded-full bg-bg">
             <div className="h-full rounded-full bg-accent transition-[width] duration-300 ease-linear" style={{ width: `${pct}%` }} />
           </div>

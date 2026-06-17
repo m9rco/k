@@ -84,6 +84,18 @@ const (
 	EventTaskProgress EventType = "task_progress"
 	EventTaskDone     EventType = "task_done"
 	EventTaskFailed   EventType = "task_failed"
+
+	// Quality-gate review events for platform adaptation. They are emitted on the
+	// SAME task's progress stream (same taskId) as intermediate states between
+	// "product generated" and "task done", so the frontend can evolve the existing
+	// placeholder card (审核中 → ✓/✗ → 重绘中 → product) without ever showing a
+	// blank. They are NON-terminal: the task still ends with task_done/task_failed.
+	// Additive — clients that don't recognize them ignore them and still complete
+	// the task lifecycle from task_done/task_failed.
+	EventReviewStarted EventType = "review_started" // judge began scoring the product
+	EventReviewPassed  EventType = "review_passed"  // product passed the quality gate
+	EventReviewFailed  EventType = "review_failed"  // product failed; regenerating with hints
+	EventReviewSkipped EventType = "review_skipped" // gate degraded/unavailable; carry on
 )
 
 // Event is the unified envelope sent over both WS and SSE.

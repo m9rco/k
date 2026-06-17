@@ -136,6 +136,17 @@ func run() error {
 		log.Printf("outpaint: not configured, extreme-ratio adaptation falls back to band padding")
 	}
 
+	// Platform-adaptation quality gate: after an AI-repaint product converges, a
+	// vision judge (doubao-seed-1-6-vision-250815) scores compliance/subject/appeal;
+	// a failing verdict regenerates once with the judge's hints fed back to the
+	// image model. No API key => the gate is disabled and every product passes.
+	if qc := vision.NewQualityChecker(cfg.Quality.BaseURL, cfg.Quality.APIKey, cfg.Quality.Model, cfg.QualityThreshold); qc != nil {
+		genSvc.SetQualityChecker(qualityCheckerAdapter{qc})
+		log.Printf("quality-gate: %s enabled (threshold=%d)", cfg.Quality.Model, cfg.QualityThreshold)
+	} else {
+		log.Printf("quality-gate: not configured, adapt products pass without review")
+	}
+
 	// Image-to-video service (happyhorse). The provider fetches the source image
 	// by public URL, so video requires a COS uploader to publish the local frame
 	// first. Without COS configured the uploader stays nil, Service.Configured()
@@ -218,27 +229,51 @@ func run() error {
 	}
 	orch.SetWebSearch(webSearchSvc)
 	log.Printf("web-search: DDG text + Bing images enabled (no API key)")
-	// Vision pre-stage for platform adaptation: publish refs to COS (md5-deduped)
-	// then analyze with grok-4-fast to produce a theme report injected into the
-	// AI-repaint prompt. Both capabilities are optional; nil disables gracefully.
-	visionBase, visionKey := cfg.VisionCredential()
-	visionAnalyzer := vision.New(visionBase, visionKey, "grok-4-fast")
-	if visionAnalyzer != nil {
-		orch.SetVisionAnalyzer(visionAnalyzer)
-		log.Printf("vision: grok-4-fast analysis enabled (base=%s)", visionBase)
+	// Vision pre-stage for platform adaptation: analyze the reference group to
+	// produce a theme report injected into the AI-repaint prompt. The default
+	// provider is gemini (gemini-2.5-flash-all over the native inline API — no COS
+	// upload needed); VISION_PROVIDER=openai selects the legacy image_url path
+	// (which still needs COS). Both are optional; nil disables gracefully.
+	var visionAnalyzer vision.Analyzer
+	if strings.EqualFold(cfg.Vision.Provider, "openai") {
+		base := cfg.Vision.BaseURL
+		key := cfg.Vision.APIKey
+		if base == "" || key == "" {
+			b2, k2 := cfg.VisionCredential()
+			if base == "" {
+				base = b2
+			}
+			if key == "" {
+				key = k2
+			}
+		}
+		visionAnalyzer = vision.NewOpenAI(base, key, cfg.Vision.Model)
+		if visionAnalyzer != nil {
+			log.Printf("vision: openai-compatible %s analysis enabled (base=%s, needs COS)", cfg.Vision.Model, base)
+		}
 	} else {
-		log.Printf("vision: yunwu/common credentials not configured, vision analysis disabled")
+		visionAnalyzer = vision.NewGemini(cfg.Vision.BaseURL, cfg.Vision.APIKey, cfg.Vision.Model)
+		if visionAnalyzer != nil {
+			log.Printf("vision: gemini inline %s analysis enabled (no COS required)", cfg.Vision.Model)
+		}
+	}
+	if visionAnalyzer != nil && visionAnalyzer.Configured() {
+		orch.SetVisionAnalyzer(visionAnalyzer)
+	} else {
+		visionAnalyzer = nil
+		log.Printf("vision: credentials not configured, vision analysis disabled")
 	}
 	if cosUploader != nil {
 		orch.SetRefPublisher(cosUploader)
 	}
-	// Upload-time vision prewarm: when both COS and vision are configured, each new
-	// upload is analyzed in the background and cached by raw-content md5 — the same
-	// key a later single-image adapt uses (internal/agent.visionThemeReport), so the
-	// adapt hits the cache instead of re-analyzing. Best effort: an md5 already
-	// cached is skipped; publish/analyze failures only log. Unconfigured → nil → the
-	// workspace skips prewarming entirely.
-	if cosUploader != nil && visionAnalyzer != nil {
+	// Upload-time vision prewarm: each new upload is analyzed in the background and
+	// cached by raw-content md5 — the same key a later single-image adapt uses
+	// (internal/agent.visionThemeReport), so the adapt hits the cache instead of
+	// re-analyzing. The gemini inline analyzer needs no COS; the openai analyzer
+	// publishes first. Best effort: an md5 already cached is skipped; failures only
+	// log. Disabled when vision is unconfigured, or when the openai path lacks COS.
+	prewarmInline := visionAnalyzer != nil && !visionAnalyzer.NeedsPublicURL()
+	if visionAnalyzer != nil && (prewarmInline || cosUploader != nil) {
 		wsSvc.SetPrewarm(func(sessionID, assetID, path, mime string) {
 			go func() {
 				data, err := os.ReadFile(path)
@@ -252,12 +287,18 @@ func run() error {
 				}
 				ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 				defer cancel()
-				url, err := cosUploader.UploadIfAbsent(ctx, data, mime, st)
-				if err != nil {
-					log.Printf("prewarm: publish %s failed: %v", assetID, err)
-					return
+				var images []vision.Image
+				if visionAnalyzer.NeedsPublicURL() {
+					url, err := cosUploader.UploadIfAbsent(ctx, data, mime, st)
+					if err != nil {
+						log.Printf("prewarm: publish %s failed: %v", assetID, err)
+						return
+					}
+					images = []vision.Image{{URL: url}}
+				} else {
+					images = []vision.Image{{Data: data, Mime: mime}}
 				}
-				report, err := visionAnalyzer.Analyze(ctx, []string{url}, nil)
+				report, err := visionAnalyzer.Analyze(ctx, images, nil)
 				if err != nil {
 					log.Printf("prewarm: analyze %s failed: %v", assetID, err)
 					return
@@ -480,6 +521,24 @@ func buildNumbering(st *store.Store, sessionID string, order, refs []string, ref
 // it broadcasts a task_created event to the session so the frontend can paint a
 // placeholder and subscribe to SSE progress the instant a task is created.
 type taskAnnouncer struct{ hub *transport.Hub }
+
+// qualityCheckerAdapter bridges vision.QualityChecker to the generation package's
+// local QualityChecker interface (which uses generation.QualityVerdict), keeping
+// the generation package free of a vision import.
+type qualityCheckerAdapter struct{ qc *vision.QualityChecker }
+
+func (a qualityCheckerAdapter) Configured() bool { return a.qc.Configured() }
+
+func (a qualityCheckerAdapter) Check(ctx context.Context, img []byte, mime, themeReport, specLabel string) (generation.QualityVerdict, error) {
+	v, err := a.qc.Check(ctx, img, mime, themeReport, specLabel)
+	return generation.QualityVerdict{
+		Pass:      v.Pass,
+		Total:     v.Total,
+		Compliant: v.Compliant,
+		Reasons:   v.Reasons,
+		Hints:     v.Hints,
+	}, err
+}
 
 func (a taskAnnouncer) AnnounceTask(sessionID, taskID, kind string, count int) {
 	log.Printf("announce: task_created session=%s task=%s kind=%s count=%d conns=%d", sessionID, taskID, kind, count, a.hub.ConnCount(sessionID))

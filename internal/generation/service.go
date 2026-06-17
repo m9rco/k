@@ -79,6 +79,12 @@ type Service struct {
 	// (band-padded), so adaptation still produces a valid product without it.
 	outpainter Provider
 
+	// quality, when set, is the platform-adaptation quality-gate judge. After an
+	// AI-repaint product converges, it scores compliance/subject/appeal; a failing
+	// verdict regenerates once with the judge's hints. Wired via SetQualityChecker;
+	// nil disables the gate (every product passes), matching the pre-gate flow.
+	quality QualityChecker
+
 	// params caches each task's request so a failed product can be retried
 	// without the caller re-supplying inputs (short-term in-memory store, D7).
 	mu     sync.Mutex
@@ -119,6 +125,48 @@ func (s *Service) SetDefaultImageProvider(cfg config.ImageProviderConfig) {
 // outpaint path fall back to ModeContain (transparent band padding), so
 // adaptation degrades gracefully rather than failing.
 func (s *Service) SetOutpainter(p Provider) { s.outpainter = p }
+
+// QualityChecker scores a converged adapt product and returns a pass/fail
+// verdict with improvement hints. Implemented by internal/vision.QualityChecker;
+// kept as a local interface so the generation package does not import vision.
+type QualityChecker interface {
+	Configured() bool
+	Check(ctx context.Context, img []byte, mime, themeReport, specLabel string) (QualityVerdict, error)
+}
+
+// QualityVerdict mirrors vision.QualityVerdict's consumed fields. The judge's own
+// wording is never the verdict — Pass is the server-evaluated decision (red line
+// + threshold); Hints/Reasons feed the regeneration prompt.
+type QualityVerdict struct {
+	Pass      bool
+	Total     int
+	Compliant bool
+	Reasons   []string
+	Hints     string
+}
+
+// SetQualityChecker installs the platform-adaptation quality-gate judge. Optional:
+// nil disables the gate so every adapt product passes (pre-gate behavior).
+func (s *Service) SetQualityChecker(q QualityChecker) {
+	if q == nil || !q.Configured() {
+		s.quality = nil
+		return
+	}
+	s.quality = q
+}
+
+// composeHints builds the regeneration hint string fed back to the image model
+// from a failed verdict: the judge's note plus the flagged reasons.
+func composeHints(v QualityVerdict) string {
+	parts := make([]string, 0, 2)
+	if h := strings.TrimSpace(v.Hints); h != "" {
+		parts = append(parts, h)
+	}
+	if len(v.Reasons) > 0 {
+		parts = append(parts, strings.Join(v.Reasons, "、"))
+	}
+	return strings.Join(parts, "；")
+}
 
 // SetAdaptImageProvider records the provider that platform-adaptation AI repaints
 // force (gpt-image-2 → gemini-3-pro-image), so RetryAsset can re-apply it to an
@@ -209,6 +257,14 @@ type GenerateParams struct {
 	// adaptation ("contain"/"cover"). Empty lets run() auto-pick by the
 	// aspect-ratio difference between the provider output and the target size.
 	AdaptConvergeMode string
+	// Attempt counts which generation pass this is for the adaptation quality
+	// gate: 0 = first pass (eligible for review), 1 = post-review regeneration
+	// (NOT re-reviewed — caps the loop at one regeneration). Non-adaptation tasks
+	// leave it 0 and never enter the gate.
+	Attempt int
+	// QualityHints, when set, is the judge's improvement note from a failed review,
+	// injected into the regeneration prompt and fed back to gpt-image-2.
+	QualityHints string
 }
 
 // primaryAndExtras resolves the effective reference list: the primary asset id
@@ -441,6 +497,9 @@ func (s *Service) run(ctx context.Context, taskID string, p GenerateParams) {
 		effectiveCfg = *p.ProviderOverride
 	}
 	p.Slots.ProviderSupportsTransparency = providerSupportsTransparency(effectiveCfg)
+	// Carry a failed review's hints into the prompt so the regeneration (Attempt=1)
+	// addresses the flagged issues; empty on the first pass.
+	p.Slots.QualityHints = p.QualityHints
 
 	// Pre-compute the resolved generation dimensions for platform adaptation so
 	// BuildPrompt injects the actual provider size into the placement phrase
@@ -636,6 +695,53 @@ func (s *Service) run(ctx context.Context, taskID string, p GenerateParams) {
 				Int("dst_w", adaptW).Int("dst_h", adaptH).
 				Str("mode", string(mode)).
 				Msg("adapt converged to target size")
+		}
+	}
+
+	// Quality gate (adapt AI repaint only, first pass only). The converged product
+	// is what the user will see, so the judge scores THIS image. A failing verdict
+	// feeds the judge's hints back to the same image model (gpt-image-2) and reruns
+	// the whole pipeline ONCE (Attempt=1, not re-reviewed → caps the loop). Review
+	// state streams to the frontend so the placeholder evolves 审核中 → ✓/✗ →
+	// (✗) 重绘中 → product without a blank. Any judge error degrades to pass.
+	if p.Slots.Kind == EditAdaptPlatform && p.Attempt == 0 && s.quality != nil && s.quality.Configured() {
+		s.broker.Publish(taskID, transport.EventReviewStarted, p.SessionID, map[string]any{
+			"taskId":  taskID,
+			"attempt": p.Attempt,
+		})
+		specLabel := strings.TrimSpace(fmt.Sprintf("%s %s %dx%d", p.Slots.ChannelName, p.AdaptSizeName, adaptW, adaptH))
+		reviewCtx, reviewCancel := context.WithTimeout(ctx, 35*time.Second)
+		verdict, qerr := s.quality.Check(reviewCtx, out.Data, out.Mime, p.Slots.ThemeReport, specLabel)
+		reviewCancel()
+		if qerr != nil {
+			applog.From(ctx).Warn().Str("event", "gen.review_skipped").Str("task", taskID).Err(qerr).Msg("quality gate degraded to pass")
+			s.broker.Publish(taskID, transport.EventReviewSkipped, p.SessionID, map[string]any{"taskId": taskID})
+		} else if !verdict.Pass {
+			applog.From(ctx).Info().Str("event", "gen.review_failed").Str("task", taskID).
+				Int("total", verdict.Total).Bool("compliant", verdict.Compliant).
+				Strs("reasons", verdict.Reasons).Msg("quality gate failed; regenerating once with hints")
+			s.broker.Publish(taskID, transport.EventReviewFailed, p.SessionID, map[string]any{
+				"taskId":  taskID,
+				"attempt": p.Attempt,
+				"total":   verdict.Total,
+				"reasons": verdict.Reasons,
+			})
+			// Feed hints (judge note + red-line/low-dim reasons) back to gpt-image-2
+			// and rerun the full pipeline once. The retry reuses THIS taskID so the
+			// frontend keeps the same placeholder card.
+			retry := p
+			retry.Attempt = 1
+			retry.QualityHints = composeHints(verdict)
+			s.progress(taskID, p.SessionID, 20)
+			s.run(ctx, taskID, retry)
+			return
+		} else {
+			applog.From(ctx).Info().Str("event", "gen.review_passed").Str("task", taskID).
+				Int("total", verdict.Total).Msg("quality gate passed")
+			s.broker.Publish(taskID, transport.EventReviewPassed, p.SessionID, map[string]any{
+				"taskId": taskID,
+				"total":  verdict.Total,
+			})
 		}
 	}
 

@@ -11,7 +11,9 @@
 - 实时: WebSocket（对话与工具事件）+ SSE（长任务生图/生视频进度）
 - 模型（服务端硬编码，用户不可选）:
   - 会话理解: `claude-sonnet-4-6`（主） / DeepSeek chat（测试）
-  - 生图: `gpt-image-1` ×2 供应商（主 + 备）
+  - 生图: `gpt-image-2` ×2 供应商（主 + 备）
+  - 视觉宣发分析: `gemini-2.5-flash-all`（Gemini 原生 inline，无需 COS 上传）
+  - 适配质量门控: `doubao-seed-1-6-vision-250815`（Volcengine ARK，OpenAI 兼容 + data URI inline）
   - 生视频: 待定（后续 change 引入）
 
 ## Project Conventions

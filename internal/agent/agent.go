@@ -81,7 +81,7 @@ type Orchestrator struct {
 	// (publish refs to COS → analyze marketing elements). Both optional; nil
 	// disables the pre-stage so adaptation falls back to the standard harness.
 	refPublisher   *cos.Uploader
-	visionAnalyzer *vision.Analyzer
+	visionAnalyzer vision.Analyzer
 	// summaryGates holds per-(session|cacheKey) gate state for a gated
 	// adapt_to_platform call. Inbound signals (confirm / editing / reanalyze)
 	// are delivered into the gate's channels to drive the wait loop.
@@ -163,9 +163,9 @@ func (o *Orchestrator) SetTextToImage(svc *generation.Service) { o.textToImg = s
 // vision pre-stage to publish source images for analysis. Optional.
 func (o *Orchestrator) SetRefPublisher(u *cos.Uploader) { o.refPublisher = u }
 
-// SetVisionAnalyzer installs the grok-4-fast analyzer used by the
-// platform-adaptation vision pre-stage. Optional; nil disables analysis.
-func (o *Orchestrator) SetVisionAnalyzer(a *vision.Analyzer) { o.visionAnalyzer = a }
+// SetVisionAnalyzer installs the analyzer used by the platform-adaptation vision
+// pre-stage. Optional; nil disables analysis.
+func (o *Orchestrator) SetVisionAnalyzer(a vision.Analyzer) { o.visionAnalyzer = a }
 
 // AvailableModels returns the server-authoritative, credential-filtered model
 // catalog grouped by scene, the session's current selection per scene, and the

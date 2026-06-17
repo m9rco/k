@@ -180,6 +180,23 @@ type Config struct {
 	// left out of the whitelist.
 	TextToImage ImageProviderConfig
 
+	// Vision is the marketing-analysis vision backend. Default provider "gemini"
+	// (gemini-2.5-flash-all over the native :generateContent inline API, so the
+	// analysis no longer requires publishing the image to a public URL). Provider
+	// "openai" falls back to the legacy OpenAI-compatible /chat/completions +
+	// image_url path (still needs COS). Credentials fall back to COMMON_*.
+	Vision ImageProviderConfig
+
+	// Quality is the platform-adaptation quality-gate judge backend
+	// (doubao-seed-1-6-vision-250815 over OpenAI-compatible /chat/completions with
+	// inline data-URI images). When its APIKey is unset the quality gate is
+	// disabled (every adapt product is treated as passing) so behavior matches the
+	// pre-gate flow.
+	Quality ImageProviderConfig
+	// QualityThreshold is the weighted-total score (0-100) at/above which an adapt
+	// product passes the quality gate (compliance is a separate hard red line).
+	QualityThreshold int
+
 	// Video is the image-to-video provider (happyhorse R2V). It may be unset, in
 	// which case the video capability degrades to "not configured".
 	Video ImageProviderConfig
@@ -362,6 +379,13 @@ func Load(platformsPath string) (*Config, error) {
 	imageOutpaint := common.resolveEndpoint("IMAGE_OUTPAINT", "gemini", "gemini-3.1-flash-image", endpointAliases{})
 	// Text-to-image (wan/qwen via DashScope async). Default provider "dashscope".
 	textToImage := common.resolveEndpoint("TEXT_TO_IMAGE", "dashscope", "", endpointAliases{})
+	// Vision marketing-analysis backend. Default provider "gemini" with the
+	// gemini-2.5-flash-all model over the native inline API (no COS upload). The
+	// legacy OpenAI-compatible image_url path is selected with VISION_PROVIDER=openai.
+	visionEP := common.resolveEndpoint("VISION", "gemini", "gemini-2.5-flash-all", endpointAliases{})
+	// Quality-gate judge (doubao vision over OpenAI-compatible chat/completions).
+	// No API key => the quality gate is disabled and adapt behaves as before.
+	qualityEP := common.resolveEndpoint("QUALITY", "openai", "doubao-seed-1-6-vision-250815", endpointAliases{})
 	// Video canonicalizes on VIDEO_*; the older HAPPYHORSE_* names remain as
 	// aliases (below VIDEO_* / COMMON_*) so existing deployments don't regress.
 	video := common.resolveEndpoint("VIDEO", "openai", "", endpointAliases{
@@ -431,6 +455,26 @@ func Load(platformsPath string) (*Config, error) {
 			APIKey:   textToImage.apiKey,
 			Model:    textToImage.model,
 		},
+
+		// Vision marketing-analysis backend. Defaults to gemini-2.5-flash-all
+		// (native inline, no COS). Credentials fall back to COMMON_*.
+		Vision: ImageProviderConfig{
+			Name:     env("VISION_NAME", "vision"),
+			Provider: visionEP.provider,
+			BaseURL:  visionEP.baseURL,
+			APIKey:   visionEP.apiKey,
+			Model:    visionEP.model,
+		},
+
+		// Quality-gate judge. APIKey empty => quality gate disabled.
+		Quality: ImageProviderConfig{
+			Name:     env("QUALITY_NAME", "quality"),
+			Provider: qualityEP.provider,
+			BaseURL:  qualityEP.baseURL,
+			APIKey:   qualityEP.apiKey,
+			Model:    qualityEP.model,
+		},
+		QualityThreshold: envInt("QUALITY_THRESHOLD", 75),
 
 		// Image-to-video (happyhorse R2V). APIKey/Model empty means the video
 		// capability reports "not configured" rather than failing.
