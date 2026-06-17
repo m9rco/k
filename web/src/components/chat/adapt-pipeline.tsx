@@ -1,13 +1,17 @@
 import * as React from "react";
-import { Check, X, Loader2 } from "lucide-react";
+import { Check, X, Loader2, Minus } from "lucide-react";
 import { useApp } from "@/store/context";
 import type { AdaptPipelineItem } from "@/lib/types";
 
 // Each adapt task goes through up to 4 stages; we derive the active stage from
-// the task's stage + review fields so no extra state is needed.
-type StageStatus = "pending" | "active" | "done" | "error";
+// the task's stage + review fields so no extra state is needed. 补全 (outpaint)
+// is conditional — only extreme-ratio reshapes need it; near-ratio sizes
+// converge by plain scale and the 补全 step is shown as 跳过.
+type StageStatus = "pending" | "active" | "done" | "error" | "skipped";
 
-function stagesFor(task: { status: string; stage?: string; review?: string } | undefined): StageStatus[] {
+function stagesFor(
+  task: { status: string; stage?: string; review?: string; outpainted?: boolean } | undefined,
+): StageStatus[] {
   if (!task) return ["pending", "pending", "pending", "pending"];
   const done = task.status === "done";
   const failed = task.status === "failed";
@@ -19,10 +23,14 @@ function stagesFor(task: { status: string; stage?: string; review?: string } | u
   const genDone = task.stage === "outpainting" || task.stage === "reviewing" || done || failed;
   const s1: StageStatus = failed && !genDone ? "error" : genDone ? "done" : "active";
 
-  // Gemini补全 (outpaint — only some tasks go through this)
-  const outDone = task.stage === "reviewing" || (done && task.stage !== "outpainting");
+  // 补全 (outpaint — conditional). When the task converged without ever emitting
+  // outpaint_started, this size didn't need it → skipped, not done.
   const outActive = task.stage === "outpainting";
-  const s2: StageStatus = outDone ? "done" : outActive ? "active" : "pending";
+  let s2: StageStatus;
+  if (outActive) s2 = "active";
+  else if (task.outpainted) s2 = task.stage === "reviewing" || done ? "done" : "pending";
+  else if (task.stage === "reviewing" || done) s2 = "skipped";
+  else s2 = "pending";
 
   // 质量审核
   const reviewDone = done || (task.review === "passed" && !task.stage);
@@ -33,12 +41,13 @@ function stagesFor(task: { status: string; stage?: string; review?: string } | u
   return [s0, s1, s2, s3];
 }
 
-const STEPS = ["分析", "生图", "Gemini补全", "质量审核"];
+const STEPS = ["分析", "生图", "补全", "质量审核"];
 
 function StepIcon({ status }: { status: StageStatus }) {
   if (status === "done") return <Check className="size-3 text-ok" />;
   if (status === "error") return <X className="size-3 text-amber-500" />;
   if (status === "active") return <Loader2 className="size-3 animate-spin text-accent" />;
+  if (status === "skipped") return <Minus className="size-3 text-fg-mute/40" />;
   return <span className="size-3 rounded-full border border-fg-mute/30" />;
 }
 
@@ -54,15 +63,19 @@ function TaskPipeline({ taskId }: { taskId: string }) {
           <div
             className={
               "flex items-center gap-1 " +
-              (stages[i] === "active" ? "text-accent" : stages[i] === "done" ? "text-fg-dim" : "text-fg-mute/50")
+              (stages[i] === "active"
+                ? "text-accent"
+                : stages[i] === "done"
+                  ? "text-fg-dim"
+                  : stages[i] === "skipped"
+                    ? "text-fg-mute/40 line-through"
+                    : "text-fg-mute/50")
             }
           >
             <StepIcon status={stages[i]} />
             <span>{label}</span>
           </div>
-          {i < STEPS.length - 1 && (
-            <span className="text-fg-mute/30">→</span>
-          )}
+          {i < STEPS.length - 1 && <span className="text-fg-mute/30">→</span>}
         </React.Fragment>
       ))}
     </div>

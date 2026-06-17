@@ -169,7 +169,7 @@ export function useAppController() {
         else if (type === "review_skipped") {
           tasks.set(taskId, { ...cur, stage: undefined, review: undefined, reviewReason: undefined });
         } else if (type === "outpaint_started")
-          tasks.set(taskId, { ...cur, stage: "outpainting" });
+          tasks.set(taskId, { ...cur, stage: "outpainting", outpainted: true });
         return { ...s, tasks };
       });
       if (type === "task_done") {

@@ -54,8 +54,12 @@ export interface Task {
   // optional tooltip; the card does not surface raw scores.
   reviewReason?: string;
   // stage tracks which pipeline step is currently active (adapt tasks only):
-  // undefined=生图中, "outpainting"=Gemini补全中, "reviewing"=质量审核中.
+  // undefined=生图中, "outpainting"=补全中, "reviewing"=质量审核中.
   stage?: "outpainting" | "reviewing";
+  // outpainted is set true once an outpaint_started event arrives, so the pipeline
+  // can distinguish "补全完成" from "补全跳过" (not every size needs outpaint — only
+  // extreme-ratio reshapes; near-ratio sizes converge by plain scale).
+  outpainted?: boolean;
 }
 
 export interface ContextState {
