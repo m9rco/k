@@ -98,18 +98,25 @@ export function useAppController() {
     try {
       const [assets, tasks] = await Promise.all([api.listAssets(sid), api.listTasks(sid)]);
       setState((s) => {
-        // Preserve client-only task fields the /tasks API does not return
-        // (count from task_created, note from the tool call) so a refresh
-        // mid-task — e.g. triggered by each downloaded search image — does not
-        // wipe the placeholder count or the agent's understanding note.
+        // Preserve client-only task fields the /tasks API does not return.
+        // IMPORTANT: never downgrade status — a stale API snapshot (e.g. fetched
+        // while a task was still running) must not revert a done/failed task back
+        // to running. done/failed=2 > running=1 > queued=0.
+        const STATUS_ORD: Record<string, number> = { queued: 0, running: 1, done: 2, failed: 2 };
         const prev = s.tasks;
         const merged = new Map(
           tasks.map((t) => {
             const old = prev.get(t.id);
-            return [t.id, old ? { ...t, count: t.count ?? old.count, note: t.note ?? old.note, outpainted: old.outpainted, review: old.review, reviewReason: old.reviewReason } : t] as const;
+            if (!old) return [t.id, t] as const;
+            const forward = (STATUS_ORD[t.status] ?? 0) >= (STATUS_ORD[old.status] ?? 0);
+            const base = forward ? t : { ...t, status: old.status, progress: old.progress };
+            return [t.id, { ...base, count: base.count ?? old.count, note: base.note ?? old.note, outpainted: old.outpainted, review: old.review, reviewReason: old.reviewReason }] as const;
           }),
         );
-        return { ...s, assets: new Map(assets.map((a) => [a.id, a])), tasks: merged };
+        // Merge assets (spread existing + incoming) so a stale concurrent refresh
+        // doesn't erase assets that a newer refresh already added to state.
+        const merged_assets = new Map([...s.assets, ...assets.map((a) => [a.id, a] as const)]);
+        return { ...s, assets: merged_assets, tasks: merged };
       });
       subscribeRunningTasks(sid, tasks);
     } catch (e) {
