@@ -385,7 +385,7 @@ func Load(platformsPath string) (*Config, error) {
 	visionEP := common.resolveEndpoint("VISION", "gemini", "gemini-flash-latest", endpointAliases{})
 	// Quality-gate judge (doubao vision over OpenAI-compatible chat/completions).
 	// No API key => the quality gate is disabled and adapt behaves as before.
-	qualityEP := common.resolveEndpoint("QUALITY", "openai", "doubao-seed-1-6-vision-250815", endpointAliases{})
+	qualityEP := common.resolveEndpoint("QUALITY", "openai", "gemini-flash-latest", endpointAliases{})
 	// Video canonicalizes on VIDEO_*; the older HAPPYHORSE_* names remain as
 	// aliases (below VIDEO_* / COMMON_*) so existing deployments don't regress.
 	video := common.resolveEndpoint("VIDEO", "openai", "", endpointAliases{
