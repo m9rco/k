@@ -187,14 +187,36 @@ const (
 const transparencyRewrite = "纯净中性单色背景，主体边缘干净清晰便于后期抠图"
 
 // rewriteSizeNote applies capability-aware rewrites to a catalog size note before
-// it is injected. Currently only the transparent-background case (design D4); all
-// other notes (无文案/仅 logo/圆角/安全区) pass through unchanged.
+// it is injected. Logo/copy notes are expanded from Chinese to unambiguous English
+// so the image model cannot misread "无文案" (no copy) as "no logo". Transparency
+// notes are rewritten when the provider lacks that capability (design D4). Other
+// notes (圆角/安全区/etc.) pass through unchanged. Most-specific patterns first.
 func rewriteSizeNote(note string, supportsTransparency bool) string {
 	if note == "" {
 		return ""
 	}
 	if !supportsTransparency && (strings.Contains(note, "透明底") || strings.Contains(note, "透明背景")) {
 		return transparencyRewrite
+	}
+	switch {
+	case strings.Contains(note, "仅 logo") && strings.Contains(note, "无文案"):
+		return "show the game LOGO only — no marketing copy, taglines or text overlays"
+	case strings.Contains(note, "不带文案") && strings.Contains(note, "logo"):
+		return "include the game LOGO; no marketing copy or text overlays"
+	case strings.Contains(note, "带文案") && strings.Contains(note, "logo"):
+		return "include both marketing copy/game title and the game LOGO"
+	case strings.Contains(note, "无文案"):
+		return "no marketing copy (no taglines, slogans or text overlays); keep the game LOGO fully visible and legible"
+	case strings.Contains(note, "LOGO") && strings.Contains(note, "无广告语"):
+		return "center or right-align the game LOGO; no advertising slogans"
+	case strings.Contains(note, "不带游戏 logo"):
+		return "no game LOGO; do not add or invent a logo"
+	case strings.Contains(note, "无 logo") && !strings.Contains(note, "logo 位"):
+		return "no game LOGO; do not add or invent a logo"
+	case strings.Contains(note, "含清晰游戏 logo") || strings.Contains(note, "带游戏 logo"):
+		return "include a clear, legible game LOGO"
+	case strings.Contains(note, "须带文案"):
+		return "prominently include marketing copy and the game title"
 	}
 	return note
 }

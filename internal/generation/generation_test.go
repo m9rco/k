@@ -624,9 +624,9 @@ func TestBuildPromptAdaptPlatformCoversSemantics(t *testing.T) {
 	if !strings.Contains(prompt, "fill the new aspect ratio") {
 		t.Errorf("missing fill-not-crop clause: %q", prompt)
 	}
-	// Size note passed through as a constraint.
-	if !strings.Contains(prompt, "仅 logo，无文案") {
-		t.Errorf("size note not passed through: %q", prompt)
+	// Size note expanded to unambiguous English.
+	if !strings.Contains(prompt, "show the game LOGO only") {
+		t.Errorf("size note not expanded to English: %q", prompt)
 	}
 	// Palette + harmony still appended.
 	if !strings.Contains(prompt, "#aabbcc") {
@@ -637,7 +637,42 @@ func TestBuildPromptAdaptPlatformCoversSemantics(t *testing.T) {
 	}
 }
 
-// TestBuildPromptAdaptPlatformInjectionStripped verifies the optional user
+// TestRewriteSizeNoteLogoAndCopy verifies that logo/copy catalog notes are
+// expanded to unambiguous English so the image model cannot misread "无文案"
+// (no copy) as "no logo".
+func TestRewriteSizeNoteLogoAndCopy(t *testing.T) {
+	cases := []struct {
+		note string
+		want string // substring that must appear in output
+	}{
+		{"无文案", "keep the game LOGO fully visible"},
+		{"无文案", "no marketing copy"},
+		{"仅 logo，无文案", "show the game LOGO only"},
+		{"不带文案，带游戏 logo", "include the game LOGO"},
+		{"带文案和游戏 logo", "include both marketing copy"},
+		{"LOGO 居中或偏右，无广告语", "no advertising slogans"},
+		{"不带游戏 logo", "no game LOGO"},
+		{"无 logo，无渐变蒙版", "no game LOGO"},
+		{"含清晰游戏 logo", "clear, legible game LOGO"},
+		{"须带文案，突出游戏名", "marketing copy and the game title"},
+		// Non-logo notes pass through unchanged.
+		{"圆角", "圆角"},
+		{"安全区留白", "安全区留白"},
+	}
+	for _, tc := range cases {
+		got := rewriteSizeNote(tc.note, true)
+		if !strings.Contains(got, tc.want) {
+			t.Errorf("rewriteSizeNote(%q) = %q; want substring %q", tc.note, got, tc.want)
+		}
+		// None of the expanded notes should still contain raw Chinese logo/copy markers.
+		for _, raw := range []string{"无文案", "仅 logo，无文案", "不带游戏 logo"} {
+			if tc.note == raw && got == raw {
+				t.Errorf("rewriteSizeNote(%q) returned raw note unchanged", tc.note)
+			}
+		}
+	}
+}
+
 // direction and the catalog note are sanitized — control-style injection in
 // either slot must not survive into the prompt.
 func TestBuildPromptAdaptPlatformInjectionStripped(t *testing.T) {
