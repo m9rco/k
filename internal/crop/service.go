@@ -176,7 +176,14 @@ func (s *Service) resolveID(id string) (sizeRef, bool) {
 	if ref, ok := s.byID[id]; ok {
 		return ref, true
 	}
-	if full, ok := s.byCollapsed[id]; ok && full != "" {
+	// Tolerant: agent may omit the middle segment entirely ("taptap.slug") or
+	// use the wrong asset-type segment ("taptap.cover.slug" vs "taptap.banner.slug").
+	// Both cases collapse to the same "channel.slug" key.
+	ck := id
+	if c := collapseID(id); c != "" {
+		ck = c
+	}
+	if full, ok := s.byCollapsed[ck]; ok && full != "" {
 		return s.byID[full], true
 	}
 	return sizeRef{}, false
