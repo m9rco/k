@@ -189,12 +189,13 @@ type PixelVerdict struct {
 // wording is never the verdict — Pass is the server-evaluated decision (red line
 // + threshold); Hints/Reasons feed the regeneration prompt.
 type QualityVerdict struct {
-	Pass        bool
-	Total       int
-	Compliant   bool
-	Reasons     []string
-	Hints       string
-	FaultSource string // "repaint" | "outpaint" | "both"; empty = repaint
+	Pass                bool
+	Total               int
+	Compliant           bool
+	Reasons             []string
+	Hints               string
+	FaultSource         string // "repaint" | "outpaint" | "both"; empty = repaint
+	KeyElementsFidelity int    // 必备要素保真 0-100; drives red-line-aware best-of
 }
 
 // SetQualityChecker installs the platform-adaptation quality-gate judge. Optional:
@@ -232,6 +233,33 @@ func composeHints(v QualityVerdict) string {
 		parts = append(parts, strings.Join(v.Reasons, "、"))
 	}
 	return strings.Join(parts, "；")
+}
+
+// bestOfVerdict is the subset of a judge verdict used to pick the better of the
+// first-pass and regen products in the Attempt=1 re-check.
+type bestOfVerdict struct {
+	pass    bool
+	keyElem int
+	total   int
+}
+
+// preferFirst reports whether the first-pass product should be kept over the
+// regen, by a red-line-aware priority: (1) a version that passes the gate beats
+// one that fails; (2) both same → higher key_elements_fidelity wins (directly
+// "who kept the copy/LOGO"); (3) tie → higher total; (4) full tie → keep regen
+// (it carries the improvement hints). This stops a high total — dominated by
+// subject/appeal/canvas — from masking dropped copy.
+func preferFirst(first, regen bestOfVerdict) bool {
+	if first.pass != regen.pass {
+		return first.pass // first kept only if it's the one that passes
+	}
+	if first.keyElem != regen.keyElem {
+		return first.keyElem > regen.keyElem
+	}
+	if first.total != regen.total {
+		return first.total > regen.total
+	}
+	return false // full tie → keep regen
 }
 
 // SetAdaptImageProvider records the provider that platform-adaptation AI repaints
@@ -338,6 +366,13 @@ type GenerateParams struct {
 	// outpaint-only retries (fault_source="outpaint") so gpt-image-2 is not
 	// called again when only the scene-extension fill was defective.
 	PreOutpaintData []byte
+	// FirstAttemptData/Total/Pass/KeyElem carry the first-pass product bytes and
+	// its judge verdict into the Attempt=1 re-check, so bestOf can pick the
+	// red-line-aware better version (not merely the higher total).
+	FirstAttemptData    []byte
+	FirstAttemptTotal   int
+	FirstAttemptPass    bool
+	FirstAttemptKeyElem int
 }
 
 // primaryAndExtras resolves the effective reference list: the primary asset id
@@ -586,6 +621,9 @@ func (s *Service) run(ctx context.Context, taskID string, p GenerateParams) {
 	// Carry a failed review's hints into the prompt so the regeneration (Attempt=1)
 	// addresses the flagged issues; empty on the first pass.
 	p.Slots.QualityHints = p.QualityHints
+	// Provide source dims so BuildPrompt can compute the source↔target ratio gap
+	// for the copy-preserving recompose cue (reproportionHint).
+	p.Slots.SourceWidth, p.Slots.SourceHeight = srcW, srcH
 
 	// Pre-compute the resolved generation dimensions for platform adaptation so
 	// BuildPrompt injects the actual provider size into the placement phrase
@@ -877,6 +915,10 @@ func (s *Service) run(ctx context.Context, taskID string, p GenerateParams) {
 			retry := p
 			retry.Attempt = 1
 			retry.QualityHints = composeHints(verdict)
+			retry.FirstAttemptData = out.Data
+			retry.FirstAttemptTotal = verdict.Total
+			retry.FirstAttemptPass = verdict.Pass
+			retry.FirstAttemptKeyElem = verdict.KeyElementsFidelity
 			if verdict.FaultSource == "outpaint" && preOutpaintData != nil {
 				// Outpaint-only retry: defect is in scene extension, not the repaint.
 				// Skip gen.Generate() — reuse the repaint snapshot captured before outpaint.
@@ -891,6 +933,51 @@ func (s *Service) run(ctx context.Context, taskID string, p GenerateParams) {
 			s.broker.Publish(taskID, transport.EventReviewPassed, p.SessionID, map[string]any{
 				"taskId": taskID,
 				"total":  verdict.Total,
+			})
+		}
+	}
+
+	// Attempt=1 re-check: score the regen product and persist the red-line-aware
+	// better of the two passes (bestOf). No further regeneration — caps the loop.
+	// When the chosen version still fails a red line, emit a degraded review_failed
+	// (honest "shipped with flaws") instead of a fake review_passed.
+	if p.Slots.Kind == EditAdaptPlatform && p.Attempt == 1 && s.quality != nil && s.quality.Configured() && p.FirstAttemptData != nil {
+		specLabel := strings.TrimSpace(fmt.Sprintf("%s %s %dx%d", p.Slots.ChannelName, p.AdaptSizeName, adaptW, adaptH))
+		recheckCtx, recheckCancel := context.WithTimeout(ctx, 35*time.Second)
+		regenVerdict, _ := s.quality.Check(recheckCtx, out.Data, out.Mime, p.Slots.ThemeReport, specLabel)
+		recheckCancel()
+		first := bestOfVerdict{pass: p.FirstAttemptPass, keyElem: p.FirstAttemptKeyElem, total: p.FirstAttemptTotal}
+		regen := bestOfVerdict{pass: regenVerdict.Pass, keyElem: regenVerdict.KeyElementsFidelity, total: regenVerdict.Total}
+		keepFirst := preferFirst(first, regen)
+		chosen := regen
+		if keepFirst {
+			out.Data = p.FirstAttemptData
+			chosen = first
+			applog.From(ctx).Info().Str("event", "gen.recheck_reverted").Str("task", taskID).
+				Bool("first_pass", first.pass).Int("first_keyelem", first.keyElem).Int("first_total", first.total).
+				Bool("regen_pass", regen.pass).Int("regen_keyelem", regen.keyElem).Int("regen_total", regen.total).
+				Msg("first attempt is better (red-line-aware); reverting")
+		} else {
+			applog.From(ctx).Info().Str("event", "gen.recheck_accepted").Str("task", taskID).
+				Bool("first_pass", first.pass).Int("first_keyelem", first.keyElem).Int("first_total", first.total).
+				Bool("regen_pass", regen.pass).Int("regen_keyelem", regen.keyElem).Int("regen_total", regen.total).
+				Msg("regen is equal or better (red-line-aware); keeping regen")
+		}
+		if chosen.pass {
+			s.broker.Publish(taskID, transport.EventReviewPassed, p.SessionID, map[string]any{
+				"taskId": taskID,
+				"total":  chosen.total,
+			})
+		} else {
+			// Both passes failed a red line: ship the better one but say so honestly.
+			applog.From(ctx).Info().Str("event", "gen.review_degraded").Str("task", taskID).
+				Int("total", chosen.total).Int("key_elements_fidelity", chosen.keyElem).
+				Msg("both attempts failed the red line; shipping the better version (degraded)")
+			s.broker.Publish(taskID, transport.EventReviewFailed, p.SessionID, map[string]any{
+				"taskId":   taskID,
+				"total":    chosen.total,
+				"degraded": true,
+				"final":    true,
 			})
 		}
 	}

@@ -79,13 +79,13 @@ func TestExtractJSONFromFencedProse(t *testing.T) {
 }
 
 func TestNewQualityCheckerDisabledWithoutCreds(t *testing.T) {
-	if NewQualityChecker("", "", "", 0) != nil {
+	if NewQualityChecker("", "", "", 0, 0) != nil {
 		t.Errorf("expected nil checker without baseURL/apiKey")
 	}
-	if NewQualityChecker("https://x", "", "", 0) != nil {
+	if NewQualityChecker("https://x", "", "", 0, 0) != nil {
 		t.Errorf("expected nil checker without apiKey")
 	}
-	qc := NewQualityChecker("https://x", "k", "", 0)
+	qc := NewQualityChecker("https://x", "k", "", 0, 0)
 	if qc == nil || !qc.Configured() {
 		t.Fatalf("expected configured checker")
 	}
@@ -94,5 +94,41 @@ func TestNewQualityCheckerDisabledWithoutCreds(t *testing.T) {
 	}
 	if qc.model != "doubao-seed-1-6-vision-250815" {
 		t.Errorf("expected default model, got %q", qc.model)
+	}
+	if qc.keyElementsFidelityMin != 60 {
+		t.Errorf("expected default key-elements-fidelity-min 60, got %d", qc.keyElementsFidelityMin)
+	}
+}
+
+// TestEvaluateKeyElementsFidelityRedLine verifies a low key_elements_fidelity
+// fails the verdict regardless of an otherwise high weighted total (asset_8825 /
+// asset_c0fbd56 regression: missing subject/LOGO or rewritten text was masked).
+func TestEvaluateKeyElementsFidelityRedLine(t *testing.T) {
+	q := &QualityChecker{threshold: 75, keyElementsFidelityMin: 60}
+	// High subject/appeal/quality/canvas → total 86, but text was rewritten (fidelity 30).
+	content := `{"compliance":{"pass":true},"scores":{"subject_consistency":100,"character_appeal":95,"overall_quality":80,"canvas_fill":95,"key_elements_fidelity":30},"total":86,"hints":"保持LOGO文字不变"}`
+	v, err := q.evaluate(content)
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+	if v.Pass {
+		t.Errorf("expected fail on key-elements red line despite total=%d", v.Total)
+	}
+	if len(v.Reasons) == 0 || v.Reasons[0] != "核心主体/LOGO 缺失或文字被改写" {
+		t.Errorf("expected key-elements reason, got %v", v.Reasons)
+	}
+}
+
+// TestEvaluateKeyElementsFidelityDisabled verifies a zero threshold disables the
+// red line (pre-feature behavior: high total passes even with low fidelity).
+func TestEvaluateKeyElementsFidelityDisabled(t *testing.T) {
+	q := &QualityChecker{threshold: 75, keyElementsFidelityMin: 0}
+	content := `{"compliance":{"pass":true},"scores":{"subject_consistency":100,"character_appeal":95,"overall_quality":80,"canvas_fill":95,"key_elements_fidelity":10},"total":86,"hints":""}`
+	v, err := q.evaluate(content)
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+	if !v.Pass {
+		t.Errorf("expected pass when red line disabled (total=%d)", v.Total)
 	}
 }

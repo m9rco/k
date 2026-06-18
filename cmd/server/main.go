@@ -140,9 +140,9 @@ func run() error {
 	// vision judge (doubao-seed-1-6-vision-250815) scores compliance/subject/appeal;
 	// a failing verdict regenerates once with the judge's hints fed back to the
 	// image model. No API key => the gate is disabled and every product passes.
-	if qc := vision.NewQualityChecker(cfg.Quality.BaseURL, cfg.Quality.APIKey, cfg.Quality.Model, cfg.QualityThreshold); qc != nil {
+	if qc := vision.NewQualityChecker(cfg.Quality.BaseURL, cfg.Quality.APIKey, cfg.Quality.Model, cfg.QualityThreshold, cfg.KeyElementsFidelityMin); qc != nil {
 		genSvc.SetQualityChecker(qualityCheckerAdapter{qc})
-		log.Printf("quality-gate: %s enabled (threshold=%d)", cfg.Quality.Model, cfg.QualityThreshold)
+		log.Printf("quality-gate: %s enabled (threshold=%d key_elements_min=%d)", cfg.Quality.Model, cfg.QualityThreshold, cfg.KeyElementsFidelityMin)
 	} else {
 		log.Printf("quality-gate: not configured, adapt products pass without review")
 	}
@@ -551,12 +551,13 @@ func (a qualityCheckerAdapter) Configured() bool { return a.qc.Configured() }
 func (a qualityCheckerAdapter) Check(ctx context.Context, img []byte, mime, themeReport, specLabel string) (generation.QualityVerdict, error) {
 	v, err := a.qc.Check(ctx, img, mime, themeReport, specLabel)
 	return generation.QualityVerdict{
-		Pass:        v.Pass,
-		Total:       v.Total,
-		Compliant:   v.Compliant,
-		Reasons:     v.Reasons,
-		Hints:       v.Hints,
-		FaultSource: v.FaultSource,
+		Pass:                v.Pass,
+		Total:               v.Total,
+		Compliant:           v.Compliant,
+		Reasons:             v.Reasons,
+		Hints:               v.Hints,
+		FaultSource:         v.FaultSource,
+		KeyElementsFidelity: v.DimScores.KeyElementsFidelity,
 	}, err
 }
 

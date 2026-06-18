@@ -79,8 +79,13 @@ type Slots struct {
 	// generates full detail, then we converge down to exact during crop).
 	GenWidth  int
 	GenHeight int
-	SizeNote  string // e.g. 无文案 / 仅 logo / 圆角 / 透明底 / 安全区
-	AdaptDesc string // optional user description for the adaptation
+	// SourceWidth/SourceHeight are the anchor source image's dimensions, used to
+	// gauge how far the target ratio diverges from the source so the prompt can
+	// add a copy-preserving recompose cue for medium ratio gaps (Q2). 0 disables.
+	SourceWidth  int
+	SourceHeight int
+	SizeNote     string // e.g. 无文案 / 仅 logo / 圆角 / 透明底 / 安全区
+	AdaptDesc    string // optional user description for the adaptation
 	// --- harness inputs set by the service (not user free text) ---
 	// RefCount is how many reference images this generation feeds the model
 	// (anchor + auxiliaries). When ≥2 the prompt adds an explicit anchor-role
@@ -279,6 +284,12 @@ func BuildPrompt(slots Slots, palette []PaletteColor) (string, error) {
 		if hint := extremeRatioHint(slots.GenWidth, slots.GenHeight, slots.TargetWidth, slots.TargetHeight); hint != "" {
 			b.WriteString(hint)
 			b.WriteString(" ")
+		} else if hint := reproportionHint(slots.SourceWidth, slots.SourceHeight, slots.TargetWidth, slots.TargetHeight, slots.SizeNote); hint != "" {
+			// Medium ratio gap (e.g. 16:9 source → 3:2 target): not extreme enough for
+			// the safe-zone crop cue above, but far enough that free repaint drops the
+			// copy. Inject a copy-preserving recompose constraint instead.
+			b.WriteString(hint)
+			b.WriteString(" ")
 		}
 		b.WriteString("Re-frame and extend/repaint the scene and background to fill the new aspect ratio naturally, rather than cropping; reposition the subject for a balanced composition at the target proportions. ")
 		if note := rewriteSizeNote(Sanitize(slots.SizeNote), slots.ProviderSupportsTransparency); note != "" {
@@ -456,6 +467,31 @@ func extremeRatioHint(genW, genH, dstW, dstH int) string {
 	default:
 		return ""
 	}
+}
+
+// reproportionHint returns a copy-preserving recompose cue when the source and
+// target aspect ratios diverge beyond the crop fast-path tolerance but the
+// target is NOT extreme (extremeRatioHint handles ≥3:1). The caller's else-if
+// already guarantees extremeRatioHint returned ""; this function only needs to
+// check the lower bound (ratio gap > ratioTolerance). Empty when source dims
+// are unknown or the ratio gap is within tolerance.
+func reproportionHint(srcW, srcH, dstW, dstH int, sizeNote string) string {
+	if srcW <= 0 || srcH <= 0 || dstW <= 0 || dstH <= 0 {
+		return ""
+	}
+	arSrc := float64(srcW) / float64(srcH)
+	arDst := float64(dstW) / float64(dstH)
+	diff := math.Abs(arSrc-arDst) / arDst
+	if diff <= ratioTolerance {
+		return "" // ratio gap is small; no recompose constraint needed
+	}
+	// Medium ratio gap: the model must genuinely recompose the layout.
+	// Always require subject + LOGO. Add copy requirement unless 无文案.
+	noCopy := strings.Contains(sizeNote, "无文案")
+	if noCopy {
+		return "RECOMPOSE CONSTRAINT — the target aspect ratio differs significantly from the source. When recomposing, you MUST keep the main subject and LOGO fully visible and legible at the new proportions; reposition them as needed — do NOT crop them out or omit them."
+	}
+	return "RECOMPOSE CONSTRAINT — the target aspect ratio differs significantly from the source. When recomposing, you MUST keep the main subject, LOGO, and all marketing copy (title, tagline, text labels) fully visible and legible at the new proportions; reposition them as needed — do NOT drop, crop, or omit any of them."
 }
 
 // buildOutpaintPrompt is the instruction for the outpaint convergence step. The

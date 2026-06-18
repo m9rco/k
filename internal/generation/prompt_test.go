@@ -111,3 +111,41 @@ func TestBuildPromptExtremeSafeZone(t *testing.T) {
 		t.Errorf("ordinary 16:9 prompt should not carry safe-zone cue:\n%s", got2)
 	}
 }
+
+// TestReproportionHint verifies the copy-preserving recompose cue (Q2 fix).
+func TestReproportionHint(t *testing.T) {
+	tests := []struct {
+		name     string
+		srcW,srcH,dstW,dstH int
+		sizeNote string
+		wantHint bool
+		wantCopy bool // true = hint should mention copy/text
+	}{
+		// 16:9 → 3:2: diff 15.6%, triggers cue with copy mention
+		{"16:9 to 3:2 needs cue", 1920, 1080, 900, 600, "", true, true},
+		// 16:9 → 3:2 but 无文案: cue fires but no copy mention
+		{"16:9 to 3:2 no-copy placement", 1920, 1080, 900, 600, "无文案", true, false},
+		// 16:9 → 1.8 (900x500): diff 1.2%, within tolerance, no cue
+		{"16:9 to 1.8 close ratio", 1920, 1080, 900, 500, "", false, false},
+		// Same ratio: no cue
+		{"same ratio", 1920, 1080, 1280, 720, "", false, false},
+		// Zero source: no cue
+		{"zero source", 0, 0, 900, 600, "", false, false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := reproportionHint(tc.srcW, tc.srcH, tc.dstW, tc.dstH, tc.sizeNote)
+			hasHint := got != ""
+			if hasHint != tc.wantHint {
+				t.Errorf("reproportionHint(%d,%d,%d,%d,%q): got hint=%v, want %v (hint=%q)",
+					tc.srcW, tc.srcH, tc.dstW, tc.dstH, tc.sizeNote, hasHint, tc.wantHint, got)
+			}
+			if tc.wantHint {
+				hasCopy := strings.Contains(got, "copy") || strings.Contains(got, "text labels") || strings.Contains(got, "marketing copy")
+				if hasCopy != tc.wantCopy {
+					t.Errorf("reproportionHint copy mention: got %v, want %v (hint=%q)", hasCopy, tc.wantCopy, got)
+				}
+			}
+		})
+	}
+}

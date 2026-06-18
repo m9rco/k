@@ -28,12 +28,15 @@ const qualityPrompt = `你是游戏宣发素材质检员。下面给你一张【
 3. character_appeal（人物卖相，0-100）：主体是否显眼、构图突出、未被裁切到边角或糊化。
 4. overall_quality（整体质量，0-100）：清晰度、构图、和谐度。
 5. canvas_fill（画面完整度，0-100）：画面是否完整填充目标尺寸，无明显白边、纯色色块、透明带或未填充留白区域。存在任何明显留白即严重扣分（≤40分）。
+6. key_elements_fidelity（必备要素保真，0-100）：对照【宣发主题约束】中「必须保留」清单，检查：(a) 核心角色/主体是否在画面内；(b) 游戏 LOGO 是否可见；(c) 要求保留的文字是否存在且字符正确（未糊化、未改写、未变成乱码）。**按【目标规格】文案约定过滤**：若规格含「无文案」，则纯文案类要素（定档大字、底部标签等）不计入评分，只考察主体与 LOGO；若含「仅 logo」，同理只考察主体与 LOGO。主体或 LOGO 缺失、或要求保留的文字被改写/糊化时严重扣分（≤30分）。
 
-6. fault_source（缺陷来源，仅在不及格时有意义）："repaint" = 问题出在 AI 重绘主体/内容（主体错误、整体模糊、构图失当）；"outpaint" = 问题出在场景延伸填充（边界割裂、填充与主体风格不一致、边缘留白/色块）；"both" = 两处均有明显问题。若未经 outpaint（纯比例缩放产物），一律填 "repaint"。
+7. fault_source（缺陷来源，仅在不及格时有意义）："repaint" = 问题出在 AI 重绘主体/内容（主体错误、整体模糊、构图失当）；"outpaint" = 问题出在场景延伸填充（边界割裂、填充与主体风格不一致、边缘留白/色块）；"both" = 两处均有明显问题。若未经 outpaint（纯比例缩放产物），一律填 "repaint"。
+
+生成 hints 时须遵守：若【目标规格】含「无文案」，hints 不得建议补充定档大字、底部标签等纯文案要素；若含「仅 logo」，hints 只可提 LOGO，不建议补充其他文案。
 
 只输出如下 JSON：
-{"compliance":{"pass":true,"violations":[]},"scores":{"subject_consistency":0,"character_appeal":0,"overall_quality":0,"canvas_fill":0},"total":0,"fault_source":"repaint","hints":"若需改进，一句话说明重绘时应强化什么；无需改进则留空"}
-其中 total 为四个分数的综合（0-100）。hints 必须是可直接追加到图生图提示词的中文要点。`
+{"compliance":{"pass":true,"violations":[]},"scores":{"subject_consistency":0,"character_appeal":0,"overall_quality":0,"canvas_fill":0,"key_elements_fidelity":0},"total":0,"fault_source":"repaint","hints":"若需改进，一句话说明重绘时应强化什么；无需改进则留空"}
+其中 total 为五个分数的综合（0-100）。hints 必须是可直接追加到图生图提示词的中文要点。`
 
 // QualityVerdict is the parsed, server-evaluated result of a quality check.
 type QualityVerdict struct {
@@ -54,10 +57,11 @@ type QualityVerdict struct {
 	FaultSource string
 	// DimScores holds the per-dimension scores for logging; zero when unparseable.
 	DimScores struct {
-		SubjectConsistency int
-		CharacterAppeal    int
-		OverallQuality     int
-		CanvasFill         int
+		SubjectConsistency  int
+		CharacterAppeal     int
+		OverallQuality      int
+		CanvasFill          int
+		KeyElementsFidelity int
 	}
 }
 
@@ -70,12 +74,13 @@ type QualityVerdict struct {
 // OpenAI-compatible chat/completions image_url path. The product image is sent
 // inline in both, so no public URL / COS is required.
 type QualityChecker struct {
-	baseURL   string
-	apiKey    string
-	model     string
-	threshold int
-	isGemini  bool
-	client    *http.Client
+	baseURL                string
+	apiKey                 string
+	model                  string
+	threshold              int
+	keyElementsFidelityMin int
+	isGemini               bool
+	client                 *http.Client
 }
 
 // NewQualityChecker returns a checker, or nil when baseURL/apiKey is empty
@@ -83,7 +88,7 @@ type QualityChecker struct {
 // weighted-total score at/above which a product passes (compliance is a separate
 // hard red line); a non-positive threshold falls back to 75. The transport is
 // auto-selected from the model name: a "gemini" model routes to the native API.
-func NewQualityChecker(baseURL, apiKey, model string, threshold int) *QualityChecker {
+func NewQualityChecker(baseURL, apiKey, model string, threshold, keyElementsFidelityMin int) *QualityChecker {
 	if strings.TrimSpace(baseURL) == "" || strings.TrimSpace(apiKey) == "" {
 		return nil
 	}
@@ -92,6 +97,9 @@ func NewQualityChecker(baseURL, apiKey, model string, threshold int) *QualityChe
 	}
 	if threshold <= 0 {
 		threshold = 75
+	}
+	if keyElementsFidelityMin <= 0 {
+		keyElementsFidelityMin = 60
 	}
 	isGemini := strings.Contains(strings.ToLower(model), "gemini")
 	base := strings.TrimRight(baseURL, "/")
@@ -105,12 +113,13 @@ func NewQualityChecker(baseURL, apiKey, model string, threshold int) *QualityChe
 		}
 	}
 	return &QualityChecker{
-		baseURL:   base,
-		apiKey:    apiKey,
-		model:     model,
-		threshold: threshold,
-		isGemini:  isGemini,
-		client:    &http.Client{Timeout: 60 * time.Second},
+		baseURL:                base,
+		apiKey:                 apiKey,
+		model:                  model,
+		threshold:              threshold,
+		keyElementsFidelityMin: keyElementsFidelityMin,
+		isGemini:               isGemini,
+		client:                 &http.Client{Timeout: 60 * time.Second},
 	}
 }
 
@@ -124,10 +133,11 @@ type rawVerdict struct {
 		Violations []string `json:"violations"`
 	} `json:"compliance"`
 	Scores struct {
-		SubjectConsistency int `json:"subject_consistency"`
-		CharacterAppeal    int `json:"character_appeal"`
-		OverallQuality     int `json:"overall_quality"`
-		CanvasFill         int `json:"canvas_fill"`
+		SubjectConsistency  int `json:"subject_consistency"`
+		CharacterAppeal     int `json:"character_appeal"`
+		OverallQuality      int `json:"overall_quality"`
+		CanvasFill          int `json:"canvas_fill"`
+		KeyElementsFidelity int `json:"key_elements_fidelity"`
 	} `json:"scores"`
 	Total       int    `json:"total"`
 	FaultSource string `json:"fault_source"`
@@ -189,6 +199,7 @@ func (q *QualityChecker) Check(ctx context.Context, img []byte, mime, themeRepor
 		Int("character_appeal", verdict.DimScores.CharacterAppeal).
 		Int("overall_quality", verdict.DimScores.OverallQuality).
 		Int("canvas_fill", verdict.DimScores.CanvasFill).
+		Int("key_elements_fidelity", verdict.DimScores.KeyElementsFidelity).
 		Msg("quality gate evaluated")
 	return verdict, nil
 }
@@ -349,11 +360,19 @@ func (q *QualityChecker) evaluate(content string) (QualityVerdict, error) {
 	v.DimScores.CharacterAppeal = rv.Scores.CharacterAppeal
 	v.DimScores.OverallQuality = rv.Scores.OverallQuality
 	v.DimScores.CanvasFill = rv.Scores.CanvasFill
+	v.DimScores.KeyElementsFidelity = rv.Scores.KeyElementsFidelity
 	// Compliance is a hard red line: a violation fails regardless of score.
 	if !rv.Compliance.Pass {
 		v.Pass = false
 		v.Reasons = append(v.Reasons, "合规红线")
 		v.Reasons = append(v.Reasons, rv.Compliance.Violations...)
+		return v, nil
+	}
+	// Key-elements fidelity is a hard red line: missing subject/LOGO or rewritten
+	// text fails regardless of the weighted total score (0 disables the check).
+	if q.keyElementsFidelityMin > 0 && rv.Scores.KeyElementsFidelity < q.keyElementsFidelityMin {
+		v.Pass = false
+		v.Reasons = append(v.Reasons, "核心主体/LOGO 缺失或文字被改写")
 		return v, nil
 	}
 	// Canvas fill is a hard red line at 60: obvious blank/white/transparent areas

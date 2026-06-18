@@ -196,6 +196,10 @@ type Config struct {
 	// QualityThreshold is the weighted-total score (0-100) at/above which an adapt
 	// product passes the quality gate (compliance is a separate hard red line).
 	QualityThreshold int
+	// KeyElementsFidelityMin is the minimum key_elements_fidelity score (0-100)
+	// below which an adapt product fails regardless of the weighted total (hard red
+	// line). 0 disables the check and restores pre-feature behaviour.
+	KeyElementsFidelityMin int
 	// PixelBlurThreshold is the Laplacian-variance lower bound for the pixel
 	// pre-filter. Adapt products below this are flagged blurry and regenerated
 	// once before the AI judge. 0 disables blur detection.
@@ -482,8 +486,9 @@ func Load(platformsPath string) (*Config, error) {
 			APIKey:   qualityEP.apiKey,
 			Model:    qualityEP.model,
 		},
-		QualityThreshold:   envInt("QUALITY_THRESHOLD", 75),
-		PixelBlurThreshold: envInt("PIXEL_BLUR_THRESHOLD", 80),
+		QualityThreshold:       envInt("QUALITY_THRESHOLD", 75),
+		KeyElementsFidelityMin: envInt("KEY_ELEMENTS_FIDELITY_MIN", 60),
+		PixelBlurThreshold:     envInt("PIXEL_BLUR_THRESHOLD", 80),
 		PixelBorderMaxRatio: func() float64 {
 			v := strings.TrimSpace(os.Getenv("PIXEL_BORDER_MAX_RATIO"))
 			if v == "" {
