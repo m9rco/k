@@ -9,14 +9,44 @@ import { cn } from "@/lib/utils";
 
 const MAX_REFS = 16;
 
+// Three ratio families for optimal reference coverage.
+// Portrait:   < 0.80  (9:16 — 20 sizes)
+// Landscape:  1.25–2.60 (16:9, ~2:1 — 63 sizes)
+// Ultra-wide: > 2.60  (4:1–6:1 extreme banners — 13 sizes; hardest to adapt without a matching ref)
+const RATIO_FAMILIES = [
+  { id: "portrait",   label: "竖版", hint: "9:16",  aspectRatio: "9/16",  lo: 0,    hi: 0.80 },
+  { id: "landscape",  label: "横版", hint: "16:9",  aspectRatio: "16/9",  lo: 1.25, hi: 2.60 },
+  { id: "ultrawide",  label: "超宽", hint: "4:1+",  aspectRatio: "4/1",   lo: 2.60, hi: Infinity },
+] as const;
+type FamilyId = typeof RATIO_FAMILIES[number]["id"];
+
+function computeCoverage(refIds: string[], assets: Map<string, Asset>): Set<FamilyId> {
+  const covered = new Set<FamilyId>();
+  for (const id of refIds) {
+    const a = assets.get(id);
+    if (!a?.width || !a?.height) continue;
+    const r = a.width / a.height;
+    for (const f of RATIO_FAMILIES) if (r >= f.lo && r < f.hi) covered.add(f.id);
+  }
+  return covered;
+}
+
 // StampAlbum — 集邮册视图：参考图行（上传图多选，最多16张）+ 全渠道尺寸插槽。
 export function StampAlbum({ onPreview }: { onPreview: (a: Asset) => void }) {
   const app = useApp();
   const { state } = app;
   const [channels, setChannels] = React.useState<Channel[]>([]);
   const [group, setGroup] = React.useState("all");
-  // refIds: ordered list of selected upload asset ids (sent to gpt-image-2)
-  const [refIds, setRefIds] = React.useState<string[]>([]);
+  // refIds: ordered list of selected upload asset ids (sent to gpt-image-2).
+  // Lazy-initialised from state.assets so remounts (panel switch) don't flash
+  // an empty coverage state while the sync useEffect below catches up.
+  const [refIds, setRefIds] = React.useState<string[]>(() =>
+    [...state.assets.values()]
+      .filter((a) => a.kind === "upload")
+      .sort((a, b) => (a.createdAt ? Date.parse(a.createdAt) : 0) - (b.createdAt ? Date.parse(b.createdAt) : 0))
+      .map((a) => a.id)
+      .slice(0, MAX_REFS),
+  );
   const [pending, setPending] = React.useState<Set<string>>(new Set());
 
   React.useEffect(() => {
@@ -114,6 +144,12 @@ export function StampAlbum({ onPreview }: { onPreview: (a: Asset) => void }) {
   const hasRefs = refIds.length > 0;
   const ref = hasRefs ? (refIds.length === 1 ? refIds[0] : refIds) : undefined;
 
+  const coverage = React.useMemo(
+    () => computeCoverage(refIds, state.assets),
+    [refIds, state.assets],
+  );
+  const optimalCovered = coverage.size === RATIO_FAMILIES.length;
+
   const generateChannel = (ch: Channel) => {
     if (!hasRefs) return;
     const sizeIds = ch.assetTypes
@@ -165,10 +201,16 @@ export function StampAlbum({ onPreview }: { onPreview: (a: Asset) => void }) {
               已选 {refIds.length}/{Math.min(uploads.length, MAX_REFS)}
             </span>
           )}
+          {uploads.length > 0 && refIds.length > 0 && (
+            optimalCovered
+              ? <span className="ml-auto rounded-full bg-accent/15 px-2 py-0.5 text-[10px] font-medium text-accent">覆盖最佳 ✓</span>
+              : <span className="ml-auto text-[10px] text-fg-mute">建议竖版 / 横版 / 超宽各一张</span>
+          )}
         </div>
         {uploads.length === 0 ? (
           <p className="text-xs text-fg-mute">请先上传图片作为参考图，再使用集邮册</p>
         ) : (
+          <>
           <div className="flex gap-2 overflow-x-auto pb-1">
             {uploads.map((a) => {
               const selected = refIds.includes(a.id);
@@ -197,6 +239,8 @@ export function StampAlbum({ onPreview }: { onPreview: (a: Asset) => void }) {
               );
             })}
           </div>
+          {refIds.length > 0 && <RatioFamilyStamps coverage={coverage} />}
+          </>
         )}
       </div>
 
@@ -334,5 +378,36 @@ function Slot({ size, asset, generating, failed, failReason, hasRefs, onPreview,
       <span className="text-center text-[10px] leading-tight text-fg-dim">{size.name}</span>
       <span className="text-[9px] tabular-nums text-fg-mute">{size.width}×{size.height}</span>
     </button>
+  );
+}
+
+// RatioFamilyStamps renders three aspect-ratio guide cards (portrait / square /
+// landscape). Each card turns accent-coloured when the user's selected refs cover
+// that family, giving at-a-glance feedback on reference quality.
+function RatioFamilyStamps({ coverage }: { coverage: Set<FamilyId> }) {
+  return (
+    <div className="mt-2.5 flex gap-2">
+      {RATIO_FAMILIES.map((f) => {
+        const covered = coverage.has(f.id);
+        return (
+          <div
+            key={f.id}
+            style={{ aspectRatio: f.aspectRatio, height: 52 }}
+            className={cn(
+              "relative flex flex-col items-center justify-center rounded-md border px-2 transition-all duration-200",
+              covered
+                ? "border-accent bg-accent/8 text-accent"
+                : "border-dashed border-line text-fg-mute",
+            )}
+          >
+            <span className="text-[10px] font-medium leading-tight">{f.label}</span>
+            <span className="text-[9px] tabular-nums opacity-60">{f.hint}</span>
+            {covered && (
+              <span className="absolute -right-1 -top-1 flex size-3.5 items-center justify-center rounded-full bg-accent text-[8px] font-bold text-white">✓</span>
+            )}
+          </div>
+        );
+      })}
+    </div>
   );
 }
