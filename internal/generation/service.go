@@ -107,6 +107,9 @@ type Service struct {
 	// source to 16 sizes, which fans out into 16 concurrent run goroutines)
 	// arrives staggered rather than all at once. nil disables throttling.
 	submitLimiter *rateLimiter
+	// maxRetry is the maximum number of quality-gate regeneration attempts (not
+	// counting the initial pass). Default 2. Set via SetMaxRetry.
+	maxRetry int
 }
 
 // defaultSubmitRate is the steady-state provider-submission ceiling: at most 3
@@ -262,6 +265,36 @@ func preferFirst(first, regen bestOfVerdict) bool {
 	return false // full tie → keep regen
 }
 
+// SetMaxRetry sets the maximum number of quality-gate regeneration attempts
+// (not counting the initial pass). n must be positive; invalid values are ignored.
+func (s *Service) SetMaxRetry(n int) {
+	if n > 0 {
+		s.maxRetry = n
+	}
+}
+
+// isQualityGatedKind reports whether the intent should go through the quality gate.
+func isQualityGatedKind(kind EditKind) bool {
+	switch kind {
+	case EditAdaptPlatform, EditCharacter, EditBackground, EditText, EditCharacterAdd:
+		return true
+	}
+	return false
+}
+
+// qualitySpecLabel builds the specLabel for the quality checker.
+// For adapt: "ChannelName SizeName WxH [SizeNote]". For generate: the EditKind string.
+func qualitySpecLabel(p GenerateParams, adaptW, adaptH int) string {
+	if p.Slots.Kind == EditAdaptPlatform {
+		lbl := strings.TrimSpace(fmt.Sprintf("%s %s %dx%d", p.Slots.ChannelName, p.AdaptSizeName, adaptW, adaptH))
+		if n := strings.TrimSpace(p.Slots.SizeNote); n != "" {
+			lbl += " " + n
+		}
+		return lbl
+	}
+	return string(p.Slots.Kind)
+}
+
 // SetAdaptImageProvider records the provider that platform-adaptation AI repaints
 // force (gpt-image-2 → gemini-3-pro-image), so RetryAsset can re-apply it to an
 // adapt product whose persisted gen_origin had ProviderOverride stripped. Optional;
@@ -303,6 +336,7 @@ func NewService(gen generator, st *store.Store, broker *transport.TaskBroker, as
 		cancels:  make(map[string]context.CancelFunc),
 
 		submitLimiter: newRateLimiter(defaultSubmitRate, defaultSubmitBurst),
+		maxRetry:      2,
 	}
 }
 
@@ -373,6 +407,12 @@ type GenerateParams struct {
 	FirstAttemptTotal   int
 	FirstAttemptPass    bool
 	FirstAttemptKeyElem int
+	// SecondAttemptData/Total/Pass/KeyElem carry the second-pass product bytes and
+	// its judge verdict into the Attempt=2 re-check (three-way bestOf).
+	SecondAttemptData    []byte
+	SecondAttemptTotal   int
+	SecondAttemptPass    bool
+	SecondAttemptKeyElem int
 }
 
 // primaryAndExtras resolves the effective reference list: the primary asset id
@@ -886,15 +926,12 @@ func (s *Service) run(ctx context.Context, taskID string, p GenerateParams) {
 	// the whole pipeline ONCE (Attempt=1, not re-reviewed → caps the loop). Review
 	// state streams to the frontend so the placeholder evolves 审核中 → ✓/✗ →
 	// (✗) 重绘中 → product without a blank. Any judge error degrades to pass.
-	if p.Slots.Kind == EditAdaptPlatform && p.Attempt == 0 && s.quality != nil && s.quality.Configured() {
+	if isQualityGatedKind(p.Slots.Kind) && p.Attempt == 0 && s.quality != nil && s.quality.Configured() {
 		s.broker.Publish(taskID, transport.EventReviewStarted, p.SessionID, map[string]any{
 			"taskId":  taskID,
 			"attempt": p.Attempt,
 		})
-		specLabel := strings.TrimSpace(fmt.Sprintf("%s %s %dx%d", p.Slots.ChannelName, p.AdaptSizeName, adaptW, adaptH))
-		if n := strings.TrimSpace(p.Slots.SizeNote); n != "" {
-			specLabel += " " + n
-		}
+		specLabel := qualitySpecLabel(p, adaptW, adaptH)
 		reviewCtx, reviewCancel := context.WithTimeout(ctx, 35*time.Second)
 		verdict, qerr := s.quality.Check(reviewCtx, out.Data, out.Mime, p.Slots.ThemeReport, specLabel)
 		reviewCancel()
@@ -940,15 +977,11 @@ func (s *Service) run(ctx context.Context, taskID string, p GenerateParams) {
 		}
 	}
 
-	// Attempt=1 re-check: score the regen product and persist the red-line-aware
-	// better of the two passes (bestOf). No further regeneration — caps the loop.
-	// When the chosen version still fails a red line, emit a degraded review_failed
-	// (honest "shipped with flaws") instead of a fake review_passed.
-	if p.Slots.Kind == EditAdaptPlatform && p.Attempt == 1 && s.quality != nil && s.quality.Configured() && p.FirstAttemptData != nil {
-		specLabel := strings.TrimSpace(fmt.Sprintf("%s %s %dx%d", p.Slots.ChannelName, p.AdaptSizeName, adaptW, adaptH))
-		if n := strings.TrimSpace(p.Slots.SizeNote); n != "" {
-			specLabel += " " + n
-		}
+	// Attempt=1 re-check: score the regen product and pick the red-line-aware
+	// better of the two passes (bestOf). If still failing and maxRetry >= 2,
+	// launch a third attempt; otherwise emit the final event.
+	if isQualityGatedKind(p.Slots.Kind) && p.Attempt == 1 && s.quality != nil && s.quality.Configured() && p.FirstAttemptData != nil {
+		specLabel := qualitySpecLabel(p, adaptW, adaptH)
 		recheckCtx, recheckCancel := context.WithTimeout(ctx, 35*time.Second)
 		regenVerdict, _ := s.quality.Check(recheckCtx, out.Data, out.Mime, p.Slots.ThemeReport, specLabel)
 		recheckCancel()
@@ -969,6 +1002,20 @@ func (s *Service) run(ctx context.Context, taskID string, p GenerateParams) {
 				Bool("regen_pass", regen.pass).Int("regen_keyelem", regen.keyElem).Int("regen_total", regen.total).
 				Msg("regen is equal or better (red-line-aware); keeping regen")
 		}
+		if !chosen.pass && s.maxRetry >= 2 {
+			// Both first and regen failed; launch a third attempt with combined hints.
+			combined := composeHints(QualityVerdict{Hints: p.QualityHints, Reasons: regenVerdict.Reasons})
+			retry := p
+			retry.Attempt = 2
+			retry.QualityHints = combined
+			retry.SecondAttemptData = out.Data
+			retry.SecondAttemptTotal = regenVerdict.Total
+			retry.SecondAttemptPass = regenVerdict.Pass
+			retry.SecondAttemptKeyElem = regenVerdict.KeyElementsFidelity
+			s.progress(taskID, p.SessionID, 20)
+			s.run(ctx, taskID, retry)
+			return
+		}
 		if chosen.pass {
 			s.broker.Publish(taskID, transport.EventReviewPassed, p.SessionID, map[string]any{
 				"taskId": taskID,
@@ -985,6 +1032,36 @@ func (s *Service) run(ctx context.Context, taskID string, p GenerateParams) {
 				"degraded": true,
 				"final":    true,
 			})
+		}
+	}
+
+	// Attempt=2 re-check: three-way bestOf. No further regeneration.
+	if isQualityGatedKind(p.Slots.Kind) && p.Attempt == 2 && s.quality != nil && s.quality.Configured() && p.FirstAttemptData != nil {
+		specLabel := qualitySpecLabel(p, adaptW, adaptH)
+		recheckCtx, recheckCancel := context.WithTimeout(ctx, 35*time.Second)
+		regenVerdict, _ := s.quality.Check(recheckCtx, out.Data, out.Mime, p.Slots.ThemeReport, specLabel)
+		recheckCancel()
+		// Pick the best among first, second, and current regen.
+		first := bestOfVerdict{pass: p.FirstAttemptPass, keyElem: p.FirstAttemptKeyElem, total: p.FirstAttemptTotal}
+		second := bestOfVerdict{pass: p.SecondAttemptPass, keyElem: p.SecondAttemptKeyElem, total: p.SecondAttemptTotal}
+		regen := bestOfVerdict{pass: regenVerdict.Pass, keyElem: regenVerdict.KeyElementsFidelity, total: regenVerdict.Total}
+		chosen := regen
+		if preferFirst(first, regen) {
+			out.Data = p.FirstAttemptData
+			chosen = first
+		}
+		if p.SecondAttemptData != nil {
+			cur := chosen
+			if preferFirst(second, cur) {
+				out.Data = p.SecondAttemptData
+				chosen = second
+			}
+		}
+		if chosen.pass {
+			s.broker.Publish(taskID, transport.EventReviewPassed, p.SessionID, map[string]any{"taskId": taskID, "total": chosen.total})
+		} else {
+			applog.From(ctx).Info().Str("event", "gen.review_degraded").Str("task", taskID).Int("total", chosen.total).Msg("all attempts failed; shipping best version (degraded)")
+			s.broker.Publish(taskID, transport.EventReviewFailed, p.SessionID, map[string]any{"taskId": taskID, "total": chosen.total, "degraded": true, "final": true})
 		}
 	}
 

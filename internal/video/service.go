@@ -54,6 +54,28 @@ type ImageUploader interface {
 	Upload(ctx context.Context, name string, data []byte, contentType string) (string, error)
 }
 
+// PromptEnricher enriches a short motion description into a richer video prompt.
+// Called before buildMotionPrompt; failures degrade to the original description.
+type PromptEnricher interface {
+	// Enrich takes a sanitized motion description and an optional theme report,
+	// returning a more detailed prompt. Returns ("", err) on failure so the
+	// caller falls back to the original motion.
+	Enrich(ctx context.Context, motion, themeReport string) (string, error)
+}
+
+// VideoQualitySignal is the result of a source-image proxy check for video tasks.
+type VideoQualitySignal struct {
+	SubjectScore int
+	AppealScore  int
+	Hints        string // improvement hints to pass to the prompt enricher
+}
+
+// VideoQualityChecker scores a video task's source image as a proxy quality signal.
+type VideoQualityChecker interface {
+	Configured() bool
+	CheckVideoSource(ctx context.Context, srcImg []byte, mime, motion string) (VideoQualitySignal, error)
+}
+
 // Params describes one image-to-video request from the agent.
 type Params struct {
 	SessionID string
@@ -61,6 +83,8 @@ type Params struct {
 	SourceAssetID string
 	// Motion is the user's action description (sanitized before prompt assembly).
 	Motion string
+	// ThemeReport is an optional theme/style context passed to the prompt enricher.
+	ThemeReport string
 	// ProviderOverride, when set, makes this task use a specific provider/model
 	// (the caller's per-session selection) instead of the Service default. Fixed
 	// at Start so switching models mid-flight does not affect an in-progress task.
@@ -81,6 +105,8 @@ type Service struct {
 	// asset for context continuity.
 	onAsset  func(sessionID, assetID string)
 	uploader ImageUploader
+	enricher PromptEnricher
+	videoQC  VideoQualityChecker
 	// cancels holds the cancel func for each in-flight task so a user-initiated
 	// cancel can abort the provider request and stop the pipeline.
 	mu      sync.Mutex
@@ -105,6 +131,12 @@ func (s *Service) SetAssetCallback(fn func(sessionID, assetID string)) { s.onAss
 // SetUploader installs the public-image uploader (COS). Required for video to be
 // considered configured, since the provider fetches the source image by URL.
 func (s *Service) SetUploader(u ImageUploader) { s.uploader = u }
+
+// SetPromptEnricher installs the LLM-based prompt enricher. Optional.
+func (s *Service) SetPromptEnricher(e PromptEnricher) { s.enricher = e }
+
+// SetVideoQualityChecker installs the source-image quality checker. Optional.
+func (s *Service) SetVideoQualityChecker(qc VideoQualityChecker) { s.videoQC = qc }
 
 // NewService constructs the video service.
 func NewService(prov Provider, st *store.Store, broker *transport.TaskBroker, assetDir string, newID func(string) string) *Service {
@@ -198,6 +230,18 @@ func (s *Service) run(ctx context.Context, taskID string, p Params) {
 		s.fail(taskID, p.SessionID, fmt.Sprintf("read source: %v", err))
 		return
 	}
+	// Source-image proxy quality check: scores the source image and collects
+	// hints to pass to the prompt enricher. Best-effort: never blocks video gen.
+	var videoHints string
+	if s.videoQC != nil && s.videoQC.Configured() {
+		qcCtx, qcCancel := context.WithTimeout(ctx, 10*time.Second)
+		if sig, err := s.videoQC.CheckVideoSource(qcCtx, srcBytes, asset.Mime, sanitizeMotion(p.Motion)); err != nil {
+			log.Printf("video.run: task=%s source quality check failed: %v", taskID, err)
+		} else {
+			videoHints = sig.Hints
+		}
+		qcCancel()
+	}
 	s.progress(taskID, p.SessionID, 25)
 
 	// Publish the source frame to public object storage so the provider can fetch
@@ -211,7 +255,22 @@ func (s *Service) run(ctx context.Context, taskID string, p Params) {
 	log.Printf("video.run: task=%s source published at %s", taskID, imgURL)
 	s.progress(taskID, p.SessionID, 40)
 
-	prompt := buildMotionPrompt(p.Motion)
+	// Enrich the motion description via LLM (5s timeout), degrading on failure.
+	motion := p.Motion
+	if s.enricher != nil {
+		enrichCtx, enrichCancel := context.WithTimeout(ctx, 5*time.Second)
+		themeCtx := p.ThemeReport
+		if themeCtx == "" && videoHints != "" {
+			themeCtx = videoHints
+		}
+		if enriched, err := s.enricher.Enrich(enrichCtx, sanitizeMotion(p.Motion), themeCtx); err != nil {
+			log.Printf("video.run: task=%s prompt enrich failed (using original): %v", taskID, err)
+		} else if enriched != "" {
+			motion = enriched
+		}
+		enrichCancel()
+	}
+	prompt := buildMotionPrompt(motion)
 	// Pick the provider: a per-session override fixes a specific provider/model
 	// for this task; otherwise use the Service default. Fixed here at run time.
 	prov := s.prov

@@ -142,7 +142,8 @@ func run() error {
 	// image model. No API key => the gate is disabled and every product passes.
 	if qc := vision.NewQualityChecker(cfg.Quality.BaseURL, cfg.Quality.APIKey, cfg.Quality.Model, cfg.QualityThreshold, cfg.KeyElementsFidelityMin); qc != nil {
 		genSvc.SetQualityChecker(qualityCheckerAdapter{qc})
-		log.Printf("quality-gate: %s enabled (threshold=%d key_elements_min=%d)", cfg.Quality.Model, cfg.QualityThreshold, cfg.KeyElementsFidelityMin)
+		genSvc.SetMaxRetry(cfg.QualityMaxRetry)
+		log.Printf("quality-gate: %s enabled (threshold=%d key_elements_min=%d max_retry=%d)", cfg.Quality.Model, cfg.QualityThreshold, cfg.KeyElementsFidelityMin, cfg.QualityMaxRetry)
 	} else {
 		log.Printf("quality-gate: not configured, adapt products pass without review")
 	}
@@ -181,6 +182,21 @@ func run() error {
 		log.Printf("video: COS uploader configured (bucket=%s), image-to-video enabled", cfg.COS.Bucket)
 	} else {
 		log.Printf("video: COS not configured, image-to-video disabled")
+	}
+
+	// Video prompt enricher: uses a fast LLM to expand the user's short motion
+	// description into a richer prompt before calling the video provider.
+	// Falls back gracefully when the chat credential is not configured.
+	if enricher := video.NewLLMEnricher(cfg.ChatPrimary.BaseURL, cfg.ChatPrimary.APIKey, cfg.VideoPromptLLMModel); enricher != nil {
+		vidSvc.SetPromptEnricher(enricher)
+		log.Printf("video-enricher: %s enabled", cfg.VideoPromptLLMModel)
+	}
+
+	// Video source quality check: scores the source image before video generation
+	// to collect hints that improve the prompt. Reuses the quality-gate credential.
+	if qc := vision.NewQualityChecker(cfg.Quality.BaseURL, cfg.Quality.APIKey, cfg.Quality.Model, cfg.QualityThreshold, cfg.KeyElementsFidelityMin); qc != nil {
+		vidSvc.SetVideoQualityChecker(videoQCAdapter{qc})
+		log.Printf("video-quality: source image quality check enabled")
 	}
 
 	// Broadcast task_created over the WS conversation channel the instant a task
@@ -579,6 +595,21 @@ func (a subjectDetectorAdapter) Configured() bool { return a.d.Configured() }
 func (a subjectDetectorAdapter) Detect(ctx context.Context, img []byte, mime string) (generation.SubjectBox, error) {
 	b, err := a.d.Detect(ctx, img, mime)
 	return generation.SubjectBox{CenterX: b.CenterX, CenterY: b.CenterY, Confidence: b.Confidence}, err
+}
+
+// videoQCAdapter bridges vision.QualityChecker to video.VideoQualityChecker,
+// running a quality check on the video task's source image as a proxy signal.
+type videoQCAdapter struct{ qc *vision.QualityChecker }
+
+func (a videoQCAdapter) Configured() bool { return a.qc.Configured() }
+
+func (a videoQCAdapter) CheckVideoSource(ctx context.Context, srcImg []byte, mime, motion string) (video.VideoQualitySignal, error) {
+	v, err := a.qc.Check(ctx, srcImg, mime, "", "video source: "+motion)
+	return video.VideoQualitySignal{
+		SubjectScore: v.DimScores.SubjectConsistency,
+		AppealScore:  v.DimScores.AdAppeal,
+		Hints:        v.Hints,
+	}, err
 }
 
 func (a taskAnnouncer) AnnounceTask(sessionID, taskID, kind string, count int) {

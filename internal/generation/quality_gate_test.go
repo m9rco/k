@@ -77,6 +77,7 @@ func (s *stubChecker) Check(_ context.Context, _ []byte, _, _, _ string) (Qualit
 // the retry is NOT reviewed again.
 func TestQualityGateFailRegeneratesOnce(t *testing.T) {
 	svc, st, _, _ := newAdaptService(t)
+	svc.maxRetry = 1
 	prov := &countingProvider{name: "p", out: Output{Data: makePNG(400, 300), Mime: "image/png"}}
 	svc.gen = NewFailoverGenerator(prov, nil)
 	checker := &stubChecker{verdicts: []QualityVerdict{
@@ -162,6 +163,7 @@ func errContext() error { return context.DeadlineExceeded }
 // gen.Generate() and only reruns the outpaint step.
 func TestQualityGateFaultOutpaintSkipsRepaint(t *testing.T) {
 	svc, st, _, _ := newAdaptService(t)
+	svc.maxRetry = 1
 	prov := &countingProvider{name: "p", out: Output{Data: makePNG(400, 300), Mime: "image/png"}}
 	svc.gen = NewFailoverGenerator(prov, nil)
 	// Outpainter produces a wide PNG for the medium-ratio banner (2:1 → outpaint).
@@ -198,6 +200,7 @@ func TestQualityGateFaultOutpaintSkipsRepaint(t *testing.T) {
 // a full pipeline rerun (gen.Generate called twice).
 func TestQualityGateFaultRepaintFullRerun(t *testing.T) {
 	svc, st, _, _ := newAdaptService(t)
+	svc.maxRetry = 1
 	prov := &countingProvider{name: "p", out: Output{Data: makePNG(400, 300), Mime: "image/png"}}
 	svc.gen = NewFailoverGenerator(prov, nil)
 	checker := &stubChecker{verdicts: []QualityVerdict{
@@ -223,6 +226,7 @@ func TestQualityGateFaultRepaintFullRerun(t *testing.T) {
 // with no outpaint snapshot (scale path taken) still triggers a full rerun.
 func TestQualityGateFaultOutpaintNoSnapshotFullRerun(t *testing.T) {
 	svc, st, _, _ := newAdaptService(t)
+	svc.maxRetry = 1
 	prov := &countingProvider{name: "p", out: Output{Data: makePNG(400, 300), Mime: "image/png"}}
 	svc.gen = NewFailoverGenerator(prov, nil)
 	// same.ratio.800x600 is 4:3 like the gen output → scale path → no outpaint snapshot.
@@ -267,6 +271,7 @@ func (s *seqProvider) Generate(_ context.Context, _ Request) (Output, error) {
 // (total 35). The gate must persist the first-attempt bytes, not the worse regen.
 func TestQualityGateRegenWorseRevertsToFirst(t *testing.T) {
 	svc, st, _, _ := newAdaptService(t)
+	svc.maxRetry = 1
 	red := color.RGBA{200, 30, 30, 255}
 	blue := color.RGBA{30, 30, 200, 255}
 	prov := &seqProvider{name: "p", outs: []Output{
@@ -365,5 +370,113 @@ func TestQualityGateDegradedSignalWhenBothFail(t *testing.T) {
 	// Task must succeed (product delivered even when both fail).
 	if rec.AssetID == "" {
 		t.Error("expected asset persisted even when both attempts fail red line")
+	}
+}
+
+// TestQualityGateSecondRetryWhenBothFail verifies that when both the first and
+// second attempts fail the quality gate, a third attempt is triggered (maxRetry=2),
+// and the best of the three products is persisted.
+func TestQualityGateSecondRetryWhenBothFail(t *testing.T) {
+	svc, st, _, _ := newAdaptService(t)
+	svc.maxRetry = 2
+	red := color.RGBA{200, 0, 0, 255}
+	green := color.RGBA{0, 200, 0, 255}
+	blue := color.RGBA{0, 0, 200, 255}
+	prov := &seqProvider{name: "p", outs: []Output{
+		{Data: colorPNG(400, 300, red), Mime: "image/png"},   // first: total 60
+		{Data: colorPNG(400, 300, green), Mime: "image/png"}, // second: total 65
+		{Data: colorPNG(400, 300, blue), Mime: "image/png"},  // third: total 78 (passes)
+	}}
+	svc.gen = NewFailoverGenerator(prov, nil)
+	checker := &stubChecker{verdicts: []QualityVerdict{
+		{Pass: false, Compliant: true, Total: 60, Hints: "improve subject"},
+		{Pass: false, Compliant: true, Total: 65, Hints: "improve more"},
+		{Pass: true, Compliant: true, Total: 78},
+	}}
+	svc.SetQualityChecker(checker)
+
+	outcomes, err := svc.AdaptToPlatform(context.Background(), "s", []string{"src"}, []string{"flip.square.512x512"}, false, nil, "theme")
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec := waitTask(t, st, "s", outcomes[0].TaskID)
+	if rec.Status != "done" {
+		t.Fatalf("task not done: %q", rec.Error)
+	}
+	if got := atomic.LoadInt32(&prov.calls); got != 3 {
+		t.Errorf("expected 3 generation calls, got %d", got)
+	}
+	// Third attempt passes — the blue product should be persisted.
+	asset, _ := st.GetAsset("s", rec.AssetID)
+	if asset == nil {
+		t.Fatal("expected persisted asset")
+	}
+	data, _ := os.ReadFile(asset.Path)
+	got := centerColor(t, data)
+	if got.B < 150 || got.R > 100 {
+		t.Errorf("expected third-attempt (blue) product, got %+v", got)
+	}
+}
+
+// TestQualityGateSecondRetryDisabledByMaxRetry1 verifies that setting maxRetry=1
+// restores the original behaviour (only one regeneration).
+func TestQualityGateSecondRetryDisabledByMaxRetry1(t *testing.T) {
+	svc, st, _, _ := newAdaptService(t)
+	svc.maxRetry = 1
+	prov := &countingProvider{name: "p", out: Output{Data: makePNG(400, 300), Mime: "image/png"}}
+	svc.gen = NewFailoverGenerator(prov, nil)
+	checker := &stubChecker{verdicts: []QualityVerdict{
+		{Pass: false, Compliant: true, Total: 50, Hints: "fix"},
+		{Pass: false, Compliant: true, Total: 55},
+	}}
+	svc.SetQualityChecker(checker)
+
+	outcomes, err := svc.AdaptToPlatform(context.Background(), "s", []string{"src"}, []string{"flip.square.512x512"}, false, nil, "theme")
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec := waitTask(t, st, "s", outcomes[0].TaskID)
+	if rec.Status != "done" {
+		t.Fatalf("task not done: %q", rec.Error)
+	}
+	// Only 2 generation calls (original + 1 retry), not 3.
+	if got := atomic.LoadInt32(&prov.calls); got != 2 {
+		t.Errorf("expected 2 generations with maxRetry=1, got %d", got)
+	}
+}
+
+// TestQualityGatePlainGenerateChangeBackground verifies the quality gate runs for
+// change_background intent (not just adapt_platform).
+func TestQualityGatePlainGenerateChangeBackground(t *testing.T) {
+	svc, st, dir, _ := newAdaptService(t)
+	prov := &countingProvider{name: "p", out: Output{Data: makePNG(400, 300), Mime: "image/png"}}
+	svc.gen = NewFailoverGenerator(prov, nil)
+	checker := &stubChecker{verdicts: []QualityVerdict{
+		{Pass: false, Compliant: true, Total: 50, Hints: "主体更突出"},
+		{Pass: true, Compliant: true, Total: 80},
+	}}
+	svc.SetQualityChecker(checker)
+
+	// Use Start (plain generate) rather than AdaptToPlatform.
+	taskID, err := svc.Start(context.Background(), GenerateParams{
+		SessionID:     "s",
+		Slots:         Slots{Kind: EditBackground, BackgroundDesc: "新背景"},
+		SourceAssetID: "src",
+	})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	_ = dir
+	rec := waitTask(t, st, "s", taskID)
+	if rec.Status != "done" {
+		t.Fatalf("task not done: %q", rec.Error)
+	}
+	// Expect 2 generate calls (original + 1 regen from quality gate).
+	if got := atomic.LoadInt32(&prov.calls); got != 2 {
+		t.Errorf("expected 2 generations for change_background quality gate, got %d", got)
+	}
+	// Regen prompt must contain hints.
+	if prov.last == nil || !containsStr(prov.last.Prompt, "主体更突出") {
+		t.Errorf("regen prompt missing hints, got %q", promptOf(prov.last))
 	}
 }

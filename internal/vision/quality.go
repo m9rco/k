@@ -29,13 +29,14 @@ const qualityPrompt = `你是游戏宣发素材质检员。下面给你一张【
 4. overall_quality（整体质量，0-100）：清晰度、构图、和谐度。
 5. canvas_fill（画面完整度，0-100）：画面是否完整填充目标尺寸，无明显白边、纯色色块、透明带或未填充留白区域。存在任何明显留白即严重扣分（≤40分）。
 6. key_elements_fidelity（必备要素保真，0-100）：对照【宣发主题约束】中「必须保留」清单，检查：(a) 核心角色/主体是否在画面内；(b) 游戏 LOGO 是否可见；(c) 要求保留的文字是否存在且字符正确（未糊化、未改写、未变成乱码）。**按【目标规格】文案约定过滤**：若规格含「无文案」，则纯文案类要素（定档大字、底部标签等）不计入评分，只考察主体与 LOGO；若含「仅 logo」，同理只考察主体与 LOGO。主体或 LOGO 缺失、或要求保留的文字被改写/糊化时严重扣分（≤30分）。
+7. ad_appeal（宣发吸引力，0-100）：该素材在信息流中的视觉冲击力——主体是否醒目占据视觉重心、色彩对比是否鲜明有层次、构图是否符合广告投放惯例（三分法/黄金分割）、整体是否达到「投放级」质感。此维度仅供参考，不计入合规或评分红线。
 
-7. fault_source（缺陷来源，仅在不及格时有意义）："repaint" = 问题出在 AI 重绘主体/内容（主体错误、整体模糊、构图失当）；"outpaint" = 问题出在场景延伸填充（边界割裂、填充与主体风格不一致、边缘留白/色块）；"both" = 两处均有明显问题。若未经 outpaint（纯比例缩放产物），一律填 "repaint"。
+8. fault_source（缺陷来源，仅在不及格时有意义）："repaint" = 问题出在 AI 重绘主体/内容（主体错误、整体模糊、构图失当）；"outpaint" = 问题出在场景延伸填充（边界割裂、填充与主体风格不一致、边缘留白/色块）；"both" = 两处均有明显问题。若未经 outpaint（纯比例缩放产物），一律填 "repaint"。
 
 生成 hints 时须遵守：若【目标规格】含「无文案」，hints 不得建议补充定档大字、底部标签等纯文案要素；若含「仅 logo」，hints 只可提 LOGO，不建议补充其他文案。
 
 只输出如下 JSON：
-{"compliance":{"pass":true,"violations":[]},"scores":{"subject_consistency":0,"character_appeal":0,"overall_quality":0,"canvas_fill":0,"key_elements_fidelity":0},"total":0,"fault_source":"repaint","hints":"若需改进，一句话说明重绘时应强化什么；无需改进则留空"}
+{"compliance":{"pass":true,"violations":[]},"scores":{"subject_consistency":0,"character_appeal":0,"overall_quality":0,"canvas_fill":0,"key_elements_fidelity":0,"ad_appeal":0},"total":0,"fault_source":"repaint","hints":"若需改进，一句话说明重绘时应强化什么；无需改进则留空"}
 其中 total 为五个分数的综合（0-100）。hints 必须是可直接追加到图生图提示词的中文要点。`
 
 // QualityVerdict is the parsed, server-evaluated result of a quality check.
@@ -62,6 +63,7 @@ type QualityVerdict struct {
 		OverallQuality      int
 		CanvasFill          int
 		KeyElementsFidelity int
+		AdAppeal            int
 	}
 }
 
@@ -138,6 +140,7 @@ type rawVerdict struct {
 		OverallQuality      int `json:"overall_quality"`
 		CanvasFill          int `json:"canvas_fill"`
 		KeyElementsFidelity int `json:"key_elements_fidelity"`
+		AdAppeal            int `json:"ad_appeal"`
 	} `json:"scores"`
 	Total       int    `json:"total"`
 	FaultSource string `json:"fault_source"`
@@ -200,6 +203,7 @@ func (q *QualityChecker) Check(ctx context.Context, img []byte, mime, themeRepor
 		Int("overall_quality", verdict.DimScores.OverallQuality).
 		Int("canvas_fill", verdict.DimScores.CanvasFill).
 		Int("key_elements_fidelity", verdict.DimScores.KeyElementsFidelity).
+		Int("ad_appeal", verdict.DimScores.AdAppeal).
 		Msg("quality gate evaluated")
 	return verdict, nil
 }
@@ -361,6 +365,7 @@ func (q *QualityChecker) evaluate(content string) (QualityVerdict, error) {
 	v.DimScores.OverallQuality = rv.Scores.OverallQuality
 	v.DimScores.CanvasFill = rv.Scores.CanvasFill
 	v.DimScores.KeyElementsFidelity = rv.Scores.KeyElementsFidelity
+	v.DimScores.AdAppeal = rv.Scores.AdAppeal
 	// Compliance is a hard red line: a violation fails regardless of score.
 	if !rv.Compliance.Pass {
 		v.Pass = false
@@ -404,6 +409,16 @@ func (q *QualityChecker) evaluate(content string) (QualityVerdict, error) {
 		return v, nil
 	}
 	v.Pass = true
+	// ad_appeal is advisory only (does not affect pass/fail). When low, append
+	// an appeal hint so the regeneration prompt can address it.
+	if rv.Scores.AdAppeal > 0 && rv.Scores.AdAppeal < 50 {
+		appeal := "宣发吸引力偏低：加强主体视觉冲击力、优化色彩层次与构图动感"
+		if v.Hints != "" {
+			v.Hints = v.Hints + "；" + appeal
+		} else {
+			v.Hints = appeal
+		}
+	}
 	return v, nil
 }
 

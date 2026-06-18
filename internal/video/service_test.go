@@ -2,9 +2,11 @@ package video
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -154,4 +156,132 @@ func contains(s, sub string) bool {
 		}
 	}
 	return false
+}
+
+// --- T5: PromptEnricher ---
+
+type stubEnricher struct {
+	enriched  string
+	err       error
+	gotMotion string
+	gotTheme  string
+}
+
+func (e *stubEnricher) Enrich(_ context.Context, motion, themeReport string) (string, error) {
+	e.gotMotion = motion
+	e.gotTheme = themeReport
+	return e.enriched, e.err
+}
+
+func TestPromptEnricherRichensMotion(t *testing.T) {
+	prov := &stubProvider{configured: true, out: Output{Data: []byte("MP4"), Mime: "video/mp4", Provider: "stub"}}
+	svc, st, dir := newVideoService(t, prov)
+	svc.SetUploader(&stubUploader{})
+	enricher := &stubEnricher{enriched: "Camera slowly zooms in as the hero strides forward with dramatic lighting"}
+	svc.SetPromptEnricher(enricher)
+
+	src := filepath.Join(dir, "src.png")
+	_ = os.WriteFile(src, []byte("PNG"), 0o644)
+	now := time.Now().UTC()
+	_ = st.InsertAsset(store.AssetRecord{ID: "src2", SessionID: "s", Kind: "generated", Path: src, Mime: "image/png", CreatedAt: now})
+
+	taskID, err := svc.Start(context.Background(), Params{SessionID: "s", SourceAssetID: "src2", Motion: "让角色走"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec := waitTask(t, st, taskID)
+	if rec.Status != "done" {
+		t.Fatalf("task failed: %q", rec.Error)
+	}
+	if prov.last == nil || !strings.Contains(prov.last.Prompt, "Camera slowly zooms") {
+		t.Errorf("expected enriched prompt, got %q", prov.last.Prompt)
+	}
+}
+
+func TestPromptEnricherFallsBackOnError(t *testing.T) {
+	prov := &stubProvider{configured: true, out: Output{Data: []byte("MP4"), Mime: "video/mp4"}}
+	svc, st, dir := newVideoService(t, prov)
+	svc.SetUploader(&stubUploader{})
+	svc.SetPromptEnricher(&stubEnricher{err: fmt.Errorf("llm timeout")})
+
+	src := filepath.Join(dir, "src2.png")
+	_ = os.WriteFile(src, []byte("PNG"), 0o644)
+	now := time.Now().UTC()
+	_ = st.InsertAsset(store.AssetRecord{ID: "src3", SessionID: "s", Kind: "generated", Path: src, Mime: "image/png", CreatedAt: now})
+
+	taskID, err := svc.Start(context.Background(), Params{SessionID: "s", SourceAssetID: "src3", Motion: "walk"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec := waitTask(t, st, taskID)
+	if rec.Status != "done" {
+		t.Fatalf("task failed: %q", rec.Error)
+	}
+	if prov.last == nil || !strings.Contains(prov.last.Prompt, "walk") {
+		t.Errorf("expected original motion in prompt, got %q", prov.last.Prompt)
+	}
+}
+
+// --- T6: VideoQualityChecker ---
+
+type stubVideoQC struct {
+	signal VideoQualitySignal
+	err    error
+	calls  int
+}
+
+func (q *stubVideoQC) Configured() bool { return true }
+func (q *stubVideoQC) CheckVideoSource(_ context.Context, _ []byte, _, _ string) (VideoQualitySignal, error) {
+	q.calls++
+	return q.signal, q.err
+}
+
+func TestVideoQualityCheckerHintsPassedToEnricher(t *testing.T) {
+	prov := &stubProvider{configured: true, out: Output{Data: []byte("MP4"), Mime: "video/mp4"}}
+	svc, st, dir := newVideoService(t, prov)
+	svc.SetUploader(&stubUploader{})
+	qc := &stubVideoQC{signal: VideoQualitySignal{Hints: "镜头向左偏移可使主体居中"}}
+	svc.SetVideoQualityChecker(qc)
+	enricher := &stubEnricher{enriched: "enriched prompt"}
+	svc.SetPromptEnricher(enricher)
+
+	src := filepath.Join(dir, "src3.png")
+	_ = os.WriteFile(src, []byte("PNG"), 0o644)
+	now := time.Now().UTC()
+	_ = st.InsertAsset(store.AssetRecord{ID: "src4", SessionID: "s", Kind: "generated", Path: src, Mime: "image/png", CreatedAt: now})
+
+	taskID, err := svc.Start(context.Background(), Params{SessionID: "s", SourceAssetID: "src4", Motion: "zoom in"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec := waitTask(t, st, taskID)
+	if rec.Status != "done" {
+		t.Fatalf("task failed: %q", rec.Error)
+	}
+	if qc.calls != 1 {
+		t.Errorf("expected 1 quality check call, got %d", qc.calls)
+	}
+	if !strings.Contains(enricher.gotTheme, "镜头向左偏移") {
+		t.Errorf("expected QC hints in enricher theme, got %q", enricher.gotTheme)
+	}
+}
+
+func TestVideoQualityCheckerNotConfiguredSkips(t *testing.T) {
+	prov := &stubProvider{configured: true, out: Output{Data: []byte("MP4"), Mime: "video/mp4"}}
+	svc, st, dir := newVideoService(t, prov)
+	svc.SetUploader(&stubUploader{})
+
+	src := filepath.Join(dir, "src4.png")
+	_ = os.WriteFile(src, []byte("PNG"), 0o644)
+	now := time.Now().UTC()
+	_ = st.InsertAsset(store.AssetRecord{ID: "src5", SessionID: "s", Kind: "generated", Path: src, Mime: "image/png", CreatedAt: now})
+
+	taskID, err := svc.Start(context.Background(), Params{SessionID: "s", SourceAssetID: "src5", Motion: "zoom"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec := waitTask(t, st, taskID)
+	if rec.Status != "done" {
+		t.Fatalf("task failed: %q", rec.Error)
+	}
 }

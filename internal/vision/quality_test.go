@@ -1,6 +1,9 @@
 package vision
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestEvaluateComplianceRedLine(t *testing.T) {
 	q := &QualityChecker{threshold: 75}
@@ -130,5 +133,36 @@ func TestEvaluateKeyElementsFidelityDisabled(t *testing.T) {
 	}
 	if !v.Pass {
 		t.Errorf("expected pass when red line disabled (total=%d)", v.Total)
+	}
+}
+
+func TestEvaluateAdAppealLowAddsHint(t *testing.T) {
+	q := &QualityChecker{threshold: 75}
+	// total=85 passes threshold, canvas_fill=90 passes red line, but ad_appeal=35
+	content := `{"compliance":{"pass":true},"scores":{"subject_consistency":90,"character_appeal":85,"overall_quality":80,"canvas_fill":90,"key_elements_fidelity":80,"ad_appeal":35},"total":85,"hints":""}`
+	v, err := q.evaluate(content)
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+	if !v.Pass {
+		t.Errorf("expected pass (total=%d)", v.Total)
+	}
+	if !strings.Contains(v.Hints, "宣发吸引力") {
+		t.Errorf("expected ad_appeal hint in Hints, got %q", v.Hints)
+	}
+}
+
+func TestEvaluateAdAppealHighNoHint(t *testing.T) {
+	q := &QualityChecker{threshold: 75}
+	content := `{"compliance":{"pass":true},"scores":{"subject_consistency":90,"character_appeal":85,"overall_quality":80,"canvas_fill":90,"key_elements_fidelity":80,"ad_appeal":82},"total":85,"hints":""}`
+	v, err := q.evaluate(content)
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+	if !v.Pass {
+		t.Errorf("expected pass")
+	}
+	if strings.Contains(v.Hints, "宣发吸引力") {
+		t.Errorf("did not expect ad_appeal hint when score is high, got %q", v.Hints)
 	}
 }

@@ -200,6 +200,12 @@ type Config struct {
 	// below which an adapt product fails regardless of the weighted total (hard red
 	// line). 0 disables the check and restores pre-feature behaviour.
 	KeyElementsFidelityMin int
+	// QualityMaxRetry is the maximum number of regeneration attempts after a
+	// quality-gate failure (default 2). Set via QUALITY_MAX_RETRY.
+	QualityMaxRetry int
+	// VideoPromptLLMModel is the LLM used to enrich video motion prompts.
+	// Defaults to claude-haiku-4-5-20251001. Set via VIDEO_PROMPT_LLM_MODEL.
+	VideoPromptLLMModel string
 	// PixelBlurThreshold is the Laplacian-variance lower bound for the pixel
 	// pre-filter. Adapt products below this are flagged blurry and regenerated
 	// once before the AI judge. 0 disables blur detection.
@@ -488,6 +494,8 @@ func Load(platformsPath string) (*Config, error) {
 		},
 		QualityThreshold:       envInt("QUALITY_THRESHOLD", 75),
 		KeyElementsFidelityMin: envInt("KEY_ELEMENTS_FIDELITY_MIN", 60),
+		QualityMaxRetry:        envInt("QUALITY_MAX_RETRY", 2),
+		VideoPromptLLMModel:    env("VIDEO_PROMPT_LLM_MODEL", "claude-haiku-4-5-20251001"),
 		PixelBlurThreshold:     envInt("PIXEL_BLUR_THRESHOLD", 80),
 		PixelBorderMaxRatio: func() float64 {
 			v := strings.TrimSpace(os.Getenv("PIXEL_BORDER_MAX_RATIO"))
