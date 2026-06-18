@@ -892,6 +892,9 @@ func (s *Service) run(ctx context.Context, taskID string, p GenerateParams) {
 			"attempt": p.Attempt,
 		})
 		specLabel := strings.TrimSpace(fmt.Sprintf("%s %s %dx%d", p.Slots.ChannelName, p.AdaptSizeName, adaptW, adaptH))
+		if n := strings.TrimSpace(p.Slots.SizeNote); n != "" {
+			specLabel += " " + n
+		}
 		reviewCtx, reviewCancel := context.WithTimeout(ctx, 35*time.Second)
 		verdict, qerr := s.quality.Check(reviewCtx, out.Data, out.Mime, p.Slots.ThemeReport, specLabel)
 		reviewCancel()
@@ -943,6 +946,9 @@ func (s *Service) run(ctx context.Context, taskID string, p GenerateParams) {
 	// (honest "shipped with flaws") instead of a fake review_passed.
 	if p.Slots.Kind == EditAdaptPlatform && p.Attempt == 1 && s.quality != nil && s.quality.Configured() && p.FirstAttemptData != nil {
 		specLabel := strings.TrimSpace(fmt.Sprintf("%s %s %dx%d", p.Slots.ChannelName, p.AdaptSizeName, adaptW, adaptH))
+		if n := strings.TrimSpace(p.Slots.SizeNote); n != "" {
+			specLabel += " " + n
+		}
 		recheckCtx, recheckCancel := context.WithTimeout(ctx, 35*time.Second)
 		regenVerdict, _ := s.quality.Check(recheckCtx, out.Data, out.Mime, p.Slots.ThemeReport, specLabel)
 		recheckCancel()
