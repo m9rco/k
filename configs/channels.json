@@ -17,7 +17,7 @@
           "type": "cover",
           "name": "视频封面 / 封面图",
           "sizes": [
-            { "id": "taptap.cover.900x600", "name": "视频封面", "width": 900, "height": 600, "orientation": "landscape", "format": "jpg", "producible": true },
+            { "id": "taptap.cover.900x600", "name": "视频封面", "width": 900, "height": 600, "orientation": "landscape", "format": "jpg", "note": "无文案", "producible": true },
             { "id": "taptap.cover.caption", "name": "带文案封面图", "width": 900, "height": 600, "orientation": "landscape", "format": "jpg", "producible": true }
           ]
         },
