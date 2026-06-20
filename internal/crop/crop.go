@@ -197,6 +197,9 @@ func coverCropFraction(src image.Image, targetW, targetH int, fx, fy float64) (i
 	)
 	out := image.NewRGBA(image.Rect(0, 0, targetW, targetH))
 	xdraw.CatmullRom.Scale(out, out.Bounds(), src, srcRect, xdraw.Over, nil)
+	// Re-crisp the edges softened by downscaling, in place, without changing the
+	// output dimensions (the source region is srcRect; the output is the target).
+	sharpenForDownscale(out, srcRect.Dx(), srcRect.Dy(), targetW, targetH)
 	return out, nil
 }
 
@@ -237,6 +240,11 @@ func ContainCrop(src image.Image, targetW, targetH int, bg color.Color) (image.I
 	offY := (targetH - innerH) / 2
 	dst := image.Rect(offX, offY, offX+innerW, offY+innerH)
 	xdraw.CatmullRom.Scale(out, dst, src, sb, xdraw.Over, nil)
+	// Re-crisp only the scaled content region; the padded margins stay untouched
+	// so the content/padding seam doesn't get an unsharp halo.
+	if sub, ok := out.SubImage(dst).(*image.RGBA); ok {
+		sharpenForDownscale(sub, srcW, srcH, innerW, innerH)
+	}
 	return out, nil
 }
 
@@ -303,6 +311,8 @@ func CropImage(src image.Image, targetW, targetH int, opts Options) (image.Image
 		}
 		out := image.NewRGBA(image.Rect(0, 0, targetW, targetH))
 		xdraw.CatmullRom.Scale(out, out.Bounds(), src, src.Bounds(), xdraw.Over, nil)
+		sb := src.Bounds()
+		sharpenForDownscale(out, sb.Dx(), sb.Dy(), targetW, targetH)
 		return out, nil
 	case ModeRect:
 		if opts.Rect == nil {
@@ -329,7 +339,10 @@ func Encode(img image.Image, mime string) ([]byte, string, error) {
 	var buf bytes.Buffer
 	switch {
 	case strings.Contains(mime, "jpeg"), strings.Contains(mime, "jpg"):
-		if err := jpeg.Encode(&buf, img, &jpeg.Options{Quality: 92}); err != nil {
+		// Quality 95: high enough that JPEG's chroma/edge softening is imperceptible
+		// on platform art (text, logos, sharp edges) while staying well under the
+		// diminishing-returns size blowup of 96-100.
+		if err := jpeg.Encode(&buf, img, &jpeg.Options{Quality: 95}); err != nil {
 			return nil, "", fmt.Errorf("encode jpeg: %w", err)
 		}
 		return buf.Bytes(), "image/jpeg", nil
