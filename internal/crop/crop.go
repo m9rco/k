@@ -360,6 +360,50 @@ func CropBytes(data []byte, targetW, targetH int) (Result, error) {
 	return CropBytesWithOptions(data, targetW, targetH, Options{Mode: ModeCover})
 }
 
+// RegionBytes extracts the sub-image described by a normalized bounding box
+// (x,y,w,h all in [0,1], relative to the source) and re-encodes it WITHOUT any
+// scaling — the returned bytes are exactly the selected pixels, suitable for
+// inline vision description of one user-selected region. Unlike rectCrop it does
+// not cover-crop to a target box; it preserves the region's own pixels and size.
+// The box is clamped to image bounds; a zero/degenerate box is an error.
+func RegionBytes(data []byte, x, y, bw, bh float64) (Result, error) {
+	img, mime, err := Decode(data)
+	if err != nil {
+		return Result{}, err
+	}
+	if bw <= 0 || bh <= 0 || x < 0 || y < 0 || x > 1 || y > 1 || x+bw > 1.0001 || y+bh > 1.0001 {
+		return Result{}, fmt.Errorf("invalid region box x=%.4f y=%.4f w=%.4f h=%.4f", x, y, bw, bh)
+	}
+	sb := img.Bounds()
+	srcW, srcH := sb.Dx(), sb.Dy()
+	if srcW == 0 || srcH == 0 {
+		return Result{}, fmt.Errorf("empty source image")
+	}
+	x0 := sb.Min.X + int(x*float64(srcW)+0.5)
+	y0 := sb.Min.Y + int(y*float64(srcH)+0.5)
+	x1 := sb.Min.X + int((x+bw)*float64(srcW)+0.5)
+	y1 := sb.Min.Y + int((y+bh)*float64(srcH)+0.5)
+	if x1 > sb.Max.X {
+		x1 = sb.Max.X
+	}
+	if y1 > sb.Max.Y {
+		y1 = sb.Max.Y
+	}
+	if x1 <= x0 || y1 <= y0 {
+		return Result{}, fmt.Errorf("region box collapses to empty crop")
+	}
+	// Copy into a standalone RGBA so the encode is independent of the source's
+	// backing array and origin-zeroed.
+	w, h := x1-x0, y1-y0
+	out := image.NewRGBA(image.Rect(0, 0, w, h))
+	xdraw.Draw(out, out.Bounds(), img, image.Pt(x0, y0), xdraw.Src)
+	enc, outMime, err := Encode(out, mime)
+	if err != nil {
+		return Result{}, err
+	}
+	return Result{Data: enc, Width: w, Height: h, Mime: outMime}, nil
+}
+
 // CropBytesWithOptions decodes the image, applies opts to produce a
 // targetW×targetH image, and re-encodes in the source's format.
 func CropBytesWithOptions(data []byte, targetW, targetH int, opts Options) (Result, error) {

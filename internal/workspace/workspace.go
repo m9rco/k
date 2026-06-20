@@ -42,6 +42,17 @@ type Service struct {
 	// md5) in the background after a successful upload. Injected so workspace
 	// doesn't import cos/vision; nil disables prewarming (graceful no-op).
 	prewarm func(sessionID, assetID, path, mime string)
+	// describeRegion resolves a user selection on an asset into a structured
+	// feature description (+ optional bounding box). Two modes share one fn:
+	//   - point mode (px,py ≥ 0): the vision model looks at the FULL image and the
+	//     click point, identifies the object under it, and returns its box + desc.
+	//   - rect mode (px,py < 0): the legacy path crops the [x,y,w,h] box and
+	//     describes the crop (box returned is the input rect).
+	// Injected in main (vision.RegionLocator for point, crop.RegionBytes +
+	// Analyzer.DescribeRegion for rect) so workspace doesn't import crop/vision;
+	// nil disables the endpoint (returns 503). Returns (description, box, error)
+	// where box is normalized [0,1]; in rect mode box echoes the input.
+	describeRegion func(sessionID, assetID string, x, y, w, h, px, py float64) (desc string, bx, by, bw, bh float64, err error)
 }
 
 // NewService constructs the workspace service. retryFn re-runs a failed task
@@ -68,6 +79,13 @@ func (s *Service) SetRetryAsset(fn func(sessionID, assetID string) (string, erro
 // disables prewarming (uploads still succeed; later adapts analyze on demand).
 func (s *Service) SetPrewarm(fn func(sessionID, assetID, path, mime string)) {
 	s.prewarm = fn
+}
+
+// SetDescribeRegion wires the region-description capability. Leaving it unset
+// makes the describe-region endpoint return 503. See the field doc for the
+// point-vs-rect calling convention (px,py < 0 means rect mode).
+func (s *Service) SetDescribeRegion(fn func(sessionID, assetID string, x, y, w, h, px, py float64) (string, float64, float64, float64, float64, error)) {
+	s.describeRegion = fn
 }
 
 // AssetView is the workspace representation of one asset.
@@ -108,6 +126,7 @@ type TaskView struct {
 func (s *Service) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/session/{id}/assets", s.handleListAssets)
 	mux.HandleFunc("GET /api/session/{id}/assets/{assetId}/raw", s.handleAssetRaw)
+	mux.HandleFunc("POST /api/session/{id}/assets/{assetId}/describe-region", s.handleDescribeRegion)
 	mux.HandleFunc("DELETE /api/session/{id}/assets/{assetId}", s.handleDeleteAsset)
 	mux.HandleFunc("POST /api/session/{id}/assets/{assetId}/retry", s.handleRetryAsset)
 	mux.HandleFunc("GET /api/session/{id}/tasks", s.handleListTasks)
@@ -209,6 +228,72 @@ func (s *Service) handleAssetRaw(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", asset.Mime)
 	http.ServeFile(w, r, asset.Path)
+}
+
+// regionRequest is the body of POST .../describe-region. Two modes:
+//   - point: send Px,Py (normalized click ∈ [0,1]); X/Y/W/H omitted/ignored. The
+//     vision model looks at the full image and returns the clicked object's box.
+//   - rect: send X,Y,W,H (normalized box); Px,Py omitted. Legacy crop+describe.
+//
+// Px/Py default to a sentinel (< 0) when absent so the handler can tell which
+// mode the client intends.
+type regionRequest struct {
+	X  float64  `json:"x"`
+	Y  float64  `json:"y"`
+	W  float64  `json:"w"`
+	H  float64  `json:"h"`
+	Px *float64 `json:"px"`
+	Py *float64 `json:"py"`
+}
+
+// handleDescribeRegion resolves the user's selection into a structured feature
+// description. In POINT mode (px,py present) the vision model inspects the full
+// image and the click point, returns the object's bounding box + description. In
+// RECT mode (x,y,w,h) it crops the box and describes the crop. The instruction is
+// fixed server-side (no user text). Returns 503 when unwired, 400 on a bad
+// selection, and a graceful {available:false} body when the vision model is down
+// so the frontend degrades to plain-text editing.
+func (s *Service) handleDescribeRegion(w http.ResponseWriter, r *http.Request) {
+	sessionID := r.PathValue("id")
+	assetID := r.PathValue("assetId")
+	if s.describeRegion == nil {
+		http.Error(w, "region description not available", http.StatusServiceUnavailable)
+		return
+	}
+	var req regionRequest
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<16)).Decode(&req); err != nil {
+		http.Error(w, "bad request body", http.StatusBadRequest)
+		return
+	}
+	// Point mode when both px,py supplied and in range. Otherwise rect mode.
+	point := req.Px != nil && req.Py != nil
+	var px, py float64
+	if point {
+		px, py = *req.Px, *req.Py
+		if px < 0 || px > 1 || py < 0 || py > 1 {
+			http.Error(w, "invalid click point", http.StatusBadRequest)
+			return
+		}
+	} else {
+		// Sentinel: negative px,py tells the wired fn this is a rect request.
+		px, py = -1, -1
+		if req.W <= 0 || req.H <= 0 || req.X < 0 || req.Y < 0 ||
+			req.X > 1 || req.Y > 1 || req.X+req.W > 1.0001 || req.Y+req.H > 1.0001 {
+			http.Error(w, "invalid region box", http.StatusBadRequest)
+			return
+		}
+	}
+	desc, bx, by, bw, bh, err := s.describeRegion(sessionID, assetID, req.X, req.Y, req.W, req.H, px, py)
+	if err != nil {
+		// Graceful degradation: the frontend falls back to plain-text editing.
+		writeJSON(w, map[string]any{"available": false, "error": err.Error()})
+		return
+	}
+	writeJSON(w, map[string]any{
+		"available":   true,
+		"description": desc,
+		"box":         map[string]float64{"x": bx, "y": by, "w": bw, "h": bh},
+	})
 }
 
 func (s *Service) handleListTasks(w http.ResponseWriter, r *http.Request) {

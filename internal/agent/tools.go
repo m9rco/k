@@ -245,6 +245,10 @@ type editArgs struct {
 	CharacterDesc  string `json:"character_desc,omitempty" jsonschema:"description=Description of the character (the NEW one to replace with for change_character, or the one to ADD for add_character)"`
 	BackgroundDesc string `json:"background_desc,omitempty" jsonschema:"description=Description of the new background (for change_background)"`
 	TextContent    string `json:"text_content,omitempty" jsonschema:"description=The new copy/text to render (for change_text)"`
+	// RegionDesc carries a description of the specific region/subject the user
+	// selected in the preview (produced by the region-description stage). When set,
+	// the edit is scoped to that subject and the rest of the frame is preserved.
+	RegionDesc string `json:"region_desc,omitempty" jsonschema:"description=Optional. Description of the SPECIFIC region/subject the user selected to edit (e.g. '画面左侧的红甲战士'). When present the edit is scoped to that subject and the rest of the image is kept unchanged. Leave empty for whole-image edits."`
 	// ReuseComposition preserves the source/reference image composition.
 	ReuseComposition bool `json:"reuse_composition,omitempty" jsonschema:"description=Reuse the reference image composition and base elements"`
 	// AwaitResult when true blocks until the task finishes and returns asset_id,
@@ -343,6 +347,7 @@ func (d ToolDeps) newEditTool() (tool.InvokableTool, error) {
 					CharacterDesc:    a.CharacterDesc,
 					BackgroundDesc:   a.BackgroundDesc,
 					TextContent:      a.TextContent,
+					RegionDesc:       a.RegionDesc,
 					ReuseComposition: a.ReuseComposition,
 				},
 			})

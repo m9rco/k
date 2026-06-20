@@ -1,10 +1,12 @@
 import * as React from "react";
-import { Download, Crop } from "lucide-react";
+import { Download, Crop, Sparkles, X } from "lucide-react";
 import type { Asset } from "@/lib/types";
 import { useApp } from "@/store/context";
 import { MAX_SELECTED } from "@/store/controller";
+import { describeRegion, type RegionBox } from "@/lib/api";
 import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
+import { RegionSelector } from "./region-selector";
 import * as VisuallyHidden from "@radix-ui/react-visually-hidden";
 
 // Lightbox previews an asset. Images get re-adjust + generate-video + icon
@@ -21,21 +23,67 @@ export function Lightbox({
   const app = useApp();
   const [adjust, setAdjust] = React.useState("");
   const [motion, setMotion] = React.useState("");
+  // Region-edit state: when selecting, the image is replaced by the selector;
+  // regionDesc holds the structured feature description fetched for the picked
+  // region so the next edit can be scoped to that subject. resultBox is the
+  // object's bounding box the vision model located (point mode) — fed back to the
+  // selector so the overlay snaps to it.
+  const [selecting, setSelecting] = React.useState(false);
+  const [describing, setDescribing] = React.useState(false);
+  const [regionDesc, setRegionDesc] = React.useState("");
+  const [resultBox, setResultBox] = React.useState<RegionBox | null>(null);
 
   React.useEffect(() => {
     setAdjust("");
     setMotion("");
+    setSelecting(false);
+    setDescribing(false);
+    setRegionDesc("");
+    setResultBox(null);
   }, [asset]);
 
   if (!asset) return null;
   const isVideo = (asset.mime || "").startsWith("video/") || asset.kind === "video";
 
+  // describe runs the describe-region call for either a click point or a rect and
+  // stages the structured description (+ located box). On failure it degrades to
+  // plain-text editing.
+  const describe = async (sel: { px: number; py: number } | RegionBox) => {
+    setDescribing(true);
+    try {
+      const resp = await describeRegion(app.state.sessionId, asset.id, sel);
+      if (resp.available && resp.description) {
+        setRegionDesc(resp.description);
+        if (resp.box && resp.box.w > 0 && resp.box.h > 0) setResultBox(resp.box);
+        app.toast("已识别该图层特征，可在下方补充修改要求", "ok");
+      } else {
+        app.toast("选区识别不可用，可直接用文字描述修改", "warn");
+      }
+    } catch {
+      app.toast("选区识别失败，可直接用文字描述修改", "warn");
+    } finally {
+      setDescribing(false);
+    }
+  };
+
+  const onPoint = (px: number, py: number) => void describe({ px, py });
+  const onRect = (box: RegionBox) => void describe(box);
+
   const applyAdjust = () => {
     const txt = adjust.trim();
-    if (!txt) return;
+    if (!txt && !regionDesc) return;
     const others = [...app.state.selected].filter((id) => id !== asset.id);
+    const refs = others.length ? [asset.id, ...others].slice(0, MAX_SELECTED) : asset.id;
     onOpenChange(false);
-    app.sendMessage(txt, others.length ? [asset.id, ...others].slice(0, MAX_SELECTED) : asset.id);
+    if (regionDesc) {
+      // Compose a region-scoped instruction; the backend edit_image also receives
+      // region_desc via the message path, but phrasing it here keeps the chat
+      // transcript self-explanatory and works regardless of tool routing.
+      const instruction = `只修改【选区主体：${regionDesc}】，其余画面保持不变。修改要求：${txt || "按描述优化该主体"}`;
+      app.sendMessage(instruction, refs);
+    } else {
+      app.sendMessage(txt, refs);
+    }
   };
 
   const genVideo = () => {
@@ -63,6 +111,14 @@ export function Lightbox({
         <div className="space-y-3">
           {isVideo ? (
             <video src={asset.url} controls loop playsInline autoPlay className="max-h-[52vh] w-full rounded-md bg-bg object-contain" />
+          ) : selecting ? (
+            <RegionSelector
+              src={asset.url}
+              onPoint={onPoint}
+              onRect={onRect}
+              busy={describing}
+              resultBox={resultBox}
+            />
           ) : (
             <img src={asset.url} alt="预览" className="max-h-[52vh] w-full rounded-md bg-bg object-contain" />
           )}
@@ -73,6 +129,16 @@ export function Lightbox({
                 <Crop className="size-3.5" /> 适配尺寸
               </Button>
             )}
+            {!isVideo && (
+              <Button
+                variant={selecting ? "subtle" : "outline"}
+                size="sm"
+                onClick={() => setSelecting((v) => !v)}
+              >
+                {selecting ? <X className="size-3.5" /> : <Sparkles className="size-3.5" />}
+                {selecting ? "退出选区" : "圈定图层"}
+              </Button>
+            )}
             <Button variant="outline" size="sm" onClick={download}>
               <Download className="size-3.5" /> 下载
             </Button>
@@ -80,15 +146,37 @@ export function Lightbox({
 
           {!isVideo && (
             <div className="space-y-3 border-t border-line pt-3">
+              {regionDesc && (
+                <div className="space-y-1 rounded-md border border-accent/30 bg-accent/5 p-2.5">
+                  <div className="flex items-center justify-between">
+                    <span className="text-[11px] font-medium text-accent">已锁定选区主体</span>
+                    <button
+                      type="button"
+                      onClick={() => setRegionDesc("")}
+                      className="text-fg-mute transition-colors hover:text-fg"
+                    >
+                      <X className="size-3.5" />
+                    </button>
+                  </div>
+                  <textarea
+                    value={regionDesc}
+                    onChange={(e) => setRegionDesc(e.target.value)}
+                    rows={3}
+                    className="w-full resize-none rounded-md border border-line bg-bg-elev px-2.5 py-1.5 text-[12px] leading-relaxed outline-none focus:border-accent/60"
+                  />
+                </div>
+              )}
               <div className="space-y-2">
                 <input
                   value={adjust}
                   onChange={(e) => setAdjust(e.target.value)}
                   onKeyDown={(e) => e.key === "Enter" && applyAdjust()}
-                  placeholder="二次调整：描述你想怎么改这张图"
+                  placeholder={regionDesc ? "对这个选区主体想怎么改？" : "二次调整：描述你想怎么改这张图"}
                   className="h-9 w-full rounded-md border border-line bg-bg-elev px-3 text-[13px] outline-none placeholder:text-fg-mute focus:border-accent/60"
                 />
-                <Button size="sm" className="w-full" onClick={applyAdjust}>应用调整</Button>
+                <Button size="sm" className="w-full" onClick={applyAdjust}>
+                  {regionDesc ? "按选区应用调整" : "应用调整"}
+                </Button>
               </div>
               <div className="space-y-2 border-t border-line/60 pt-3">
                 <input

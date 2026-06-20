@@ -133,6 +133,40 @@ export function optimizePrompt(sid: string, text: string) {
   }).then((r) => r.optimized);
 }
 
+// RegionBox is a normalized selection rectangle (each field ∈ [0,1]).
+export interface RegionBox { x: number; y: number; w: number; h: number }
+
+// RegionResponse is the describe-region reply. `box` (when present) is the
+// object's bounding box the vision model located for a click point — the
+// frontend snaps the selection overlay to it.
+export interface RegionResponse {
+  available: boolean;
+  description?: string;
+  box?: RegionBox;
+  error?: string;
+}
+
+// describeRegion resolves a selection on an asset into a structured feature
+// description from the vision model. Two modes:
+//   - point: pass { px, py } (normalized click) — the model looks at the FULL
+//     image, identifies the clicked object, returns its box + description.
+//   - rect:  pass { x, y, w, h } — the model crops the box and describes it.
+// Degrades gracefully: { available:false } means fall back to plain-text editing.
+export function describeRegion(
+  sid: string,
+  assetId: string,
+  sel: { px: number; py: number } | RegionBox,
+) {
+  return api<RegionResponse>(
+    `/api/session/${sid}/assets/${assetId}/describe-region`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(sel),
+    },
+  );
+}
+
 // ModelEntry is defined in lib/types; re-exported here for callers of the API.
 export type { ModelEntry } from "@/lib/types";
 

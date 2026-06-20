@@ -47,6 +47,12 @@ type Slots struct {
 	CharacterDesc  string
 	BackgroundDesc string
 	TextContent    string
+	// RegionDesc, when set, carries a structured description of ONE user-selected
+	// region (produced by the vision region-description stage). It scopes the edit
+	// to that subject: the MODIFY segment names the region subject and constrains
+	// the model to leave everything outside it unchanged. Sanitized before
+	// templating like every other slot; empty leaves behavior identical to before.
+	RegionDesc string
 	// IconDesc is the optional user hint for generate_icon (e.g. "扁平风格").
 	IconDesc string
 	// IconWidth/IconHeight are the desired icon dimensions for generate_icon.
@@ -333,6 +339,18 @@ func BuildPrompt(slots Slots, palette []PaletteColor) (string, error) {
 		b.WriteString(" Reuse the reference image's composition and base elements; adapt the background to suit the new character.")
 	}
 
+	// Region scoping: when the user selected one region, name its subject and
+	// constrain the edit to it, leaving the rest of the frame untouched. Pure
+	// prompt-layer (no provider mask). Appended to the MODIFY body; a matching
+	// preservation cue is added to AVOID below.
+	regionScoped := false
+	if rd := Sanitize(slots.RegionDesc); rd != "" {
+		regionScoped = true
+		b.WriteString(" Apply this change ONLY to the selected region subject — ")
+		b.WriteString(rd)
+		b.WriteString(" — and keep every other region, the overall composition and all other subjects unchanged.")
+	}
+
 	// Palette constraint (anchor-derived colors to harmonize with).
 	if len(palette) > 0 {
 		hexes := make([]string, 0, len(palette))
@@ -358,7 +376,11 @@ func BuildPrompt(slots Slots, palette []PaletteColor) (string, error) {
 	if h := Sanitize(slots.QualityHints); h != "" {
 		revise = "\nREVISE: A prior attempt was rejected by quality review. Fix these issues this time: " + h
 	}
-	return contextClause + "\n" + preserve + theme + revise + "\nMODIFY: " + b.String() + "\n" + avoidClause, nil
+	avoid := avoidClause
+	if regionScoped {
+		avoid = avoidClause + " Do NOT modify pixels outside the selected region or alter any other subject in the frame."
+	}
+	return contextClause + "\n" + preserve + theme + revise + "\nMODIFY: " + b.String() + "\n" + avoid, nil
 }
 
 // buildPlacementPhrase composes the sanitized "<orientation> WxH <channel>

@@ -71,6 +71,40 @@ func TestGeminiAnalyzerDisabledWithoutKey(t *testing.T) {
 	}
 }
 
+// TestGeminiDescribeRegionUsesRegionPrompt verifies DescribeRegion sends the
+// fixed region instruction (not the whole-image analysis prompt) inline.
+func TestGeminiDescribeRegionUsesRegionPrompt(t *testing.T) {
+	var sentText string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		var req struct {
+			Contents []struct {
+				Parts []struct {
+					Text string `json:"text"`
+				} `json:"parts"`
+			} `json:"contents"`
+		}
+		_ = json.Unmarshal(body, &req)
+		if len(req.Contents) > 0 && len(req.Contents[0].Parts) > 0 {
+			sentText = req.Contents[0].Parts[0].Text
+		}
+		_, _ = w.Write([]byte(`{"candidates":[{"content":{"parts":[{"text":"主体：红甲战士"}]}}]}`))
+	}))
+	defer srv.Close()
+
+	a := NewGemini(srv.URL, "sk-x", "gemini-2.5-flash-all")
+	report, err := a.DescribeRegion(context.Background(), Image{Data: onePNG, Mime: "image/png"})
+	if err != nil {
+		t.Fatalf("DescribeRegion: %v", err)
+	}
+	if sentText != regionPrompt {
+		t.Errorf("expected fixed region prompt, got %q", sentText)
+	}
+	if !strings.Contains(report, "主体") {
+		t.Errorf("unexpected region report: %q", report)
+	}
+}
+
 func TestOpenAIAnalyzerNeedsURL(t *testing.T) {
 	a := NewOpenAI("https://x", "k", "grok-4-fast")
 	if a == nil || !a.NeedsPublicURL() {

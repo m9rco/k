@@ -258,3 +258,108 @@ func TestListTasksReflectsStatus(t *testing.T) {
 		t.Fatalf("expected 2 tasks, got %d", len(resp.Tasks))
 	}
 }
+
+// TestDescribeRegionUnwiredReturns503 verifies the endpoint is 503 when the
+// capability is not wired (no vision/crop dependency injected).
+func TestDescribeRegionUnwiredReturns503(t *testing.T) {
+	_, st, mux := newWS(t)
+	seedSession(t, st, "s1")
+	body := bytes.NewBufferString(`{"x":0.1,"y":0.1,"w":0.3,"h":0.3}`)
+	req := httptest.NewRequest("POST", "/api/session/s1/assets/a1/describe-region", body)
+	rr := httptest.NewRecorder()
+	mux.ServeHTTP(rr, req)
+	if rr.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503", rr.Code)
+	}
+}
+
+// TestDescribeRegionBadBox verifies a degenerate box is rejected with 400 even
+// when the capability is wired.
+func TestDescribeRegionBadBox(t *testing.T) {
+	svc, st, mux := newWS(t)
+	seedSession(t, st, "s1")
+	svc.SetDescribeRegion(func(_, _ string, _, _, _, _, _, _ float64) (string, float64, float64, float64, float64, error) {
+		return "主体：测试", 0, 0, 0, 0, nil
+	})
+	body := bytes.NewBufferString(`{"x":0.1,"y":0.1,"w":0,"h":0.3}`)
+	req := httptest.NewRequest("POST", "/api/session/s1/assets/a1/describe-region", body)
+	rr := httptest.NewRecorder()
+	mux.ServeHTTP(rr, req)
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", rr.Code)
+	}
+}
+
+// TestDescribeRegionOK verifies a valid box returns the wired description.
+func TestDescribeRegionOK(t *testing.T) {
+	svc, st, mux := newWS(t)
+	seedSession(t, st, "s1")
+	svc.SetDescribeRegion(func(_, _ string, _, _, _, _, _, _ float64) (string, float64, float64, float64, float64, error) {
+		return "主体：红甲战士", 0.1, 0.1, 0.3, 0.3, nil
+	})
+	body := bytes.NewBufferString(`{"x":0.1,"y":0.1,"w":0.3,"h":0.3}`)
+	req := httptest.NewRequest("POST", "/api/session/s1/assets/a1/describe-region", body)
+	rr := httptest.NewRecorder()
+	mux.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rr.Code)
+	}
+	var resp struct {
+		Available   bool   `json:"available"`
+		Description string `json:"description"`
+	}
+	if err := json.NewDecoder(rr.Body).Decode(&resp); err != nil {
+		t.Fatal(err)
+	}
+	if !resp.Available || resp.Description != "主体：红甲战士" {
+		t.Errorf("unexpected resp: %+v", resp)
+	}
+}
+
+// TestDescribeRegionPointMode verifies POINT mode (px,py) returns the located
+// box echoed back from the wired locator.
+func TestDescribeRegionPointMode(t *testing.T) {
+	svc, st, mux := newWS(t)
+	seedSession(t, st, "s1")
+	svc.SetDescribeRegion(func(_, _ string, _, _, _, _, px, py float64) (string, float64, float64, float64, float64, error) {
+		if px < 0 || py < 0 {
+			t.Fatalf("expected point mode, got px=%v py=%v", px, py)
+		}
+		return "主体：角色", 0.2, 0.25, 0.4, 0.5, nil
+	})
+	body := bytes.NewBufferString(`{"px":0.5,"py":0.5}`)
+	req := httptest.NewRequest("POST", "/api/session/s1/assets/a1/describe-region", body)
+	rr := httptest.NewRecorder()
+	mux.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rr.Code)
+	}
+	var resp struct {
+		Available bool `json:"available"`
+		Box       struct {
+			X, Y, W, H float64
+		} `json:"box"`
+	}
+	if err := json.NewDecoder(rr.Body).Decode(&resp); err != nil {
+		t.Fatal(err)
+	}
+	if !resp.Available || resp.Box.W != 0.4 || resp.Box.H != 0.5 {
+		t.Errorf("unexpected resp: %+v", resp)
+	}
+}
+
+// TestDescribeRegionBadPoint verifies an out-of-range click point is 400.
+func TestDescribeRegionBadPoint(t *testing.T) {
+	svc, st, mux := newWS(t)
+	seedSession(t, st, "s1")
+	svc.SetDescribeRegion(func(_, _ string, _, _, _, _, _, _ float64) (string, float64, float64, float64, float64, error) {
+		return "x", 0, 0, 0, 0, nil
+	})
+	body := bytes.NewBufferString(`{"px":1.5,"py":0.5}`)
+	req := httptest.NewRequest("POST", "/api/session/s1/assets/a1/describe-region", body)
+	rr := httptest.NewRecorder()
+	mux.ServeHTTP(rr, req)
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", rr.Code)
+	}
+}

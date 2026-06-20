@@ -5,3 +5,10 @@ dist-check/
 
 # Transient sentinel from the embed-stale Claude hook.
 .embed-stale
+
+# Vite build output (embedded into the Go binary via web/web.go at build time;
+# regenerate with `make web` / `npm run build`). The directory itself must stay
+# in git — `//go:embed all:static` needs at least one file to compile even
+# before the frontend is built — so keep the .gitkeep placeholder.
+static/*
+!static/.gitkeep

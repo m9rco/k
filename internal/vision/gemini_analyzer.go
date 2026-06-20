@@ -100,11 +100,23 @@ type geminiGenConfig struct {
 // report so the existing streaming-panel UX still receives the text. Graceful on
 // errors: returns ("", err) so callers degrade cleanly.
 func (a *geminiAnalyzer) Analyze(ctx context.Context, images []Image, onChunk func(string)) (string, error) {
+	return a.generate(ctx, images, analysisPrompt, onChunk)
+}
+
+// DescribeRegion runs the fixed region instruction over a single inline region
+// crop. onChunk is unused (the region report is short and returned whole).
+func (a *geminiAnalyzer) DescribeRegion(ctx context.Context, region Image) (string, error) {
+	return a.generate(ctx, []Image{region}, regionPrompt, nil)
+}
+
+// generate is the shared generateContent core: it sends the given fixed prompt
+// plus each image's inline bytes and returns the (rune-capped) text.
+func (a *geminiAnalyzer) generate(ctx context.Context, images []Image, prompt string, onChunk func(string)) (string, error) {
 	if a == nil {
 		return "", fmt.Errorf("vision: analyzer not configured")
 	}
 	parts := make([]geminiPart, 0, len(images)+1)
-	parts = append(parts, geminiPart{Text: analysisPrompt})
+	parts = append(parts, geminiPart{Text: prompt})
 	for _, im := range images {
 		if len(im.Data) == 0 {
 			continue
@@ -191,6 +203,80 @@ func (a *geminiAnalyzer) Analyze(ctx context.Context, images []Image, onChunk fu
 	log.Printf("vision.analyze(gemini): done in %s report_len=%d runes=%d",
 		time.Since(start), len(report), utf8.RuneCountInString(report))
 	return report, nil
+}
+
+// generateJSON is a single-image, JSON-forced variant of generate used by the
+// region locator: it sets ResponseMimeType=application/json so Gemini returns a
+// bare JSON object, and returns the raw text for the caller to parse. No onChunk
+// (the reply is short and consumed whole), no maxReportLen truncation (would
+// corrupt the JSON).
+func (a *geminiAnalyzer) generateJSON(ctx context.Context, img Image, prompt string) (string, error) {
+	if a == nil {
+		return "", fmt.Errorf("vision: analyzer not configured")
+	}
+	if len(img.Data) == 0 {
+		return "", fmt.Errorf("vision: no inline image provided")
+	}
+	body := geminiRequest{
+		Contents: []geminiContent{{Parts: []geminiPart{
+			{Text: prompt},
+			{InlineData: &geminiInlineData{
+				MimeType: mimeOrPNG(img.Mime),
+				Data:     base64.StdEncoding.EncodeToString(img.Data),
+			}},
+		}}},
+		GenerationConfig: &geminiGenConfig{ResponseMimeType: "application/json"},
+	}
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return "", fmt.Errorf("vision: marshal request: %w", err)
+	}
+	url := fmt.Sprintf("%s/v1beta/models/%s:generateContent", a.baseURL, a.model)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(buf))
+	if err != nil {
+		return "", fmt.Errorf("vision: build request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+a.apiKey)
+	req.Header.Set("x-goog-api-key", a.apiKey)
+
+	resp, err := a.client.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("vision: request: %w", err)
+	}
+	defer resp.Body.Close()
+	raw, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("vision: status %d: %s", resp.StatusCode, truncate(string(raw), 300))
+	}
+	var parsed struct {
+		Candidates []struct {
+			Content struct {
+				Parts []geminiPart `json:"parts"`
+			} `json:"content"`
+		} `json:"candidates"`
+		Error *struct {
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(raw, &parsed); err != nil {
+		return "", fmt.Errorf("vision: decode response: %w", err)
+	}
+	if parsed.Error != nil {
+		return "", fmt.Errorf("vision: api error: %s", parsed.Error.Message)
+	}
+	var full strings.Builder
+	for _, c := range parsed.Candidates {
+		for _, p := range c.Content.Parts {
+			if p.Text != "" {
+				full.WriteString(p.Text)
+			}
+		}
+	}
+	if full.Len() == 0 {
+		return "", fmt.Errorf("vision: empty region response")
+	}
+	return full.String(), nil
 }
 
 // mimeOrPNG returns m when non-empty, else image/png.

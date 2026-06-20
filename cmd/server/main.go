@@ -345,6 +345,74 @@ func run() error {
 		})
 		log.Printf("upload prewarm: enabled (publish → analyze → cache by md5)")
 	}
+	// Region description. Two modes share one closure:
+	//   - POINT mode (px,py ≥ 0): the vision model inspects the FULL image + the
+	//     click point and returns the clicked object's box + feature description.
+	//     No crop, no COS for the box itself (gemini inline path); the OpenAI path
+	//     still publishes the full image to a public URL.
+	//   - RECT mode (px,py < 0): legacy crop of [x,y,w,h] + describe the crop.
+	// Wired only when vision is configured; the openai (NeedsPublicURL) path also
+	// needs COS to publish the image.
+	if visionAnalyzer != nil && (!visionAnalyzer.NeedsPublicURL() || cosUploader != nil) {
+		wsSvc.SetDescribeRegion(func(sessionID, assetID string, x, y, bw, bh, px, py float64) (string, float64, float64, float64, float64, error) {
+			asset, err := st.GetAsset(sessionID, assetID)
+			if err != nil {
+				return "", 0, 0, 0, 0, err
+			}
+			if asset == nil {
+				return "", 0, 0, 0, 0, fmt.Errorf("asset not found")
+			}
+			data, err := os.ReadFile(asset.Path)
+			if err != nil {
+				return "", 0, 0, 0, 0, fmt.Errorf("read asset: %w", err)
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+			defer cancel()
+
+			if px >= 0 && py >= 0 {
+				// POINT mode: send the FULL image + click point; the model returns the
+				// object's box and description in one call.
+				var img vision.Image
+				if visionAnalyzer.NeedsPublicURL() {
+					url, err := cosUploader.UploadIfAbsent(ctx, data, asset.Mime, st)
+					if err != nil {
+						return "", 0, 0, 0, 0, fmt.Errorf("publish image: %w", err)
+					}
+					img = vision.Image{URL: url}
+				} else {
+					img = vision.Image{Data: data, Mime: asset.Mime}
+				}
+				res, err := visionAnalyzer.LocateAndDescribe(ctx, img, px, py)
+				if err != nil {
+					return "", 0, 0, 0, 0, err
+				}
+				return res.Description, res.Box.X, res.Box.Y, res.Box.W, res.Box.H, nil
+			}
+
+			// RECT mode: crop the box and describe the crop.
+			region, err := crop.RegionBytes(data, x, y, bw, bh)
+			if err != nil {
+				return "", 0, 0, 0, 0, err
+			}
+			var img vision.Image
+			if visionAnalyzer.NeedsPublicURL() {
+				url, err := cosUploader.UploadIfAbsent(ctx, region.Data, region.Mime, st)
+				if err != nil {
+					return "", 0, 0, 0, 0, fmt.Errorf("publish region: %w", err)
+				}
+				img = vision.Image{URL: url}
+			} else {
+				img = vision.Image{Data: region.Data, Mime: region.Mime}
+			}
+			desc, err := visionAnalyzer.DescribeRegion(ctx, img)
+			if err != nil {
+				return "", 0, 0, 0, 0, err
+			}
+			// Echo the input rect as the box.
+			return desc, x, y, bw, bh, nil
+		})
+		log.Printf("region description: enabled (point+rect)")
+	}
 	hub.SetHandler(func(ctx context.Context, sessionID string, msg transport.Inbound) {
 		switch msg.Type {
 		case "user_message":
@@ -629,7 +697,8 @@ func spaHandler(fsys fs.FS) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		path := r.URL.Path
 		if path != "/" {
-			// If the requested file does not exist, fall back to index.html.
+			// If the requested file does not exist, fall back to index.html so
+			// client-side routing works.
 			if _, err := fs.Stat(fsys, path[1:]); err != nil && os.IsNotExist(err) {
 				r2 := r.Clone(r.Context())
 				r2.URL.Path = "/"
