@@ -1,4 +1,6 @@
-# Change: 投放素材增强套件（文案生成 / 文字叠加 / 批量变体 / 合规审查）
+# Change: 投放素材增强套件（文案生成 / 文字叠加 / 批量变体）
+
+> **范围调整（实施后）**：原提案含第 4 块「投放前合规审查（compliance-review）」，经决策**剖离不实现**——内部小团队工具，合规终审依赖人工/法务，不以软件硬做。本 change 最终交付前三块（文案 / 叠加 / 变体）；下文保留合规相关原始论述作为历史规划记录，其 spec 已从本 change 移除。
 
 ## Why
 现有系统的宣发链路已覆盖「分析素材 → 生图/换素材 → 平台适配 → 生视频 → 下载打包」，但投放团队的高频闭环仍有四处真实空白（已逐一比对现有 specs 确认）：
@@ -14,18 +16,16 @@
 - **新增 `copywriting-generation` 能力**：新增 `generate_copy` 工具，基于游戏信息 + 已上传素材 + 视觉分析报告，产出结构化宣发文案（标题/广告语/卖点/平台投放文案），支持平台与字数约束、防注入。
 - **新增 `text-overlay` 能力**：新增 `overlay_text` 工具，对工作区某张图做**确定性**文字/LOGO 叠加（CTA、促销角标、定档大字、品牌 LOGO），服务端字体渲染，位置/字号/描边/安全区可控，不经生图模型。
 - **新增 `batch-variants` 能力**：新增 `generate_variants` 工具，对一个生图/改图意图按变体策略（角度/配色/文案/构图）一次性产出 N 个 creative，复用现有生图与长任务管线，前端批量占位回填。
-- **新增 `compliance-review` 能力**：新增 `review_compliance` 工具/门控，在下载或发布前对资产（图 + 叠加文案 + 生成文案）做敏感词、平台投放政策、必备资质（版号/年龄分级）缺失检测，产出风险报告，不阻断但显著告警。
-- **修改 `conversation-orchestration`**：将上述四类意图纳入意图白名单与确定性预分类，使 Agent 能识别「写文案 / 加个 CTA / 多出几版 / 帮我审一下能不能投」并分发到对应工具。
+- ~~**新增 `compliance-review` 能力**~~（**已剖离不实现**：内部工具，合规终审依赖人工/法务，不以软件硬做）。
+- **修改 `conversation-orchestration`**：将上述三类意图纳入意图白名单与确定性预分类，使 Agent 能识别「写文案 / 加个 CTA / 多出几版」并分发到对应工具。
 
 ## Impact
 - 受影响 specs：
-  - 新增：`copywriting-generation`、`text-overlay`、`batch-variants`、`compliance-review`
+  - 新增：`copywriting-generation`、`text-overlay`、`batch-variants`（`compliance-review` 已剖离，不在本 change）
   - 修改：`conversation-orchestration`（意图白名单 + 预分类）
 - 受影响代码（实现阶段）：
   - `internal/agent/`（工具注册、意图白名单、预分类提示）
-  - 新增 `internal/copywriting/`、`internal/textoverlay/`、`internal/compliance/`
+  - 新增 `internal/copywriting/`、`internal/textoverlay/`
   - `internal/generation/`（批量变体复用生图管线）
-  - `internal/transport/`（批量占位、合规报告事件）
-  - `internal/workspace/`、`internal/download/`（合规门控挂接）
-  - `web/src/`（文案卡片、叠加参数面板、批量变体网格、合规风险条）
-- 非目标（Non-Goals）：不做真实平台投放/上传 API 对接；不做自动文案翻译出海（本地化作为后续 change）；合规审查仅做提示不做强制拦截。
+  - `web/src/`（文案卡片、批量变体网格）
+- 非目标（Non-Goals）：不做真实平台投放/上传 API 对接；不做自动文案翻译出海（本地化作为后续 change）；**投放前合规审查已剖离不做**（合规终审依赖人工/法务）。

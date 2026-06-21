@@ -1,6 +1,8 @@
 # Tasks
 
-> 依赖顺序：阶段 1（文案）→ 阶段 2（叠加，引用文案）→ 阶段 3（变体，独立可并行）→ 阶段 4（合规，审查前三者产物）→ 阶段 5（编排与前端贯通）。阶段 3 与阶段 1/2 无强依赖，可并行开发。
+> 依赖顺序：阶段 1（文案）→ 阶段 2（叠加，引用文案）→ 阶段 3（变体，独立可并行）→ 阶段 4（编排与前端贯通）。阶段 3 与阶段 1/2 无强依赖，可并行开发。
+>
+> 注：原规划含「投放前合规审查（compliance-review）」，经决策**剖离不实现**（内部工具，合规终审走人工/法务，不以软件硬做），相关 spec 已从本 change 移除。
 
 ## 1. 宣发文案生成（copywriting-generation）
 - [x] 1.1 新增 `internal/copywriting/` 包：定义文案结构（标题/广告语/卖点/投放文案）与服务端固定 system prompt（防注入、不虚构）
@@ -23,21 +25,12 @@
 - [x] 3.4 批量占位事件 + 同批分组回填（复用既有 `announce.AnnounceTask`/`task_created` 逐任务占位 + 前端 `variants_group` 卡同批分组对比；未新增 transport 事件类型——既有逐任务占位已满足实时占位/逐个回填/失败隔离）
 - [x] 3.5 单测：数量收敛、失败隔离、维度选择、去重、防注入、batch_id 稳定（`variants_tool_test.go`）；复用质量门控由 `EditBackground` 走与单图一致的管线天然保证
 
-## 4. 投放前合规审查（compliance-review）
-- [ ] 4.1 新增 `internal/compliance/` 包：内置敏感词/绝对化用语规则集 + 主流渠道禁限 + 资质（版号/年龄分级）缺失检测
-- [ ] 4.2 LLM 辅助判定 + 服务端固定审查指令（防注入），产出分级 + 定位 + 改写建议的结构化报告
-- [ ] 4.3 注册 `review_compliance` 工具；审查图 + 叠加文字 + 生成文案
-- [ ] 4.4 接入下载/批量打包与参考图发布前的软告警门控（高风险要求确认知悉，不硬拦截）
-- [ ] 4.5 单测：敏感词检出与定位、资质缺失、无风险通过、防注入
+## 4. 编排与前端贯通
+- [x] 4.1 `internal/agent/`：将三类意图纳入白名单与确定性预分类（关键词/句式提示），更新分层 system prompt（白名单+预分类+prompt 第15/16/17条）
+- [x] 4.2 前端 `web/src/`：文案卡片（分组 + 可引用，copy-card.tsx）、批量变体分组网格（variants-group.tsx）；叠加产物走既有工作区回填
+- [x] 4.3 更新分层 system prompt 与意图提示的单测/契约测试（intent_test.go + variants_tool_test.go + 白名单/AsyncTaskTools 契约测试）
 
-## 5. 编排与前端贯通
-- [~] 5.1 `internal/agent/`：将四类意图纳入白名单与确定性预分类（关键词/句式提示），更新分层 system prompt — 文案/叠加/变体已纳入（白名单+预分类+prompt 第15/16/17条）；合规待阶段 4
-- [~] 5.2 前端 `web/src/`：文案卡片（分组 + 可引用）、叠加参数面板、批量变体分组网格、合规风险条 — 文案卡片（copy-card.tsx）+ 批量变体分组网格（variants-group.tsx）已实现；合规风险条待阶段 4
-- [ ] 5.3 前端：下载/发布前合规预检入口与确认知悉交互
-- [ ] 5.4 端到端联调：写文案 → 叠加 → 批量变体 → 合规审查 → 打包 闭环走通
-- [~] 5.5 更新分层 system prompt 与意图提示的单测/契约测试 — 文案/叠加/变体意图单测已加（intent_test.go + variants_tool_test.go + 白名单/AsyncTaskTools 契约测试）；合规待阶段 4
-
-## 6. 验证与归档准备
-- [ ] 6.1 `openspec validate add-promo-content-suite --strict` 通过
-- [~] 6.2 全量 `go test ./...` 通过；前端 build 通过 — 文案切片已全绿（go test ./... + web build）；整体提案完成后复跑
-- [ ] 6.3 README/docs 补充四个新意图的用法示例
+## 5. 验证与归档准备
+- [x] 5.1 `openspec validate add-promo-content-suite --strict` 通过
+- [x] 5.2 全量 `go test ./...` 通过（18 包无 FAIL）；前端 `npm run build` 通过
+- [x] 5.3 README 补充文字叠加字体（CJK）说明与 `OVERLAY_FONT` 变量；三个新意图的能力已入欢迎清单与 system prompt
