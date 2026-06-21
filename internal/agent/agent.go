@@ -1286,6 +1286,34 @@ func taskIDFromResponse(resp string) string {
 	return parsed.TaskID
 }
 
+// mergeToolResultFields flattens a tool's structured JSON response into the
+// tool_result event data so the frontend receives synchronous-tool payloads
+// (generate_copy's title/slogans/selling_points/platform_copy, generate_variants'
+// task_ids/batch_id/dimension/variants/clamped, overlay_text's asset_id/width/
+// height, …). Async-task tools whose marshaler returns a friendly ack string
+// (non-JSON) simply don't merge — Unmarshal fails and dst is left untouched.
+//
+// dst already carries name/status/summary; the result's own status/summary may
+// override them (more accurate), but name stays authoritative (it comes from the
+// callback RunInfo, not user/model-controlled output). A duplicate/clarified
+// result (empty status field after marshal) carries no useful payload and is
+// skipped so it never clobbers the human-friendly summary.
+func mergeToolResultFields(dst map[string]any, output *tool.CallbackOutput) {
+	if output == nil || dst == nil {
+		return
+	}
+	var fields map[string]any
+	if err := json.Unmarshal([]byte(output.Response), &fields); err != nil {
+		return // non-JSON response (friendly ack) — nothing to merge
+	}
+	for k, v := range fields {
+		if k == "name" {
+			continue // never let the result rename the tool
+		}
+		dst[k] = v
+	}
+}
+
 // toolCallbackHandler builds a handler that (1) records each tool that actually
 // executes into tracker — the authoritative tool-usage count for this turn (see
 // toolExecTracker) — and emits a tool_call event when it starts, and (2) emits a
@@ -1346,6 +1374,16 @@ func (o *Orchestrator) toolCallbackHandler(sessionID string, tracker *toolExecTr
 				"status":  "done",
 				"summary": summary,
 			}
+			// Flatten the tool's structured JSON result into the event data so the
+			// frontend receives synchronous-tool payloads (generate_copy's
+			// title/slogans, generate_variants' task_ids/batch_id, overlay's
+			// asset_id, etc.). Without this the frontend only sees name/status/
+			// summary and a synchronous result renders nothing — the user sees the
+			// tool card spin to done but no copy/variants card appears. Non-JSON
+			// responses (a friendly standalone ack string) simply don't merge.
+			// name is kept authoritative (info.Name); status/summary may be
+			// overridden by the result's own fields when present.
+			mergeToolResultFields(data, output)
 			// Surface the produced long-task id + kind so the frontend can
 			// insert a placeholder and subscribe to progress immediately,
 			// without waiting for the turn to finish (design D1).

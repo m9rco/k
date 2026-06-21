@@ -87,6 +87,12 @@ export function useAppController() {
   // pendingAdaptRef tracks task IDs collected during an adapt_to_platform tool
   // call so we can create the pipeline timeline chat item when the tool ends.
   const pendingAdaptRef = React.useRef<string[]>([]);
+  // pendingVariantsRef tracks task IDs collected during a generate_variants tool
+  // call (an async ReturnDirectly tool whose friendly ack is the model reply, so
+  // its structured task_ids never ride the tool_result event — we instead collect
+  // the per-variant task_created events here, mirroring pendingAdaptRef). dimension
+  // is captured from the tool_call args so the group card can label the batch.
+  const pendingVariantsRef = React.useRef<{ taskIds: string[]; dimension: string }>({ taskIds: [], dimension: "" });
   const setChat = React.useCallback((fn: (c: ChatItem[]) => ChatItem[]) => {
     setState((s) => ({ ...s, chat: fn(s.chat) }));
   }, []);
@@ -624,6 +630,12 @@ export function useAppController() {
     lastToolNoteRef.current = describeToolCall(card.name, args);
     // Reset the adapt task collector when a new adapt call starts.
     if (card.name === "adapt_to_platform") pendingAdaptRef.current = [];
+    // Reset + capture dimension when a new generate_variants call starts, so the
+    // per-variant task_created events collected below land in a fresh batch.
+    if (card.name === "generate_variants") {
+      const dim = args && typeof args.dimension === "string" ? args.dimension : "style";
+      pendingVariantsRef.current = { taskIds: [], dimension: dim };
+    }
     setChat((c) => [...c, { kind: "tool", id: card.id!, tool: card }]);
   }, [flushTyper, collapseReasoning, setChat]);
 
@@ -654,19 +666,19 @@ export function useAppController() {
         setChat((c) => [...c, { kind: "copy" as const, id: uid("copy"), title, slogans, sellingPoints, platformCopy }]);
       }
     }
-    // generate_variants launches N independent generate tasks; the result carries
-    // their task_ids + per-variant labels. Render them as one grouped, comparable
-    // cluster (each variant's product fills the workspace via its own task SSE).
-    if (ok && name === "generate_variants" && Array.isArray(data.task_ids) && data.task_ids.length > 0) {
-      const taskIds = (data.task_ids as unknown[]).filter((t): t is string => typeof t === "string");
-      const variants = Array.isArray(data.variants) ? (data.variants as Array<{ label?: string }>) : [];
-      const labels = taskIds.map((_, i) => variants[i]?.label || `变体 ${i + 1}`);
-      const dimension = variantDimensionLabel(typeof data.dimension === "string" ? data.dimension : "");
-      const batchId = typeof data.batch_id === "string" ? data.batch_id : uid("batch");
+    // generate_variants is an async ReturnDirectly tool: its friendly ack is the
+    // model reply, so the structured task_ids do NOT ride the tool_result event.
+    // We instead use the per-variant task_created events collected in
+    // pendingVariantsRef (mirroring adapt) and render one grouped, comparable
+    // cluster — each variant's product fills the workspace via its own task SSE.
+    if (ok && name === "generate_variants") {
+      const { taskIds, dimension: dimKey } = pendingVariantsRef.current;
+      pendingVariantsRef.current = { taskIds: [], dimension: "" };
       if (taskIds.length > 0) {
-        setChat((c) => [...c, { kind: "variants_group" as const, id: uid("vg"), batchId, dimension, taskIds, labels }]);
+        const dimension = variantDimensionLabel(dimKey);
+        const labels = taskIds.map((_, i) => `${dimension}变体 ${i + 1}`);
+        setChat((c) => [...c, { kind: "variants_group" as const, id: uid("vg"), batchId: uid("batch"), dimension, taskIds: [...taskIds], labels }]);
       }
-      if (data.clamped) toast(`变体数量已收敛到 ${taskIds.length} 个`);
     }
     setChat((c) => {
       // complete the most recent running card matching the name (or any).
@@ -679,7 +691,7 @@ export function useAppController() {
           : it,
       );
     });
-  }, [ensureTaskPlaceholder, setChat, refreshWorkspace, toast]);
+  }, [ensureTaskPlaceholder, setChat, refreshWorkspace]);
 
   const finishPendingTools = React.useCallback(() => {
     setChat((c) => c.map((it) => (it.kind === "tool" && it.tool.status === "running" ? { ...it, tool: { ...it.tool, status: "done" } } : it)));
@@ -863,9 +875,14 @@ export function useAppController() {
               undefined,
               typeof d.count === "number" ? d.count : undefined,
             );
-            // Collect task IDs created during an adapt call for the pipeline item.
-            if ((d.kind as TaskKind) === "generate")
+            // Collect task IDs created during an adapt / variants call for their
+            // grouped chat items (consumed in onToolResult). Both are generate-kind
+            // tasks; the matching tool reads only its own ref, so pushing to both is
+            // harmless (one call type is active per turn).
+            if ((d.kind as TaskKind) === "generate") {
               pendingAdaptRef.current.push(d.task_id);
+              pendingVariantsRef.current.taskIds.push(d.task_id);
+            }
           }
           break;
         case "error":
