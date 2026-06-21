@@ -17,12 +17,14 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
 
 	"gameasset/internal/agent"
 	"gameasset/internal/config"
+	"gameasset/internal/copywriting"
 	"gameasset/internal/cos"
 	"gameasset/internal/crawl"
 	"gameasset/internal/crop"
@@ -32,6 +34,7 @@ import (
 	applog "gameasset/internal/log"
 	"gameasset/internal/session"
 	"gameasset/internal/store"
+	"gameasset/internal/textoverlay"
 	"gameasset/internal/transport"
 	"gameasset/internal/video"
 	"gameasset/internal/vision"
@@ -264,6 +267,33 @@ func run() error {
 	}
 	orch.SetWebSearch(webSearchSvc)
 	log.Printf("web-search: DDG text + Bing images enabled (no API key)")
+	// Marketing copy (generate_copy): drafts structured copy via the configured
+	// chat model. Enabled whenever the primary chat credential is present (same
+	// credential the conversation model uses), so it follows chat availability.
+	copyMC := cfg.ChatPrimary
+	if cfg.UseTestModel {
+		copyMC = cfg.ChatTest
+	}
+	if copyMC.APIKey != "" {
+		copySvc := copywriting.NewService(agent.NewChatCompleter(copyMC))
+		orch.SetCopywriter(copySvc)
+		log.Printf("copywriting: generate_copy enabled (model=%s)", copyMC.Model)
+	} else {
+		log.Printf("copywriting: chat credential absent, generate_copy disabled")
+	}
+	// Text overlay (overlay_text): deterministic font-rendered CTA/badge/headline
+	// compositing. Always enabled (the Go Bold fallback font is embedded); a
+	// CJK-capable primary font is loaded from $OVERLAY_FONT or the vendored
+	// data/fonts/overlay-cjk.ttf when present, enabling Chinese text. Without it,
+	// CJK overlays fail loudly (no tofu) while Latin/ASCII overlays still work.
+	overlayFonts, ferr := textoverlay.LoadFonts(filepath.Join(cfg.AssetDir, "..", "fonts", "overlay-cjk.ttf"))
+	if ferr != nil {
+		log.Printf("text-overlay: font load failed, overlay_text disabled: %v", ferr)
+	} else {
+		overlaySvc := textoverlay.NewService(cfg.AssetDir, st, overlayFonts, id.New)
+		orch.SetOverlay(overlaySvc)
+		log.Printf("text-overlay: overlay_text enabled (cjk_font=%v)", overlaySvc.HasCJK())
+	}
 	// Vision pre-stage for platform adaptation: analyze the reference group to
 	// produce a theme report injected into the AI-repaint prompt. The default
 	// provider is gemini (gemini-flash-latest over the native inline API — no COS

@@ -6,10 +6,12 @@ import { MessageBubble } from "./message-bubble";
 import { ReasoningBlock } from "./reasoning-block";
 import { AnalysisBlock } from "./analysis-block";
 import { ToolCard } from "./tool-card";
+import { CopyCard } from "./copy-card";
 import { CapsuleBubble } from "./capsule-bubble";
 import { FollowUpBubble } from "./follow-up-bubble";
 import { LoadingBubble } from "./loading-bubble";
 import { AdaptPipeline } from "./adapt-pipeline";
+import { VariantsGroup } from "./variants-group";
 import { Composer } from "./composer";
 import { ContextBar } from "./context-bar";
 
@@ -20,6 +22,9 @@ const CAPABILITIES = [
   "切尺寸 · 按平台广告位尺寸裁剪，纯裁剪不经过 AI",
   "生视频 · 基于一张图加动作描述生成短视频",
   "搜图 · 按关键词搜索参考图并下载到工作区",
+  "宣发文案 · 为游戏写主标题 / 广告语 / 卖点 / 平台投放文案",
+  "文字叠加 · 把 CTA / 折扣角标 / 定档大字确定性叠加到图上，文字清晰无错字",
+  "批量变体 · 同一张图一次出多个 creative 版本（构图 / 配色 / 风格 / 文案），买量测 CTR",
   "下载 / 打包 · 单张下载或批量打包 zip",
 ];
 
@@ -146,6 +151,17 @@ export function ChatPanel({ onboarding = false }: { onboarding?: boolean }) {
               );
             if (it.kind === "loading") return <LoadingBubble key={it.id} level={it.level} />;
             if (it.kind === "adapt_pipeline") return <AdaptPipeline key={it.id} item={it} />;
+            if (it.kind === "variants_group") return <VariantsGroup key={it.id} item={it} />;
+            if (it.kind === "copy")
+              return (
+                <CopyCard
+                  key={it.id}
+                  title={it.title}
+                  slogans={it.slogans}
+                  sellingPoints={it.sellingPoints}
+                  platformCopy={it.platformCopy}
+                />
+              );
             return <ToolCard key={it.id} tool={it.tool} />;
           })}
         </AnimatePresence>

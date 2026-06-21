@@ -123,8 +123,10 @@ func TestToolsBuildWhitelist(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// edit_image, crop_to_sizes, list_platform_sizes, clarify_intent, generate_icon,
-	// adapt_to_platform (video and crawl are gated behind configured providers, absent here).
+	// edit_image, crop_to_sizes, list_platform_sizes, clarify_intent, adapt_to_platform,
+	// generate_variants (gated on Generation, which is present here).
+	// generate_icon is currently disabled; video/crawl/copywriting/overlay are gated
+	// behind configured providers (all absent here).
 	if len(tools) != 6 {
 		t.Fatalf("expected 6 whitelist tools, got %d", len(tools))
 	}
@@ -139,11 +141,11 @@ func TestToolsBuildWhitelist(t *testing.T) {
 	if !names["clarify_intent"] {
 		t.Error("clarify_intent tool not registered")
 	}
-	if !names["generate_icon"] {
-		t.Error("generate_icon tool not registered")
-	}
 	if !names["adapt_to_platform"] {
 		t.Error("adapt_to_platform tool not registered")
+	}
+	if !names["generate_variants"] {
+		t.Error("generate_variants tool not registered")
 	}
 }
 
@@ -179,6 +181,15 @@ func TestClarifyToolEmitsCapsule(t *testing.T) {
 func TestClarifyToolIsReturnDirectly(t *testing.T) {
 	if _, ok := AsyncTaskTools()["clarify_intent"]; !ok {
 		t.Error("clarify_intent must be a ToolReturnDirectly tool so the turn ends after asking")
+	}
+}
+
+// TestVariantsToolIsAsync guards that generate_variants stays in AsyncTaskTools:
+// its batch result must never feed back to the model (which would let the model
+// fabricate variant outputs before the async tasks actually complete).
+func TestVariantsToolIsAsync(t *testing.T) {
+	if _, ok := AsyncTaskTools()["generate_variants"]; !ok {
+		t.Error("generate_variants must be in AsyncTaskTools so the batch result never feeds back to the model")
 	}
 }
 

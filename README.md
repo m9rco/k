@@ -47,6 +47,7 @@ go build -o asset-studio ./cmd/server && ./asset-studio
 | `ASSET_RETENTION_HOURS` | `0` | 产物保留时长（0 = 永久保留） |
 | `CONFIG_PLATFORMS` | `configs/platforms.json` | 平台尺寸配置文件 |
 | `CONTEXT_TOKEN_BUDGET` | `8000` | 对话上下文滑动窗口 token 预算 |
+| `OVERLAY_FONT` | `data/fonts/overlay-cjk.ttf` | 文字叠加 CJK 主字体路径（见下「文字叠加字体」） |
 | **对话模型** | | |
 | `CHAT_PRIMARY_PROVIDER` | `anthropic` | 主对话模型供应商 |
 | `CHAT_PRIMARY_MODEL` | `claude-opus-4-8` | 主对话模型 id |
@@ -65,6 +66,19 @@ go build -o asset-studio ./cmd/server && ./asset-studio
 | `IMAGE_BACKUP_MODEL` | `gpt-image-1` | 备用生图模型 |
 
 模型在服务端硬编码（由配置决定），用户不可在前端切换。
+
+## 文字叠加字体
+
+`overlay_text`（把 CTA / 折扣角标 / 定档大字确定性叠加到图上）用服务端字体光栅渲染，**逐字检测缺字**——任一字符无字形即报错，绝不渲染豆腐块。
+
+- **ASCII / Latin**：开箱即用，内置 Go Bold 回退字体，无需任何配置。
+- **中文（CJK）**：需要一个 CJK 主字体。字体本体 ~16MB，与产物同属 `data/`（不入库），跑一次脚本拉取即可：
+
+```bash
+./scripts/fetch-overlay-font.sh   # 下载 Noto Sans CJK SC Bold（OFL 可商用）到 data/fonts/overlay-cjk.ttf
+```
+
+未拉字体时中文叠加会**明确报错**而非出豆腐块；ASCII/Latin 叠加不受影响。想换字体，设 `OVERLAY_FONT` 指向任意 CJK TTF/OTF 即可（优先级高于 vendored 路径），无需改代码或跑脚本。
 
 ## 平台尺寸
 

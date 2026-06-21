@@ -65,6 +65,15 @@ var intentRules = []intentRule{
 	{label: "文生图", tool: "generate_image_from_text", imageOp: false,
 		strong: []string{"画一张", "画个", "画张", "生成一张", "来一张", "生成图片", "生成一幅", "做一张图", "生成一张图"},
 		weak:   []string{"生成图"}},
+	{label: "宣发文案", tool: "generate_copy", imageOp: false,
+		strong: []string{"写文案", "写几条文案", "投放文案", "广告语", "想几句广告语", "来几条卖点", "写卖点", "卖点文案", "标题文案", "slogan", "宣传语", "营销文案", "生成文案"},
+		weak:   []string{"文案", "卖点"}},
+	{label: "文字叠加", tool: "overlay_text", imageOp: true,
+		strong: []string{"加个cta", "加cta", "加按钮", "加个按钮", "立即预约", "立即下载", "打个角标", "折扣角标", "促销角标", "加角标", "定档大字", "加大字", "贴logo", "加logo", "叠加文字", "加文字到图", "在图上加字"},
+		weak:   []string{"cta", "角标", "按钮"}},
+	{label: "批量变体", tool: "generate_variants", imageOp: true,
+		strong: []string{"多出几版", "多来几个版本", "多个版本", "批量变体", "不同风格的版本", "几个不同风格", "a/b素材", "ab素材", "测ctr", "测点击", "多个变体", "出几版", "来几版", "多生成几版", "批量出图"},
+		weak:   []string{"变体", "多版本", "几版"}},
 }
 
 // hintThreshold is the minimum confidence at which a hint is injected. Strong

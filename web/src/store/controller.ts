@@ -29,7 +29,23 @@ function orderedAssetIds(s: AppState): string[] {
 // only signal that new assets exist, so the controller refreshes the workspace
 // on result. Async tools (edit_image / generate_icon / image_to_video / crawl)
 // are NOT listed here — they carry a task_id and refresh on task_done.
-const SYNC_ASSET_TOOLS = new Set<string>(["crop_to_sizes"]);
+const SYNC_ASSET_TOOLS = new Set<string>(["crop_to_sizes", "overlay_text"]);
+
+// variantDimensionLabel maps the generate_variants dimension key to its Chinese
+// label for the grouped variants card.
+function variantDimensionLabel(dim: string): string {
+  switch (dim) {
+    case "palette":
+      return "配色";
+    case "composition":
+      return "构图";
+    case "copy":
+      return "文案侧重";
+    case "style":
+    default:
+      return "风格";
+  }
+}
 
 // useAppController owns all app state and the real-time side effects (WS
 // conversation + per-task SSE), mirroring the legacy app.js behavior.
@@ -626,6 +642,32 @@ export function useAppController() {
       if (ids.length > 0)
         setChat((c) => [...c, { kind: "adapt_pipeline" as const, id: uid("ap"), taskIds: ids }]);
     }
+    // generate_copy is synchronous: its structured copy rides in the tool_result
+    // data. Render it as a dedicated copy card so the user gets a grouped,
+    // copy-able view (title / slogans / selling points / platform copy).
+    if (ok && name === "generate_copy") {
+      const slogans = Array.isArray(data.slogans) ? (data.slogans as string[]) : undefined;
+      const sellingPoints = Array.isArray(data.selling_points) ? (data.selling_points as string[]) : undefined;
+      const title = typeof data.title === "string" ? data.title : undefined;
+      const platformCopy = typeof data.platform_copy === "string" ? data.platform_copy : undefined;
+      if (title || slogans?.length || sellingPoints?.length || platformCopy) {
+        setChat((c) => [...c, { kind: "copy" as const, id: uid("copy"), title, slogans, sellingPoints, platformCopy }]);
+      }
+    }
+    // generate_variants launches N independent generate tasks; the result carries
+    // their task_ids + per-variant labels. Render them as one grouped, comparable
+    // cluster (each variant's product fills the workspace via its own task SSE).
+    if (ok && name === "generate_variants" && Array.isArray(data.task_ids) && data.task_ids.length > 0) {
+      const taskIds = (data.task_ids as unknown[]).filter((t): t is string => typeof t === "string");
+      const variants = Array.isArray(data.variants) ? (data.variants as Array<{ label?: string }>) : [];
+      const labels = taskIds.map((_, i) => variants[i]?.label || `变体 ${i + 1}`);
+      const dimension = variantDimensionLabel(typeof data.dimension === "string" ? data.dimension : "");
+      const batchId = typeof data.batch_id === "string" ? data.batch_id : uid("batch");
+      if (taskIds.length > 0) {
+        setChat((c) => [...c, { kind: "variants_group" as const, id: uid("vg"), batchId, dimension, taskIds, labels }]);
+      }
+      if (data.clamped) toast(`变体数量已收敛到 ${taskIds.length} 个`);
+    }
     setChat((c) => {
       // complete the most recent running card matching the name (or any).
       const idx = [...c].reverse().findIndex((it) => it.kind === "tool" && it.tool.status === "running" && (!name || it.tool.name === name));
@@ -637,7 +679,7 @@ export function useAppController() {
           : it,
       );
     });
-  }, [ensureTaskPlaceholder, setChat, refreshWorkspace]);
+  }, [ensureTaskPlaceholder, setChat, refreshWorkspace, toast]);
 
   const finishPendingTools = React.useCallback(() => {
     setChat((c) => c.map((it) => (it.kind === "tool" && it.tool.status === "running" ? { ...it, tool: { ...it.tool, status: "done" } } : it)));

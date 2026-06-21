@@ -11,12 +11,14 @@ import (
 	"time"
 
 	"gameasset/internal/config"
+	"gameasset/internal/copywriting"
 	"gameasset/internal/cos"
 	"gameasset/internal/crawl"
 	"gameasset/internal/crop"
 	"gameasset/internal/generation"
 	applog "gameasset/internal/log"
 	"gameasset/internal/store"
+	"gameasset/internal/textoverlay"
 	"gameasset/internal/video"
 	"gameasset/internal/vision"
 	"gameasset/internal/websearch"
@@ -40,6 +42,13 @@ type ToolDeps struct {
 	// WebSearch backs the web_search and search_images tools. Always available
 	// (no API key needed); nil only in tests that don't exercise search.
 	WebSearch *websearch.Service
+	// Copywriting backs the generate_copy tool (structured marketing copy). Nil
+	// leaves generate_copy out of the whitelist (the agent declines copy
+	// requests), so wiring it is opt-in like text-to-image.
+	Copywriting *copywriting.Service
+	// Overlay backs the overlay_text tool (deterministic text/LOGO compositing).
+	// Nil/unconfigured leaves overlay_text out of the whitelist.
+	Overlay *textoverlay.Service
 	// Store is used by await_result polling to read task completion status.
 	Store *store.Store
 	// SessionID scopes every tool call to the caller's session so produced
@@ -1173,6 +1182,31 @@ func (d ToolDeps) Tools() ([]tool.BaseTool, error) {
 		}
 		tools = append(tools, wsearch, wsImg)
 	}
+	// generate_copy is opt-in: only whitelisted when a copywriting service is wired.
+	if d.Copywriting != nil && d.Copywriting.Configured() {
+		copyTool, err := d.newCopywritingTool()
+		if err != nil {
+			return nil, fmt.Errorf("copywriting tool: %w", err)
+		}
+		tools = append(tools, copyTool)
+	}
+	// overlay_text is opt-in: only whitelisted when the overlay service is configured.
+	if d.Overlay != nil && d.Overlay.Configured() {
+		overlayTool, err := d.newOverlayTool()
+		if err != nil {
+			return nil, fmt.Errorf("overlay tool: %w", err)
+		}
+		tools = append(tools, overlayTool)
+	}
+	// generate_variants reuses the generation pipeline; whitelisted whenever
+	// generation is wired (it always is, mirroring edit_image's availability).
+	if d.Generation != nil {
+		variantsTool, err := d.newVariantsTool()
+		if err != nil {
+			return nil, fmt.Errorf("variants tool: %w", err)
+		}
+		tools = append(tools, variantsTool)
+	}
 	// crawl_game_assets removed from whitelist (replaced by search_images).
 	return tools, nil
 }
@@ -1188,6 +1222,7 @@ func AsyncTaskTools() map[string]struct{} {
 		"adapt_to_platform":        {},
 		"image_to_video":           {},
 		"search_images":            {},
+		"generate_variants":        {},
 		// clarify_intent ends the turn; result must not feed back to model.
 		"clarify_intent": {},
 	}

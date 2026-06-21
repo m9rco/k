@@ -1,4 +1,4 @@
-import type { Asset, Task, ToolCardData, ModelEntry, AdaptPipelineItem } from "@/lib/types";
+import type { Asset, Task, ToolCardData, ModelEntry, AdaptPipelineItem, VariantsGroupItem } from "@/lib/types";
 
 // WaitLevel tiers the post-send loading state: "p1" is the lightweight default
 // micro-hint ("正在启动深度思考…"), "p2" is the heavier static fallback shown
@@ -29,7 +29,19 @@ export type ChatItem =
       reanalyzing?: boolean; // fresh grok analysis in progress (disables submit)
     }
   | { kind: "tool"; id: string; tool: ToolCardData }
+  | {
+      // Structured marketing copy produced by generate_copy, rendered as a
+      // grouped card (title / slogans / selling points / platform copy) the user
+      // can read and copy. Carried in the tool_result event's data fields.
+      kind: "copy";
+      id: string;
+      title?: string;
+      slogans?: string[];
+      sellingPoints?: string[];
+      platformCopy?: string;
+    }
   | AdaptPipelineItem
+  | VariantsGroupItem
   | { kind: "capsule"; id: string; question: string; options: CapsuleOption[]; answered: boolean }
   | { kind: "follow_up"; id: string; message: string; options: CapsuleOption[]; dismissed: boolean }
   | { kind: "loading"; id: string; level: WaitLevel };

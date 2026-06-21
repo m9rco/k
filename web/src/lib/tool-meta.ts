@@ -12,6 +12,9 @@ import {
   LayoutGrid,
   Sparkles,
   AppWindow,
+  Megaphone,
+  Stamp,
+  Layers,
   MessageCircleQuestion,
   RotateCcw,
   Wrench,
@@ -40,6 +43,9 @@ const TOOL_META: Record<string, ToolMeta> = {
   search_images:                 { icon: Globe, title: "搜图" },
   generate_image_from_text:      { icon: Sparkles, title: "文字生图" },
   generate_icon:                 { icon: AppWindow, title: "生成图标" },
+  generate_copy:                 { icon: Megaphone, title: "宣发文案" },
+  overlay_text:                  { icon: Stamp, title: "文字叠加" },
+  generate_variants:             { icon: Layers, title: "批量变体" },
   clarify_intent:                { icon: MessageCircleQuestion, title: "确认意图" },
   web_search:                    { icon: Globe, title: "搜索资讯" },
 };
@@ -69,6 +75,12 @@ export function toolSubtitle(name: string, args?: Record<string, unknown>): stri
     case "image_to_video":       return s("motion");
     case "generate_image_from_text": return s("description");
     case "generate_icon":        return s("icon_desc");
+    case "generate_variants": {
+      const n = typeof args.count === "number" ? args.count : undefined;
+      const dim = s("dimension");
+      const dimLabel = dim === "palette" ? "配色" : dim === "composition" ? "构图" : dim === "copy" ? "文案侧重" : dim ? "风格" : "";
+      return [n ? `${n} 个` : "", dimLabel].filter(Boolean).join(" · ");
+    }
     case "search_images":
     case "web_search":           return s("query");
     case "crawl_game_assets":    return s("game");

@@ -17,6 +17,9 @@ func TestClassifyIntentHighFrequencyPhrases(t *testing.T) {
 		{"生视频", "[工作区: 图1=a1(上传)] 让角色动起来生成一段视频", "生视频", "image_to_video"},
 		{"搜索图片", "帮我搜一张赛博朋克城市的图", "搜索图片", "search_images"},
 		{"文生图", "画一张科幻风格的飞船", "文生图", "generate_image_from_text"},
+		{"宣发文案", "[工作区: 图1=a1(上传)] 帮我给这张图写几条投放文案", "宣发文案", "generate_copy"},
+		{"文字叠加", "[工作区: 图1=a1(上传)] 给图1 右下角加个『立即预约』按钮", "文字叠加", "overlay_text"},
+		{"批量变体", "[工作区: 图1=a1(上传)] 这张图帮我多出几个不同风格的版本测点击", "批量变体", "generate_variants"},
 		{"下载打包", "把刚才的产物打包成zip下载", "下载/打包", ""},
 	}
 	for _, c := range cases {

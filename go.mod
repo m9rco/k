@@ -46,8 +46,16 @@ require (
 	golang.org/x/arch v0.11.0 // indirect
 	golang.org/x/exp v0.0.0-20230713183714-613f0c0eb8a1 // indirect
 	golang.org/x/sys v0.42.0 // indirect
+	golang.org/x/text v0.38.0 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 	modernc.org/libc v1.72.3 // indirect
 	modernc.org/mathutil v1.7.1 // indirect
 	modernc.org/memory v1.11.0 // indirect
 )
+
+// golang.org/x/image v0.42.0 (pulled in by internal/textoverlay's font/sfnt
+// import) requires golang.org/x/text v0.38.0, but the internal goproxy could not
+// serve that version's module zip (transient EOFs). v0.32.0 is fully cached and
+// API-compatible for the font/sfnt charmap dependency, so we pin to it. Drop this
+// replace once the proxy can fetch v0.38.0 (`go get golang.org/x/text@v0.38.0`).
+replace golang.org/x/text v0.38.0 => golang.org/x/text v0.32.0

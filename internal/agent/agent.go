@@ -24,12 +24,14 @@ import (
 	utilcb "github.com/cloudwego/eino/utils/callbacks"
 
 	"gameasset/internal/config"
+	"gameasset/internal/copywriting"
 	"gameasset/internal/cos"
 	"gameasset/internal/crawl"
 	"gameasset/internal/crop"
 	"gameasset/internal/generation"
 	applog "gameasset/internal/log"
 	"gameasset/internal/store"
+	"gameasset/internal/textoverlay"
 	"gameasset/internal/transport"
 	"gameasset/internal/usermodel"
 	"gameasset/internal/video"
@@ -58,6 +60,8 @@ type Orchestrator struct {
 	video      *video.Service
 	crawl      *crawl.Service
 	webSearch  *websearch.Service
+	copywriter *copywriting.Service
+	overlay    *textoverlay.Service
 	store      *store.Store
 	newID      func(string) string
 	budget     int
@@ -153,6 +157,15 @@ func (o *Orchestrator) LastProduced(sessionID string) string {
 
 // SetWebSearch installs the web-search service (DDG text + Bing images).
 func (o *Orchestrator) SetWebSearch(svc *websearch.Service) { o.webSearch = svc }
+
+// SetCopywriter installs the marketing-copy service backing generate_copy. When
+// left unset (or unconfigured), generate_copy stays out of the whitelist and the
+// agent politely declines copy requests.
+func (o *Orchestrator) SetCopywriter(svc *copywriting.Service) { o.copywriter = svc }
+
+// SetOverlay installs the text-overlay service backing overlay_text. When unset
+// (or unconfigured), overlay_text stays out of the whitelist.
+func (o *Orchestrator) SetOverlay(svc *textoverlay.Service) { o.overlay = svc }
 
 // SetTextToImage installs the text-to-image generation service (wan/qwen). When
 // left unset, the generate_image_from_text tool stays out of the whitelist and
@@ -606,7 +619,7 @@ func (o *Orchestrator) Handle(ctx context.Context, sessionID, userText string, l
 		})
 	}
 
-	deps := ToolDeps{Generation: o.gen, TextToImage: o.textToImg, Crop: o.crop, Video: o.video, Crawl: o.crawl, WebSearch: o.webSearch, Store: o.store, SessionID: sessionID, Lossless: lossless, Clarify: clarify, dedup: newTurnCallGuard()}
+	deps := ToolDeps{Generation: o.gen, TextToImage: o.textToImg, Crop: o.crop, Video: o.video, Crawl: o.crawl, WebSearch: o.webSearch, Copywriting: o.copywriter, Overlay: o.overlay, Store: o.store, SessionID: sessionID, Lossless: lossless, Clarify: clarify, dedup: newTurnCallGuard()}
 	// Per-session generation model overrides (image / text-to-image / video).
 	// Zero value => the tool uses the service default provider.
 	if pc, ok := o.models.ImageModel(sessionID, config.SceneImage); ok {

@@ -130,6 +130,20 @@ export interface AdaptPipelineItem {
   taskIds: string[];
 }
 
+// VariantsGroupItem appears in the chat log for generate_variants operations,
+// showing a batch of N creative variants as one group so the buyer can compare
+// them side by side. Each variant is an independent generate task; the group
+// reads each task's live status from state.tasks. labels[i] pairs with
+// taskIds[i] (e.g. "风格变体 1"). dimension is the variant axis (风格/配色/…).
+export interface VariantsGroupItem {
+  kind: "variants_group";
+  id: string;
+  batchId: string;
+  dimension: string;
+  taskIds: string[];
+  labels: string[];
+}
+
 // ModelEntry is one selectable model in the per-session model catalog.
 export interface ModelEntry {
   id: string;
