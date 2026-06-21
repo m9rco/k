@@ -136,6 +136,10 @@ export function optimizePrompt(sid: string, text: string) {
 // RegionBox is a normalized selection rectangle (each field ∈ [0,1]).
 export interface RegionBox { x: number; y: number; w: number; h: number }
 
+// RegionPoint is a normalized vertex (each field ∈ [0,1]) for polygon (lasso)
+// selection.
+export interface RegionPoint { x: number; y: number }
+
 // RegionResponse is the describe-region reply. `box` (when present) is the
 // object's bounding box the vision model located for a click point — the
 // frontend snaps the selection overlay to it.
@@ -147,15 +151,17 @@ export interface RegionResponse {
 }
 
 // describeRegion resolves a selection on an asset into a structured feature
-// description from the vision model. Two modes:
-//   - point: pass { px, py } (normalized click) — the model looks at the FULL
-//     image, identifies the clicked object, returns its box + description.
-//   - rect:  pass { x, y, w, h } — the model crops the box and describes it.
+// description from the vision model. Three modes:
+//   - point:   pass { px, py } (normalized click) — the model looks at the FULL
+//              image, identifies the clicked object, returns its box + description.
+//   - rect:    pass { x, y, w, h } — the model crops the box and describes it.
+//   - polygon: pass { points: [{x,y},…] } — the server masks the lasso shape to
+//              transparent outside, crops its bbox, and describes that cutout.
 // Degrades gracefully: { available:false } means fall back to plain-text editing.
 export function describeRegion(
   sid: string,
   assetId: string,
-  sel: { px: number; py: number } | RegionBox,
+  sel: { px: number; py: number } | RegionBox | { points: RegionPoint[] },
 ) {
   return api<RegionResponse>(
     `/api/session/${sid}/assets/${assetId}/describe-region`,

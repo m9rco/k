@@ -45,10 +45,26 @@ export default {
         shimmer: {
           "100%": { transform: "translateX(100%)" },
         },
+        // Marching-ants: scroll the dashed border so the manual selection box
+        // reads as an active, live selection rather than a static rectangle.
+        // Each frame fully specifies the 4 side positions so the edges stay
+        // anchored while only the dash offset travels.
+        "marching-ants": {
+          "0%": { "background-position": "0 0, 0 100%, 0 0, 100% 0" },
+          "100%": { "background-position": "16px 0, -16px 100%, 0 -16px, 100% 16px" },
+        },
+        // dash-flow: scroll an SVG stroke's dash offset so the polygon (lasso)
+        // outline reads as a live, animated selection — the marching-ants analog
+        // for the arbitrary-shape path.
+        "dash-flow": {
+          to: { "stroke-dashoffset": "-28" },
+        },
       },
       animation: {
         "fade-in": "fade-in 0.2s ease-out",
         shimmer: "shimmer 1.4s ease-in-out infinite",
+        "marching-ants": "marching-ants 0.6s linear infinite",
+        "dash-flow": "dash-flow 0.6s linear infinite",
       },
     },
   },

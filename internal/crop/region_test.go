@@ -54,3 +54,41 @@ func TestRegionBytesRejectsBadBox(t *testing.T) {
 		})
 	}
 }
+
+// TestRegionPolygonBytesCropsBBoxAndMasks verifies a triangle polygon yields a
+// PNG cropped to its bounding box, with pixels outside the triangle transparent
+// and pixels inside opaque.
+func TestRegionPolygonBytesCropsBBoxAndMasks(t *testing.T) {
+	data := makePNG(t, 400, 400)
+	// Triangle covering the top-left half: (0,0)-(1,0)-(0,1).
+	pts := []Point{{X: 0, Y: 0}, {X: 1, Y: 0}, {X: 0, Y: 1}}
+	res, err := RegionPolygonBytes(data, pts)
+	if err != nil {
+		t.Fatalf("RegionPolygonBytes: %v", err)
+	}
+	if res.Mime != "image/png" {
+		t.Fatalf("mime = %q, want image/png", res.Mime)
+	}
+	if res.Width != 400 || res.Height != 400 {
+		t.Fatalf("bbox size = %dx%d, want 400x400", res.Width, res.Height)
+	}
+	img, _, err := image.Decode(bytes.NewReader(res.Data))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A pixel near the top-left corner is inside the triangle → opaque.
+	if _, _, _, a := img.At(20, 20).RGBA(); a == 0 {
+		t.Errorf("inside-triangle pixel is transparent, want opaque")
+	}
+	// A pixel near the bottom-right corner is outside the triangle → transparent.
+	if _, _, _, a := img.At(380, 380).RGBA(); a != 0 {
+		t.Errorf("outside-triangle pixel is opaque, want transparent")
+	}
+}
+
+func TestRegionPolygonBytesRejectsTooFewPoints(t *testing.T) {
+	data := makePNG(t, 100, 100)
+	if _, err := RegionPolygonBytes(data, []Point{{X: 0, Y: 0}, {X: 1, Y: 1}}); err == nil {
+		t.Error("expected error for < 3 points")
+	}
+}

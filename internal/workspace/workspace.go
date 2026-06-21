@@ -43,16 +43,19 @@ type Service struct {
 	// doesn't import cos/vision; nil disables prewarming (graceful no-op).
 	prewarm func(sessionID, assetID, path, mime string)
 	// describeRegion resolves a user selection on an asset into a structured
-	// feature description (+ optional bounding box). Two modes share one fn:
+	// feature description (+ optional bounding box). Three modes share one fn:
 	//   - point mode (px,py ≥ 0): the vision model looks at the FULL image and the
 	//     click point, identifies the object under it, and returns its box + desc.
-	//   - rect mode (px,py < 0): the legacy path crops the [x,y,w,h] box and
-	//     describes the crop (box returned is the input rect).
-	// Injected in main (vision.RegionLocator for point, crop.RegionBytes +
-	// Analyzer.DescribeRegion for rect) so workspace doesn't import crop/vision;
-	// nil disables the endpoint (returns 503). Returns (description, box, error)
-	// where box is normalized [0,1]; in rect mode box echoes the input.
-	describeRegion func(sessionID, assetID string, x, y, w, h, px, py float64) (desc string, bx, by, bw, bh float64, err error)
+	//   - polygon mode (len(poly) ≥ 3): the server masks the lasso shape to
+	//     transparent outside, crops the bbox, and describes that cutout. The
+	//     returned box is the polygon's bounding box.
+	//   - rect mode (px,py < 0, no poly): crops the [x,y,w,h] box and describes
+	//     the crop (box returned is the input rect).
+	// Injected in main (vision.RegionLocator for point, crop.RegionBytes/
+	// RegionPolygonBytes + Analyzer.DescribeRegion otherwise) so workspace doesn't
+	// import crop/vision; nil disables the endpoint (returns 503). Returns
+	// (description, box, error) where box is normalized [0,1].
+	describeRegion func(sessionID, assetID string, x, y, w, h, px, py float64, poly [][2]float64) (desc string, bx, by, bw, bh float64, err error)
 }
 
 // NewService constructs the workspace service. retryFn re-runs a failed task
@@ -83,8 +86,8 @@ func (s *Service) SetPrewarm(fn func(sessionID, assetID, path, mime string)) {
 
 // SetDescribeRegion wires the region-description capability. Leaving it unset
 // makes the describe-region endpoint return 503. See the field doc for the
-// point-vs-rect calling convention (px,py < 0 means rect mode).
-func (s *Service) SetDescribeRegion(fn func(sessionID, assetID string, x, y, w, h, px, py float64) (string, float64, float64, float64, float64, error)) {
+// point/polygon/rect calling convention (px,py < 0 and empty poly means rect).
+func (s *Service) SetDescribeRegion(fn func(sessionID, assetID string, x, y, w, h, px, py float64, poly [][2]float64) (string, float64, float64, float64, float64, error)) {
 	s.describeRegion = fn
 }
 
@@ -230,29 +233,39 @@ func (s *Service) handleAssetRaw(w http.ResponseWriter, r *http.Request) {
 	http.ServeFile(w, r, asset.Path)
 }
 
-// regionRequest is the body of POST .../describe-region. Two modes:
+// regionRequest is the body of POST .../describe-region. Three modes:
 //   - point: send Px,Py (normalized click ∈ [0,1]); X/Y/W/H omitted/ignored. The
 //     vision model looks at the full image and returns the clicked object's box.
-//   - rect: send X,Y,W,H (normalized box); Px,Py omitted. Legacy crop+describe.
+//   - polygon: send Points ([{x,y},…] normalized, ≥3); the server crops the
+//     polygon's bbox and masks pixels outside the lasso to transparent, then
+//     describes that cutout. Takes precedence over rect when present.
+//   - rect: send X,Y,W,H (normalized box); Px,Py/Points omitted. Crop+describe.
 //
 // Px/Py default to a sentinel (< 0) when absent so the handler can tell which
 // mode the client intends.
+type regionPoint struct {
+	X float64 `json:"x"`
+	Y float64 `json:"y"`
+}
+
 type regionRequest struct {
-	X  float64  `json:"x"`
-	Y  float64  `json:"y"`
-	W  float64  `json:"w"`
-	H  float64  `json:"h"`
-	Px *float64 `json:"px"`
-	Py *float64 `json:"py"`
+	X      float64       `json:"x"`
+	Y      float64       `json:"y"`
+	W      float64       `json:"w"`
+	H      float64       `json:"h"`
+	Px     *float64      `json:"px"`
+	Py     *float64      `json:"py"`
+	Points []regionPoint `json:"points"`
 }
 
 // handleDescribeRegion resolves the user's selection into a structured feature
-// description. In POINT mode (px,py present) the vision model inspects the full
-// image and the click point, returns the object's bounding box + description. In
-// RECT mode (x,y,w,h) it crops the box and describes the crop. The instruction is
-// fixed server-side (no user text). Returns 503 when unwired, 400 on a bad
-// selection, and a graceful {available:false} body when the vision model is down
-// so the frontend degrades to plain-text editing.
+// description. POINT mode (px,py present) lets the vision model inspect the full
+// image and the click point. POLYGON mode (points ≥3) masks the lassoed shape to
+// transparent outside and describes the cutout. RECT mode (x,y,w,h) crops the box
+// and describes the crop. The instruction is fixed server-side (no user text).
+// Returns 503 when unwired, 400 on a bad selection, and a graceful
+// {available:false} body when the vision model is down so the frontend degrades
+// to plain-text editing.
 func (s *Service) handleDescribeRegion(w http.ResponseWriter, r *http.Request) {
 	sessionID := r.PathValue("id")
 	assetID := r.PathValue("assetId")
@@ -265,17 +278,28 @@ func (s *Service) handleDescribeRegion(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad request body", http.StatusBadRequest)
 		return
 	}
-	// Point mode when both px,py supplied and in range. Otherwise rect mode.
+	// Mode selection: polygon (≥3 pts) > point > rect.
 	point := req.Px != nil && req.Py != nil
+	poly := make([][2]float64, 0, len(req.Points))
 	var px, py float64
-	if point {
+	if len(req.Points) >= 3 {
+		// Polygon mode: validate every vertex is in range.
+		for _, p := range req.Points {
+			if p.X < 0 || p.X > 1 || p.Y < 0 || p.Y > 1 {
+				http.Error(w, "invalid polygon point", http.StatusBadRequest)
+				return
+			}
+			poly = append(poly, [2]float64{p.X, p.Y})
+		}
+		px, py = -1, -1
+	} else if point {
 		px, py = *req.Px, *req.Py
 		if px < 0 || px > 1 || py < 0 || py > 1 {
 			http.Error(w, "invalid click point", http.StatusBadRequest)
 			return
 		}
 	} else {
-		// Sentinel: negative px,py tells the wired fn this is a rect request.
+		// Sentinel: negative px,py + empty poly tells the wired fn this is rect.
 		px, py = -1, -1
 		if req.W <= 0 || req.H <= 0 || req.X < 0 || req.Y < 0 ||
 			req.X > 1 || req.Y > 1 || req.X+req.W > 1.0001 || req.Y+req.H > 1.0001 {
@@ -283,7 +307,7 @@ func (s *Service) handleDescribeRegion(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	desc, bx, by, bw, bh, err := s.describeRegion(sessionID, assetID, req.X, req.Y, req.W, req.H, px, py)
+	desc, bx, by, bw, bh, err := s.describeRegion(sessionID, assetID, req.X, req.Y, req.W, req.H, px, py, poly)
 	if err != nil {
 		// Graceful degradation: the frontend falls back to plain-text editing.
 		writeJSON(w, map[string]any{"available": false, "error": err.Error()})

@@ -12,6 +12,7 @@ import (
 	"image/color"
 	"image/jpeg"
 	"image/png"
+	"math"
 	"strings"
 
 	xdraw "golang.org/x/image/draw"
@@ -402,6 +403,119 @@ func RegionBytes(data []byte, x, y, bw, bh float64) (Result, error) {
 		return Result{}, err
 	}
 	return Result{Data: enc, Width: w, Height: h, Mime: outMime}, nil
+}
+
+// Point is a normalized 2-D coordinate (each field ∈ [0,1], origin top-left).
+type Point struct {
+	X float64
+	Y float64
+}
+
+// RegionPolygonBytes extracts an arbitrary polygon region from the image: it
+// crops to the polygon's tight bounding box, then makes every pixel OUTSIDE the
+// polygon transparent. The result is a PNG (RGBA) so the cutout shape survives
+// — the vision model then sees only the lassoed shape against transparency,
+// matching what the user circled. Needs ≥3 points; falls back to an error
+// otherwise so the caller can degrade to a plain rect.
+func RegionPolygonBytes(data []byte, pts []Point) (Result, error) {
+	if len(pts) < 3 {
+		return Result{}, fmt.Errorf("polygon needs at least 3 points, got %d", len(pts))
+	}
+	img, _, err := Decode(data)
+	if err != nil {
+		return Result{}, err
+	}
+	sb := img.Bounds()
+	srcW, srcH := sb.Dx(), sb.Dy()
+	if srcW == 0 || srcH == 0 {
+		return Result{}, fmt.Errorf("empty source image")
+	}
+
+	// Convert normalized points to absolute pixel coords and find the bbox.
+	abs := make([][2]float64, len(pts))
+	minX, minY := math.Inf(1), math.Inf(1)
+	maxX, maxY := math.Inf(-1), math.Inf(-1)
+	for i, p := range pts {
+		x := clampUnit(p.X) * float64(srcW)
+		y := clampUnit(p.Y) * float64(srcH)
+		abs[i] = [2]float64{x, y}
+		if x < minX {
+			minX = x
+		}
+		if y < minY {
+			minY = y
+		}
+		if x > maxX {
+			maxX = x
+		}
+		if y > maxY {
+			maxY = y
+		}
+	}
+	x0 := sb.Min.X + int(minX)
+	y0 := sb.Min.Y + int(minY)
+	x1 := sb.Min.X + int(maxX+0.5)
+	y1 := sb.Min.Y + int(maxY+0.5)
+	if x1 > sb.Max.X {
+		x1 = sb.Max.X
+	}
+	if y1 > sb.Max.Y {
+		y1 = sb.Max.Y
+	}
+	if x1 <= x0 || y1 <= y0 {
+		return Result{}, fmt.Errorf("polygon collapses to empty crop")
+	}
+
+	w, h := x1-x0, y1-y0
+	out := image.NewRGBA(image.Rect(0, 0, w, h))
+	// For each output pixel, keep the source pixel only if its center is inside
+	// the polygon (even-odd ray cast); otherwise leave it transparent.
+	for oy := 0; oy < h; oy++ {
+		for ox := 0; ox < w; ox++ {
+			// Sample point in absolute source space, at the pixel center.
+			px := float64(x0+ox) - float64(sb.Min.X) + 0.5
+			py := float64(y0+oy) - float64(sb.Min.Y) + 0.5
+			if pointInPolygon(px, py, abs) {
+				out.Set(ox, oy, img.At(x0+ox, y0+oy))
+			}
+		}
+	}
+	enc, _, err := Encode(out, "image/png")
+	if err != nil {
+		return Result{}, err
+	}
+	return Result{Data: enc, Width: w, Height: h, Mime: "image/png"}, nil
+}
+
+// pointInPolygon reports whether (x,y) lies inside the polygon defined by pts
+// (absolute pixel coords, each [x,y]) using the even-odd ray-casting rule.
+func pointInPolygon(x, y float64, pts [][2]float64) bool {
+	inside := false
+	n := len(pts)
+	j := n - 1
+	for i := 0; i < n; i++ {
+		xi, yi := pts[i][0], pts[i][1]
+		xj, yj := pts[j][0], pts[j][1]
+		if (yi > y) != (yj > y) {
+			xCross := (xj-xi)*(y-yi)/(yj-yi) + xi
+			if x < xCross {
+				inside = !inside
+			}
+		}
+		j = i
+	}
+	return inside
+}
+
+// clampUnit constrains v to [0,1].
+func clampUnit(v float64) float64 {
+	if v < 0 {
+		return 0
+	}
+	if v > 1 {
+		return 1
+	}
+	return v
 }
 
 // CropBytesWithOptions decodes the image, applies opts to produce a

@@ -3,7 +3,7 @@ import { Download, Crop, Sparkles, X } from "lucide-react";
 import type { Asset } from "@/lib/types";
 import { useApp } from "@/store/context";
 import { MAX_SELECTED } from "@/store/controller";
-import { describeRegion, type RegionBox } from "@/lib/api";
+import { describeRegion, type RegionBox, type RegionPoint } from "@/lib/api";
 import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 import { RegionSelector } from "./region-selector";
@@ -24,14 +24,11 @@ export function Lightbox({
   const [adjust, setAdjust] = React.useState("");
   const [motion, setMotion] = React.useState("");
   // Region-edit state: when selecting, the image is replaced by the selector;
-  // regionDesc holds the structured feature description fetched for the picked
-  // region so the next edit can be scoped to that subject. resultBox is the
-  // object's bounding box the vision model located (point mode) — fed back to the
-  // selector so the overlay snaps to it.
+  // regionDesc holds the structured feature description fetched for the drawn
+  // region so the next edit can be scoped to that subject.
   const [selecting, setSelecting] = React.useState(false);
   const [describing, setDescribing] = React.useState(false);
   const [regionDesc, setRegionDesc] = React.useState("");
-  const [resultBox, setResultBox] = React.useState<RegionBox | null>(null);
 
   React.useEffect(() => {
     setAdjust("");
@@ -39,23 +36,21 @@ export function Lightbox({
     setSelecting(false);
     setDescribing(false);
     setRegionDesc("");
-    setResultBox(null);
   }, [asset]);
 
   if (!asset) return null;
   const isVideo = (asset.mime || "").startsWith("video/") || asset.kind === "video";
 
-  // describe runs the describe-region call for either a click point or a rect and
-  // stages the structured description (+ located box). On failure it degrades to
-  // plain-text editing.
-  const describe = async (sel: { px: number; py: number } | RegionBox) => {
+  // describe runs the describe-region call for a drawn selection (rect or
+  // polygon) and stages the structured description so the next edit can be
+  // scoped to that subject. On failure it degrades to plain-text editing.
+  const describe = async (sel: RegionBox | { points: RegionPoint[] }) => {
     setDescribing(true);
     try {
       const resp = await describeRegion(app.state.sessionId, asset.id, sel);
       if (resp.available && resp.description) {
         setRegionDesc(resp.description);
-        if (resp.box && resp.box.w > 0 && resp.box.h > 0) setResultBox(resp.box);
-        app.toast("已识别该图层特征，可在下方补充修改要求", "ok");
+        app.toast("已识别该区域特征，可在下方补充修改要求", "ok");
       } else {
         app.toast("选区识别不可用，可直接用文字描述修改", "warn");
       }
@@ -66,8 +61,8 @@ export function Lightbox({
     }
   };
 
-  const onPoint = (px: number, py: number) => void describe({ px, py });
   const onRect = (box: RegionBox) => void describe(box);
+  const onPoly = (points: RegionPoint[]) => void describe({ points });
 
   const applyAdjust = () => {
     const txt = adjust.trim();
@@ -114,10 +109,9 @@ export function Lightbox({
           ) : selecting ? (
             <RegionSelector
               src={asset.url}
-              onPoint={onPoint}
               onRect={onRect}
+              onPoly={onPoly}
               busy={describing}
-              resultBox={resultBox}
             />
           ) : (
             <img src={asset.url} alt="预览" className="max-h-[52vh] w-full rounded-md bg-bg object-contain" />

@@ -345,16 +345,18 @@ func run() error {
 		})
 		log.Printf("upload prewarm: enabled (publish → analyze → cache by md5)")
 	}
-	// Region description. Two modes share one closure:
+	// Region description. Three modes share one closure:
 	//   - POINT mode (px,py ≥ 0): the vision model inspects the FULL image + the
 	//     click point and returns the clicked object's box + feature description.
 	//     No crop, no COS for the box itself (gemini inline path); the OpenAI path
 	//     still publishes the full image to a public URL.
-	//   - RECT mode (px,py < 0): legacy crop of [x,y,w,h] + describe the crop.
+	//   - POLYGON mode (len(poly) ≥ 3): mask the lassoed shape to transparent
+	//     outside, crop its bbox, and describe that cutout.
+	//   - RECT mode (px,py < 0, no poly): crop of [x,y,w,h] + describe the crop.
 	// Wired only when vision is configured; the openai (NeedsPublicURL) path also
 	// needs COS to publish the image.
 	if visionAnalyzer != nil && (!visionAnalyzer.NeedsPublicURL() || cosUploader != nil) {
-		wsSvc.SetDescribeRegion(func(sessionID, assetID string, x, y, bw, bh, px, py float64) (string, float64, float64, float64, float64, error) {
+		wsSvc.SetDescribeRegion(func(sessionID, assetID string, x, y, bw, bh, px, py float64, poly [][2]float64) (string, float64, float64, float64, float64, error) {
 			asset, err := st.GetAsset(sessionID, assetID)
 			if err != nil {
 				return "", 0, 0, 0, 0, err
@@ -389,6 +391,48 @@ func run() error {
 				return res.Description, res.Box.X, res.Box.Y, res.Box.W, res.Box.H, nil
 			}
 
+			// POLYGON mode: mask the lasso shape, crop its bbox, describe the cutout.
+			if len(poly) >= 3 {
+				pts := make([]crop.Point, len(poly))
+				var pminX, pminY = 1.0, 1.0
+				var pmaxX, pmaxY = 0.0, 0.0
+				for i, p := range poly {
+					pts[i] = crop.Point{X: p[0], Y: p[1]}
+					if p[0] < pminX {
+						pminX = p[0]
+					}
+					if p[1] < pminY {
+						pminY = p[1]
+					}
+					if p[0] > pmaxX {
+						pmaxX = p[0]
+					}
+					if p[1] > pmaxY {
+						pmaxY = p[1]
+					}
+				}
+				region, err := crop.RegionPolygonBytes(data, pts)
+				if err != nil {
+					return "", 0, 0, 0, 0, err
+				}
+				var img vision.Image
+				if visionAnalyzer.NeedsPublicURL() {
+					url, err := cosUploader.UploadIfAbsent(ctx, region.Data, region.Mime, st)
+					if err != nil {
+						return "", 0, 0, 0, 0, fmt.Errorf("publish region: %w", err)
+					}
+					img = vision.Image{URL: url}
+				} else {
+					img = vision.Image{Data: region.Data, Mime: region.Mime}
+				}
+				desc, err := visionAnalyzer.DescribeRegion(ctx, img)
+				if err != nil {
+					return "", 0, 0, 0, 0, err
+				}
+				// Return the polygon's bounding box so the frontend can echo it.
+				return desc, pminX, pminY, pmaxX - pminX, pmaxY - pminY, nil
+			}
+
 			// RECT mode: crop the box and describe the crop.
 			region, err := crop.RegionBytes(data, x, y, bw, bh)
 			if err != nil {
@@ -411,7 +455,7 @@ func run() error {
 			// Echo the input rect as the box.
 			return desc, x, y, bw, bh, nil
 		})
-		log.Printf("region description: enabled (point+rect)")
+		log.Printf("region description: enabled (point+polygon+rect)")
 	}
 	hub.SetHandler(func(ctx context.Context, sessionID string, msg transport.Inbound) {
 		switch msg.Type {

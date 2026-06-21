@@ -278,7 +278,7 @@ func TestDescribeRegionUnwiredReturns503(t *testing.T) {
 func TestDescribeRegionBadBox(t *testing.T) {
 	svc, st, mux := newWS(t)
 	seedSession(t, st, "s1")
-	svc.SetDescribeRegion(func(_, _ string, _, _, _, _, _, _ float64) (string, float64, float64, float64, float64, error) {
+	svc.SetDescribeRegion(func(_, _ string, _, _, _, _, _, _ float64, _ [][2]float64) (string, float64, float64, float64, float64, error) {
 		return "主体：测试", 0, 0, 0, 0, nil
 	})
 	body := bytes.NewBufferString(`{"x":0.1,"y":0.1,"w":0,"h":0.3}`)
@@ -294,7 +294,7 @@ func TestDescribeRegionBadBox(t *testing.T) {
 func TestDescribeRegionOK(t *testing.T) {
 	svc, st, mux := newWS(t)
 	seedSession(t, st, "s1")
-	svc.SetDescribeRegion(func(_, _ string, _, _, _, _, _, _ float64) (string, float64, float64, float64, float64, error) {
+	svc.SetDescribeRegion(func(_, _ string, _, _, _, _, _, _ float64, _ [][2]float64) (string, float64, float64, float64, float64, error) {
 		return "主体：红甲战士", 0.1, 0.1, 0.3, 0.3, nil
 	})
 	body := bytes.NewBufferString(`{"x":0.1,"y":0.1,"w":0.3,"h":0.3}`)
@@ -321,7 +321,7 @@ func TestDescribeRegionOK(t *testing.T) {
 func TestDescribeRegionPointMode(t *testing.T) {
 	svc, st, mux := newWS(t)
 	seedSession(t, st, "s1")
-	svc.SetDescribeRegion(func(_, _ string, _, _, _, _, px, py float64) (string, float64, float64, float64, float64, error) {
+	svc.SetDescribeRegion(func(_, _ string, _, _, _, _, px, py float64, _ [][2]float64) (string, float64, float64, float64, float64, error) {
 		if px < 0 || py < 0 {
 			t.Fatalf("expected point mode, got px=%v py=%v", px, py)
 		}
@@ -352,10 +352,61 @@ func TestDescribeRegionPointMode(t *testing.T) {
 func TestDescribeRegionBadPoint(t *testing.T) {
 	svc, st, mux := newWS(t)
 	seedSession(t, st, "s1")
-	svc.SetDescribeRegion(func(_, _ string, _, _, _, _, _, _ float64) (string, float64, float64, float64, float64, error) {
+	svc.SetDescribeRegion(func(_, _ string, _, _, _, _, _, _ float64, _ [][2]float64) (string, float64, float64, float64, float64, error) {
 		return "x", 0, 0, 0, 0, nil
 	})
 	body := bytes.NewBufferString(`{"px":1.5,"py":0.5}`)
+	req := httptest.NewRequest("POST", "/api/session/s1/assets/a1/describe-region", body)
+	rr := httptest.NewRecorder()
+	mux.ServeHTTP(rr, req)
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", rr.Code)
+	}
+}
+
+// TestDescribeRegionPolygonMode verifies POLYGON mode (points ≥3) reaches the
+// wired fn with the vertices and returns the polygon's bbox.
+func TestDescribeRegionPolygonMode(t *testing.T) {
+	svc, st, mux := newWS(t)
+	seedSession(t, st, "s1")
+	svc.SetDescribeRegion(func(_, _ string, _, _, _, _, px, py float64, poly [][2]float64) (string, float64, float64, float64, float64, error) {
+		if px >= 0 || py >= 0 {
+			t.Fatalf("expected polygon (rect-sentinel) mode, got px=%v py=%v", px, py)
+		}
+		if len(poly) != 3 {
+			t.Fatalf("expected 3 polygon points, got %d", len(poly))
+		}
+		return "主体：不规则区域", 0.1, 0.1, 0.6, 0.6, nil
+	})
+	body := bytes.NewBufferString(`{"points":[{"x":0.1,"y":0.1},{"x":0.7,"y":0.2},{"x":0.3,"y":0.7}]}`)
+	req := httptest.NewRequest("POST", "/api/session/s1/assets/a1/describe-region", body)
+	rr := httptest.NewRecorder()
+	mux.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rr.Code)
+	}
+	var resp struct {
+		Available bool `json:"available"`
+		Box       struct {
+			W, H float64
+		} `json:"box"`
+	}
+	if err := json.NewDecoder(rr.Body).Decode(&resp); err != nil {
+		t.Fatal(err)
+	}
+	if !resp.Available || resp.Box.W != 0.6 || resp.Box.H != 0.6 {
+		t.Errorf("unexpected resp: %+v", resp)
+	}
+}
+
+// TestDescribeRegionBadPolygonPoint verifies an out-of-range polygon vertex is 400.
+func TestDescribeRegionBadPolygonPoint(t *testing.T) {
+	svc, st, mux := newWS(t)
+	seedSession(t, st, "s1")
+	svc.SetDescribeRegion(func(_, _ string, _, _, _, _, _, _ float64, _ [][2]float64) (string, float64, float64, float64, float64, error) {
+		return "x", 0, 0, 0, 0, nil
+	})
+	body := bytes.NewBufferString(`{"points":[{"x":0.1,"y":0.1},{"x":1.5,"y":0.2},{"x":0.3,"y":0.7}]}`)
 	req := httptest.NewRequest("POST", "/api/session/s1/assets/a1/describe-region", body)
 	rr := httptest.NewRecorder()
 	mux.ServeHTTP(rr, req)
