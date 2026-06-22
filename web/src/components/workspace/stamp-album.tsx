@@ -4,6 +4,7 @@ import type { Asset, Channel, SizePreset, Task } from "@/lib/types";
 import { useApp } from "@/store/context";
 import { Button } from "@/components/ui/button";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { ReportBlock } from "./report-block";
 import * as api from "@/lib/api";
 import { cn } from "@/lib/utils";
 
@@ -48,6 +49,12 @@ export function StampAlbum({ onPreview }: { onPreview: (a: Asset) => void }) {
       .slice(0, MAX_REFS),
   );
   const [pending, setPending] = React.useState<Set<string>>(new Set());
+
+  // Read-only marketing analysis for the currently selected reference group.
+  // Driven by a debounced effect below; empty/error → block stays hidden.
+  const [report, setReport] = React.useState("");
+  const [reportLoading, setReportLoading] = React.useState(false);
+  const [reportUnavailable, setReportUnavailable] = React.useState(false);
 
   React.useEffect(() => {
     api.listPlatforms().then(setChannels).catch(() => setChannels([]));
@@ -143,6 +150,53 @@ export function StampAlbum({ onPreview }: { onPreview: (a: Asset) => void }) {
 
   const hasRefs = refIds.length > 0;
   const ref = hasRefs ? (refIds.length === 1 ? refIds[0] : refIds) : undefined;
+
+  // Auto + debounced marketing analysis of the selected reference group. The
+  // join-key means we only refetch when the selection CONTENT changes, not on
+  // unrelated re-renders. A `cancelled` flag drops out-of-order responses so a
+  // stale group's report can never backfill over the current selection.
+  const refKey = refIds.join(",");
+  const sessionId = state.sessionId;
+  React.useEffect(() => {
+    if (!sessionId || refIds.length === 0) {
+      setReport("");
+      setReportLoading(false);
+      setReportUnavailable(false);
+      return;
+    }
+    let cancelled = false;
+    setReportLoading(true);
+    setReportUnavailable(false);
+    const t = window.setTimeout(() => {
+      api
+        .visionReport(sessionId, refIds)
+        .then((r) => {
+          if (cancelled) return;
+          if (r.available && r.report) {
+            setReport(r.report);
+            setReportUnavailable(false);
+          } else {
+            setReport("");
+            setReportUnavailable(true);
+          }
+        })
+        .catch(() => {
+          if (!cancelled) {
+            setReport("");
+            setReportUnavailable(true);
+          }
+        })
+        .finally(() => {
+          if (!cancelled) setReportLoading(false);
+        });
+    }, 700);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(t);
+    };
+    // refKey captures selection content; refIds is read inside but kept stable by it.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [refKey, sessionId]);
 
   const coverage = React.useMemo(
     () => computeCoverage(refIds, state.assets),
@@ -240,6 +294,25 @@ export function StampAlbum({ onPreview }: { onPreview: (a: Asset) => void }) {
             })}
           </div>
           {refIds.length > 0 && <RatioFamilyStamps coverage={coverage} />}
+          {/* Read-only marketing analysis of the selected group. Hidden on
+              unavailable/error (reportUnavailable) and when nothing is selected. */}
+          {refIds.length > 0 && !reportUnavailable && (reportLoading || report) && (
+            <ReportBlock
+              title={refIds.length > 1 ? `宣发分析 · 基于 ${refIds.length} 张参考图` : "宣发分析"}
+              text={report}
+              loading={reportLoading}
+              onSave={async (edited) => {
+                if (!sessionId) return;
+                await api.saveVisionReport(sessionId, refIds, edited);
+                setReport(edited); // optimistic local backfill; server now caches it
+              }}
+              onReanalyze={async () => {
+                if (!sessionId) return;
+                const r = await api.visionReport(sessionId, refIds, true); // force re-run
+                if (r.available && r.report) setReport(r.report);
+              }}
+            />
+          )}
           </>
         )}
       </div>

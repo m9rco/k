@@ -696,17 +696,16 @@ func visionThemeReport(ctx context.Context, d ToolDeps, refIDs []string) string 
 		notifyAnalysis = d.Notify
 	}
 
-	// Group cache key: raw md5 for a single image (aligns with upload prewarm so a
-	// pre-warmed single-image report is reused here too); composite of ordered
-	// per-image md5s for a reference group of 2+.
-	cacheKey := imgs[0].md5
-	if len(imgs) > 1 {
-		parts := make([]string, len(imgs))
-		for i, im := range imgs {
-			parts[i] = im.md5
-		}
-		cacheKey = fmt.Sprintf("%x", md5.Sum([]byte("group:"+strings.Join(parts, ","))))
+	// Group cache key via the shared single-source-of-truth (vision.CacheKey):
+	// raw md5 for a single image (aligns with upload prewarm so a pre-warmed
+	// single-image report is reused here too); composite of ordered per-image md5s
+	// for a reference group of 2+. The stamp-mode read-only endpoint uses the same
+	// function, so both paths share the same vision_reports row.
+	md5s := make([]string, len(imgs))
+	for i, im := range imgs {
+		md5s[i] = im.md5
 	}
+	cacheKey := vision.CacheKey(md5s)
 	// reanalyzeFn is passed to the gate so the user can re-run analysis on the same
 	// reference group without re-uploading. The default (gemini) analyzer reads
 	// images inline (no COS); the openai analyzer needs published URLs (md5-deduped

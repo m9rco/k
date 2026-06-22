@@ -10,6 +10,11 @@ import { useToast } from "@/components/toast-host";
 // (rather than silently truncated at send time) so the UI count never lies.
 export const MAX_SELECTED = 6;
 
+// SELECTED_KEY persists the reference selection across reloads. The chat "已选 N
+// 张" count is client-only state, so without this a refresh would silently drop
+// the user's pick. Restored on boot, filtered to assets that still exist.
+const SELECTED_KEY = "gas.selected";
+
 // orderedAssetIds returns the session's asset ids in timeline order (by real
 // creation time, earliest first). Sent as `assetOrder` so the backend builds the
 // "图N/视频N → id" map the agent uses to resolve user references. Timeline order
@@ -54,6 +59,19 @@ export function useAppController() {
   const [state, setState] = React.useState<AppState>(initialState);
   const stateRef = React.useRef(state);
   stateRef.current = state;
+
+  // Persist the reference selection so a reload restores the chat "已选 N 张"
+  // count (see SELECTED_KEY). Mirrors every change made via toggle/selectAll/
+  // upload/sticky-select without threading writes through each callsite. Gated on
+  // restoredRef so the initial empty-Set render does NOT clobber the persisted
+  // value before boot's async restore reads it.
+  const restoredRef = React.useRef(false);
+  React.useEffect(() => {
+    if (!restoredRef.current) return;
+    try {
+      sessionStorage.setItem(SELECTED_KEY, JSON.stringify([...state.selected]));
+    } catch { /* ignore quota/availability errors */ }
+  }, [state.selected]);
 
   const wsRef = React.useRef<WebSocket | null>(null);
   const streamsRef = React.useRef<Map<string, EventSource>>(new Map());
@@ -981,6 +999,25 @@ export function useAppController() {
         setState((s) => ({ ...s, sessionId: sid }));
         connectWS(sid);
         await refreshWorkspace(sid);
+        // Restore the reference selection persisted before the reload, filtered to
+        // assets that still exist (a deleted/cleared asset must not resurrect). The
+        // chat "已选 N 张" count is purely client-side, so without this a refresh
+        // would silently drop the user's pick. restoredRef gates the persist effect
+        // so it only starts mirroring AFTER this read (else the initial empty render
+        // overwrites the stored value first).
+        if (alive) {
+          try {
+            const raw = sessionStorage.getItem(SELECTED_KEY);
+            const ids: string[] = raw ? JSON.parse(raw) : [];
+            if (ids.length) {
+              setState((s) => {
+                const sel = new Set(ids.filter((id) => s.assets.has(id)));
+                return sel.size ? { ...s, selected: sel } : s;
+              });
+            }
+          } catch { /* ignore malformed persisted selection */ }
+          restoredRef.current = true;
+        }
         await refreshContext(sid);
       } catch (e) {
         toast("会话初始化失败：" + (e as Error).message);

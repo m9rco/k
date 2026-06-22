@@ -487,6 +487,102 @@ func run() error {
 		})
 		log.Printf("region description: enabled (point+polygon+rect)")
 	}
+	// On-demand read-only marketing analysis for the stamp-mode reference panel.
+	// Same gate as describe-region (gemini inline needs no COS; openai needs it).
+	// Keyed by vision.CacheKey — the SAME key the adapt pre-stage uses — so a group
+	// analyzed here is reused by adaptation and vice versa (and the upload prewarm's
+	// single-image reports are hit directly). Cache hit returns even when vision is
+	// momentarily down; a miss analyzes live and writes back.
+	if visionAnalyzer != nil && (!visionAnalyzer.NeedsPublicURL() || cosUploader != nil) {
+		// visionGroupKey loads an ordered reference group's bytes (skipping any
+		// unreadable one, mirroring agent.visionThemeReport) and derives its shared
+		// cache key via vision.CacheKey. Returns the per-image bytes/mime so callers
+		// that need to analyze don't re-read. err when nothing is readable.
+		type refImg struct {
+			data []byte
+			mime string
+			md5  string
+		}
+		visionGroupKey := func(sessionID string, assetIDs []string) (string, []refImg, error) {
+			var imgs []refImg
+			for _, id := range assetIDs {
+				asset, err := st.GetAsset(sessionID, id)
+				if err != nil || asset == nil {
+					continue
+				}
+				data, err := os.ReadFile(asset.Path)
+				if err != nil {
+					continue
+				}
+				imgs = append(imgs, refImg{data: data, mime: asset.Mime, md5: fmt.Sprintf("%x", md5.Sum(data))})
+			}
+			if len(imgs) == 0 {
+				return "", nil, fmt.Errorf("no readable references")
+			}
+			md5s := make([]string, len(imgs))
+			for i, im := range imgs {
+				md5s[i] = im.md5
+			}
+			return vision.CacheKey(md5s), imgs, nil
+		}
+
+		wsSvc.SetVisionReport(func(sessionID string, assetIDs []string, force bool) (string, error) {
+			key, imgs, err := visionGroupKey(sessionID, assetIDs)
+			if err != nil {
+				return "", err
+			}
+
+			// Cache first (unless force) — requires only the store, so a hit returns
+			// even when vision is currently unconfigured/down (same as adapt). The
+			// "重新分析" affordance passes force=true to bypass and re-run.
+			if !force {
+				if cached, err := st.GetVisionReport(key); err == nil && cached != "" {
+					return cached, nil
+				}
+			}
+
+			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+			defer cancel()
+			images := make([]vision.Image, 0, len(imgs))
+			if visionAnalyzer.NeedsPublicURL() {
+				for _, im := range imgs {
+					url, err := cosUploader.UploadIfAbsent(ctx, im.data, im.mime, st)
+					if err != nil {
+						continue // skip refs that fail to publish, like the adapt path
+					}
+					images = append(images, vision.Image{URL: url})
+				}
+			} else {
+				for _, im := range imgs {
+					images = append(images, vision.Image{Data: im.data, Mime: im.mime})
+				}
+			}
+			if len(images) == 0 {
+				return "", fmt.Errorf("no analyzable references")
+			}
+			// onChunk=nil: this is a one-shot read-only report, not a streamed block.
+			report, err := visionAnalyzer.Analyze(ctx, images, nil)
+			if err != nil {
+				return "", err
+			}
+			if err := st.InsertVisionReport(key, report); err != nil {
+				log.Printf("vision-report: cache write failed for key %s: %v", key, err)
+			}
+			return report, nil
+		})
+
+		// Write-back of an edited report: persist under the SAME group key so the
+		// adapt flow and later views reuse the edit (parity with the chat-flow edit
+		// path that writes the edited summary into vision_reports).
+		wsSvc.SetSaveVisionReport(func(sessionID string, assetIDs []string, report string) error {
+			key, _, err := visionGroupKey(sessionID, assetIDs)
+			if err != nil {
+				return err
+			}
+			return st.InsertVisionReport(key, report)
+		})
+		log.Printf("on-demand vision report: enabled (stamp-mode reference analysis)")
+	}
 	hub.SetHandler(func(ctx context.Context, sessionID string, msg transport.Inbound) {
 		switch msg.Type {
 		case "user_message":

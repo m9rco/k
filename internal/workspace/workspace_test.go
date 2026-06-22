@@ -3,6 +3,7 @@ package workspace
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"image"
 	"image/color"
 	"image/png"
@@ -412,5 +413,163 @@ func TestDescribeRegionBadPolygonPoint(t *testing.T) {
 	mux.ServeHTTP(rr, req)
 	if rr.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400", rr.Code)
+	}
+}
+
+// TestVisionReportUnwiredReturns503 verifies the endpoint is 503 when the
+// vision-report capability is not wired.
+func TestVisionReportUnwiredReturns503(t *testing.T) {
+	_, st, mux := newWS(t)
+	seedSession(t, st, "s1")
+	body := bytes.NewBufferString(`{"assetIds":["a1"]}`)
+	req := httptest.NewRequest("POST", "/api/session/s1/vision-report", body)
+	rr := httptest.NewRecorder()
+	mux.ServeHTTP(rr, req)
+	if rr.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503", rr.Code)
+	}
+}
+
+// TestVisionReportEmptyIDs verifies an empty (or all-blank) id list is 400 even
+// when the capability is wired.
+func TestVisionReportEmptyIDs(t *testing.T) {
+	svc, st, mux := newWS(t)
+	seedSession(t, st, "s1")
+	svc.SetVisionReport(func(_ string, _ []string, _ bool) (string, error) { return "x", nil })
+	body := bytes.NewBufferString(`{"assetIds":["",""]}`)
+	req := httptest.NewRequest("POST", "/api/session/s1/vision-report", body)
+	rr := httptest.NewRecorder()
+	mux.ServeHTTP(rr, req)
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", rr.Code)
+	}
+}
+
+// TestVisionReportTooManyIDs verifies a list above the 16-ref cap is 400.
+func TestVisionReportTooManyIDs(t *testing.T) {
+	svc, st, mux := newWS(t)
+	seedSession(t, st, "s1")
+	svc.SetVisionReport(func(_ string, _ []string, _ bool) (string, error) { return "x", nil })
+	ids := make([]string, 17)
+	for i := range ids {
+		ids[i] = fmt.Sprintf("a%d", i)
+	}
+	payload, _ := json.Marshal(map[string]any{"assetIds": ids})
+	req := httptest.NewRequest("POST", "/api/session/s1/vision-report", bytes.NewReader(payload))
+	rr := httptest.NewRecorder()
+	mux.ServeHTTP(rr, req)
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", rr.Code)
+	}
+}
+
+// TestVisionReportOK verifies a valid id list returns the wired report and the
+// normalized count (blanks dropped, order preserved).
+func TestVisionReportOK(t *testing.T) {
+	svc, st, mux := newWS(t)
+	seedSession(t, st, "s1")
+	svc.SetVisionReport(func(_ string, ids []string, _ bool) (string, error) {
+		if len(ids) != 2 || ids[0] != "a1" || ids[1] != "a2" {
+			t.Fatalf("expected ordered [a1 a2], got %v", ids)
+		}
+		return "核心主题：测试", nil
+	})
+	body := bytes.NewBufferString(`{"assetIds":["a1","","a2"]}`)
+	req := httptest.NewRequest("POST", "/api/session/s1/vision-report", body)
+	rr := httptest.NewRecorder()
+	mux.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rr.Code)
+	}
+	var resp struct {
+		Available bool   `json:"available"`
+		Report    string `json:"report"`
+		Count     int    `json:"count"`
+	}
+	if err := json.NewDecoder(rr.Body).Decode(&resp); err != nil {
+		t.Fatal(err)
+	}
+	if !resp.Available || resp.Report != "核心主题：测试" || resp.Count != 2 {
+		t.Errorf("unexpected resp: %+v", resp)
+	}
+}
+
+// TestVisionReportDegrades verifies an analysis error returns 200 with a graceful
+// {available:false} body so the frontend simply hides the analysis block.
+func TestVisionReportDegrades(t *testing.T) {
+	svc, st, mux := newWS(t)
+	seedSession(t, st, "s1")
+	svc.SetVisionReport(func(_ string, _ []string, _ bool) (string, error) {
+		return "", fmt.Errorf("vision down")
+	})
+	body := bytes.NewBufferString(`{"assetIds":["a1"]}`)
+	req := httptest.NewRequest("POST", "/api/session/s1/vision-report", body)
+	rr := httptest.NewRecorder()
+	mux.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rr.Code)
+	}
+	var resp struct {
+		Available bool `json:"available"`
+	}
+	if err := json.NewDecoder(rr.Body).Decode(&resp); err != nil {
+		t.Fatal(err)
+	}
+	if resp.Available {
+		t.Errorf("expected available=false on degrade, got %+v", resp)
+	}
+}
+
+// TestSaveVisionReportUnwiredReturns503 verifies the PUT is 503 when unwired.
+func TestSaveVisionReportUnwiredReturns503(t *testing.T) {
+	_, st, mux := newWS(t)
+	seedSession(t, st, "s1")
+	body := bytes.NewBufferString(`{"assetIds":["a1"],"report":"x"}`)
+	req := httptest.NewRequest("PUT", "/api/session/s1/vision-report", body)
+	rr := httptest.NewRecorder()
+	mux.ServeHTTP(rr, req)
+	if rr.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503", rr.Code)
+	}
+}
+
+// TestSaveVisionReportEmptyReport verifies a blank report is rejected with 400.
+func TestSaveVisionReportEmptyReport(t *testing.T) {
+	svc, st, mux := newWS(t)
+	seedSession(t, st, "s1")
+	svc.SetSaveVisionReport(func(_ string, _ []string, _ string) error { return nil })
+	body := bytes.NewBufferString(`{"assetIds":["a1"],"report":"   "}`)
+	req := httptest.NewRequest("PUT", "/api/session/s1/vision-report", body)
+	rr := httptest.NewRecorder()
+	mux.ServeHTTP(rr, req)
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", rr.Code)
+	}
+}
+
+// TestSaveVisionReportOK verifies a valid edit reaches the wired fn with the
+// normalized ids and trimmed report.
+func TestSaveVisionReportOK(t *testing.T) {
+	svc, st, mux := newWS(t)
+	seedSession(t, st, "s1")
+	var gotIDs []string
+	var gotReport string
+	svc.SetSaveVisionReport(func(_ string, ids []string, report string) error {
+		gotIDs = ids
+		gotReport = report
+		return nil
+	})
+	body := bytes.NewBufferString(`{"assetIds":["a1","","a2"],"report":"  核心主题：编辑版  "}`)
+	req := httptest.NewRequest("PUT", "/api/session/s1/vision-report", body)
+	rr := httptest.NewRecorder()
+	mux.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rr.Code)
+	}
+	if len(gotIDs) != 2 || gotIDs[0] != "a1" || gotIDs[1] != "a2" {
+		t.Errorf("ids = %v, want [a1 a2]", gotIDs)
+	}
+	if gotReport != "核心主题：编辑版" {
+		t.Errorf("report = %q, want trimmed", gotReport)
 	}
 }

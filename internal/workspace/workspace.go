@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	_ "image/gif"  // register decoders for dimension probing
@@ -56,6 +57,17 @@ type Service struct {
 	// import crop/vision; nil disables the endpoint (returns 503). Returns
 	// (description, box, error) where box is normalized [0,1].
 	describeRegion func(sessionID, assetID string, x, y, w, h, px, py float64, poly [][2]float64) (desc string, bx, by, bw, bh float64, err error)
+	// visionReport returns the marketing-analysis report for an ORDERED group of
+	// asset ids (≤16). Cache hit → instant return; miss → analyze live + write
+	// back, all under the SAME key the adapt flow uses (vision.CacheKey), so the
+	// stamp-mode read-only view and adaptation share one vision_reports row both
+	// ways. Injected in main (read bytes → key → cache → analyze → cache); nil
+	// disables the endpoint (returns 503).
+	visionReport func(sessionID string, assetIDs []string, force bool) (report string, err error)
+	// saveVisionReport writes an edited report back under the SAME key the group
+	// resolves to (vision.CacheKey), so a manual edit in the stamp panel is reused
+	// by the adapt flow and on later views. Injected in main; nil disables the PUT.
+	saveVisionReport func(sessionID string, assetIDs []string, report string) error
 }
 
 // NewService constructs the workspace service. retryFn re-runs a failed task
@@ -89,6 +101,19 @@ func (s *Service) SetPrewarm(fn func(sessionID, assetID, path, mime string)) {
 // point/polygon/rect calling convention (px,py < 0 and empty poly means rect).
 func (s *Service) SetDescribeRegion(fn func(sessionID, assetID string, x, y, w, h, px, py float64, poly [][2]float64) (string, float64, float64, float64, float64, error)) {
 	s.describeRegion = fn
+}
+
+// SetVisionReport wires the read-only on-demand marketing-analysis capability
+// (used by the stamp-mode reference panel). Leaving it unset makes the
+// vision-report endpoint return 503.
+func (s *Service) SetVisionReport(fn func(sessionID string, assetIDs []string, force bool) (string, error)) {
+	s.visionReport = fn
+}
+
+// SetSaveVisionReport wires write-back of an edited marketing-analysis report
+// (stamp-mode "edit" affordance). Leaving it unset makes the PUT return 503.
+func (s *Service) SetSaveVisionReport(fn func(sessionID string, assetIDs []string, report string) error) {
+	s.saveVisionReport = fn
 }
 
 // AssetView is the workspace representation of one asset.
@@ -130,6 +155,8 @@ func (s *Service) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/session/{id}/assets", s.handleListAssets)
 	mux.HandleFunc("GET /api/session/{id}/assets/{assetId}/raw", s.handleAssetRaw)
 	mux.HandleFunc("POST /api/session/{id}/assets/{assetId}/describe-region", s.handleDescribeRegion)
+	mux.HandleFunc("POST /api/session/{id}/vision-report", s.handleVisionReport)
+	mux.HandleFunc("PUT /api/session/{id}/vision-report", s.handleSaveVisionReport)
 	mux.HandleFunc("DELETE /api/session/{id}/assets/{assetId}", s.handleDeleteAsset)
 	mux.HandleFunc("POST /api/session/{id}/assets/{assetId}/retry", s.handleRetryAsset)
 	mux.HandleFunc("GET /api/session/{id}/tasks", s.handleListTasks)
@@ -320,6 +347,103 @@ func (s *Service) handleDescribeRegion(w http.ResponseWriter, r *http.Request) {
 		"description": desc,
 		"box":         map[string]float64{"x": bx, "y": by, "w": bw, "h": bh},
 	})
+}
+
+// maxVisionRefs caps the reference group for one analysis request, matching the
+// frontend's MAX_REFS (16). Guards a runaway payload from fanning out to the
+// vision model.
+const maxVisionRefs = 16
+
+// visionReportRequest is the body of POST .../vision-report: an ORDERED list of
+// reference asset ids to analyze as one group.
+type visionReportRequest struct {
+	AssetIDs []string `json:"assetIds"`
+	// Force re-runs analysis even on a cache hit (the "重新分析" affordance).
+	Force bool `json:"force"`
+}
+
+// handleVisionReport returns the marketing-analysis report for an ordered group
+// of reference assets. It powers the stamp-mode reference panel's read-only
+// analysis block and shares the adapt flow's report cache (vision.CacheKey), so a
+// group analyzed here is reused by adaptation and vice versa. Returns 503 when
+// unwired, 400 on an empty/oversized id list, and a graceful {available:false}
+// body when analysis fails so the frontend simply hides the block.
+func (s *Service) handleVisionReport(w http.ResponseWriter, r *http.Request) {
+	sessionID := r.PathValue("id")
+	if s.visionReport == nil {
+		http.Error(w, "vision analysis not available", http.StatusServiceUnavailable)
+		return
+	}
+	var req visionReportRequest
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<16)).Decode(&req); err != nil {
+		http.Error(w, "bad request body", http.StatusBadRequest)
+		return
+	}
+	// Normalize: drop blanks, preserve order (order is part of the cache key).
+	ids, ok := normalizeRefIDs(req.AssetIDs)
+	if !ok {
+		http.Error(w, "invalid asset ids", http.StatusBadRequest)
+		return
+	}
+	report, err := s.visionReport(sessionID, ids, req.Force)
+	if err != nil {
+		// Graceful degradation: the frontend hides the analysis block.
+		writeJSON(w, map[string]any{"available": false, "error": err.Error()})
+		return
+	}
+	writeJSON(w, map[string]any{"available": true, "report": report, "count": len(ids)})
+}
+
+// normalizeRefIDs drops blank ids and preserves order (order is part of the
+// cache key). ok is false when the result is empty or exceeds the ref cap, in
+// which case the caller should reply 400.
+func normalizeRefIDs(in []string) (ids []string, ok bool) {
+	ids = make([]string, 0, len(in))
+	for _, id := range in {
+		if id != "" {
+			ids = append(ids, id)
+		}
+	}
+	return ids, len(ids) > 0 && len(ids) <= maxVisionRefs
+}
+
+// saveVisionReportRequest is the body of PUT .../vision-report: the same ordered
+// id group plus the edited report text to persist under that group's key.
+type saveVisionReportRequest struct {
+	AssetIDs []string `json:"assetIds"`
+	Report   string   `json:"report"`
+}
+
+// handleSaveVisionReport persists an edited marketing-analysis report under the
+// group's shared cache key (vision.CacheKey), so the edit is reused by the adapt
+// flow and on later views. Returns 503 when unwired, 400 on a bad id list or an
+// empty report, and 200 on success.
+func (s *Service) handleSaveVisionReport(w http.ResponseWriter, r *http.Request) {
+	sessionID := r.PathValue("id")
+	if s.saveVisionReport == nil {
+		http.Error(w, "vision analysis not available", http.StatusServiceUnavailable)
+		return
+	}
+	var req saveVisionReportRequest
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<16)).Decode(&req); err != nil {
+		http.Error(w, "bad request body", http.StatusBadRequest)
+		return
+	}
+	ids, ok := normalizeRefIDs(req.AssetIDs)
+	if !ok {
+		http.Error(w, "invalid asset ids", http.StatusBadRequest)
+		return
+	}
+	report := strings.TrimSpace(req.Report)
+	if report == "" {
+		http.Error(w, "empty report", http.StatusBadRequest)
+		return
+	}
+	if err := s.saveVisionReport(sessionID, ids, report); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, map[string]any{"status": "saved"})
 }
 
 func (s *Service) handleListTasks(w http.ResponseWriter, r *http.Request) {

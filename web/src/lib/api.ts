@@ -173,6 +173,37 @@ export function describeRegion(
   );
 }
 
+// VisionReportResponse is the read-only marketing-analysis reply for an ordered
+// reference group. `available:false` (or an error) means the frontend should
+// simply hide the analysis block.
+export interface VisionReportResponse {
+  available: boolean;
+  report?: string;
+  count?: number;
+  error?: string;
+}
+
+// visionReport fetches the marketing-analysis report for an ORDERED group of
+// reference asset ids (≤16). Shares the adapt flow's cache, so a previously
+// adapted group returns instantly. Degrades gracefully: { available:false }.
+export function visionReport(sid: string, assetIds: string[], force = false) {
+  return api<VisionReportResponse>(`/api/session/${sid}/vision-report`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ assetIds, force }),
+  });
+}
+
+// saveVisionReport persists an edited marketing-analysis report under the same
+// reference-group key, so the adapt flow and later views reuse the edit.
+export function saveVisionReport(sid: string, assetIds: string[], report: string) {
+  return api<{ status: string }>(`/api/session/${sid}/vision-report`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ assetIds, report }),
+  });
+}
+
 // ModelEntry is defined in lib/types; re-exported here for callers of the API.
 export type { ModelEntry } from "@/lib/types";
 
