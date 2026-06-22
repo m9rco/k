@@ -1157,7 +1157,11 @@ export function useAppController() {
     const sid = stateRef.current.sessionId;
     try {
       await api.clearWorkspace(sid);
-      setState((s) => ({ ...s, selected: new Set(), chat: [] }));
+      // Clear assets/tasks locally too. refreshWorkspace MERGES (spreads
+      // existing) to survive concurrent refreshes, so it would never drop the
+      // now-deleted assets on its own — leaving state.assets non-empty and
+      // trapping the Shell out of its empty/home state. Reset here first.
+      setState((s) => ({ ...s, selected: new Set(), chat: [], assets: new Map(), tasks: new Map() }));
       typer.current = { id: "", target: "", shown: 0, done: false };
       reasoner.current = { id: "", target: "", shown: 0 };
       await refreshWorkspace(sid);

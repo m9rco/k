@@ -159,7 +159,9 @@ func (s *Service) handleDeleteAsset(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleClear empties the session workspace: deletes all assets (records +
-// files) and removes queued/running task placeholders. Scoped to the session.
+// files) and all task rows (in-flight placeholders AND done/failed history), so
+// the session returns to a clean slate and the frontend lands back on the home
+// screen. Scoped to the session.
 func (s *Service) handleClear(w http.ResponseWriter, r *http.Request) {
 	sessionID := r.PathValue("id")
 	paths, err := s.store.DeleteSessionAssets(sessionID)
@@ -170,7 +172,7 @@ func (s *Service) handleClear(w http.ResponseWriter, r *http.Request) {
 	for _, p := range paths {
 		_ = os.Remove(p)
 	}
-	if err := s.store.DeleteUnfinishedTasks(sessionID); err != nil {
+	if err := s.store.DeleteSessionTasks(sessionID); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}

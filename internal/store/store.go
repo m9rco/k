@@ -320,6 +320,16 @@ func (s *Store) DeleteFailedTasks(sessionID string) (int64, error) {
 	return n, nil
 }
 
+// DeleteSessionTasks removes all task rows for a session regardless of status.
+// Used by the full workspace clear, where the user expects a clean slate (the
+// done/failed history is wiped too, not just in-flight placeholders).
+func (s *Store) DeleteSessionTasks(sessionID string) error {
+	if _, err := s.db.Exec(`DELETE FROM tasks WHERE session_id = ?`, sessionID); err != nil {
+		return fmt.Errorf("delete session tasks: %w", err)
+	}
+	return nil
+}
+
 // --- Tasks ---
 
 // TaskRecord is a persisted long-running task row.
