@@ -25,5 +25,5 @@
 ## 5. 验收与回归
 - [x] 5.1 `go test ./internal/generation/... ./internal/crop/...` 全绿
 - [x] 5.2 `go vet ./...`、`gofmt -l` 通过（全 22 包测试通过）
-- [ ] 5.3 复现日志场景手测：双参考图适配到 `taptap.banner.search-2080x828` + `taptap.banner.welfare-1920x1080`：前者无形变、后者直接回填零延时；核对 `data/logs/app.log` 不再出现非等比预放大、welfare 尺寸无 `gen.provider_call`（需真实图模型密钥，留待人工/集成环境）
+- [~] 5.3 复现日志场景：确定性部分已由集成测试 `TestAdaptMultiRefBackfillProducesExactUndistortedAsset` 覆盖——双参考组适配到 `taptap.banner.welfare-1920x1080`（完全一致回填）与 `1280x720`（同比例缩放），经**真实** crop 服务产出 `cropped` 资产、尺寸精确、无 AI task、无形变。模型相关部分（真实重绘视觉保真、`app.log` 端到端核对）仍需图模型密钥，留待人工/集成环境
 - [x] 5.4 `openspec validate fix-adapt-aspect-and-backfill --strict` 通过

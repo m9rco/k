@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"gameasset/internal/config"
 	"gameasset/internal/crop"
 	"gameasset/internal/store"
 	"gameasset/internal/transport"
@@ -385,6 +386,106 @@ func TestAspectClose(t *testing.T) {
 		if got != c.want {
 			t.Errorf("[%s] aspectClose(%d,%d,%d,%d) = %v, want %v", c.label, c.srcW, c.srcH, c.dstW, c.dstH, got, c.want)
 		}
+	}
+}
+
+// newRealCropAdaptService wires the generation service with the REAL crop
+// service (not the mock), so the deterministic backfill path exercises actual
+// pixel I/O and asset persistence. Returns a 1920×1080 landscape source.
+func newRealCropAdaptService(t *testing.T) (*Service, *store.Store) {
+	t.Helper()
+	dir := t.TempDir()
+	st, err := store.Open(filepath.Join(dir, "a.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	broker := transport.NewTaskBroker()
+	var n int
+	idFn := func(prefix string) string { n++; return prefix + strconv.Itoa(n) }
+	prov := &capturingProvider{name: "stubprov", out: Output{Data: solidPNGAdapt(t, 400, 300), Mime: "image/png"}}
+	svc := NewService(NewFailoverGenerator(prov, nil), st, broker, filepath.Join(dir, "assets"), idFn)
+
+	channels := []config.Channel{{
+		ID: "taptap", Name: "TapTap", AssetTypes: []config.AssetType{{
+			Type: "banner", Name: "Banner", Sizes: []config.Size{
+				{ID: "taptap.banner.welfare-1920x1080", Name: "福利中心", Width: 1920, Height: 1080, Orientation: "landscape", Producible: true},
+				{ID: "taptap.banner.today-1280x720", Name: "今日游戏", Width: 1280, Height: 720, Orientation: "landscape", Producible: true},
+			},
+		}},
+	}}
+	cropSvc := crop.NewService(channels, filepath.Join(dir, "assets"), st, func() string { n++; return "crop" + strconv.Itoa(n) })
+	svc.SetCropper(cropSvc)
+
+	now := time.Now().UTC()
+	_ = st.UpsertSession(store.SessionRecord{ID: "s", Fingerprint: "fp", CreatedAt: now, LastSeenAt: now})
+	srcPath := filepath.Join(dir, "src.png")
+	_ = os.WriteFile(srcPath, solidPNGAdapt(t, 1920, 1080), 0o644)
+	_ = st.InsertAsset(store.AssetRecord{
+		ID: "src", SessionID: "s", Kind: "upload", Path: srcPath, Mime: "image/png",
+		Width: 1920, Height: 1080, CreatedAt: now,
+	})
+	auxPath := filepath.Join(dir, "aux.png")
+	_ = os.WriteFile(auxPath, solidPNGAdapt(t, 1080, 1440), 0o644) // portrait auxiliary ref
+	_ = st.InsertAsset(store.AssetRecord{
+		ID: "aux", SessionID: "s", Kind: "upload", Path: auxPath, Mime: "image/png",
+		Width: 1080, Height: 1440, CreatedAt: now,
+	})
+	return svc, st
+}
+
+// TestAdaptMultiRefBackfillProducesExactUndistortedAsset is the deterministic half
+// of the manual repro (task 5.3): a 2-image reference group adapting to sizes that
+// match the anchor's ratio must backfill from the anchor through the REAL crop
+// service — producing a stored "cropped" asset at the EXACT target dimensions with
+// no AI task, and (for the exact-dimension case) no distortion. The model-dependent
+// half (visual fidelity of true reshapes) still needs live keys.
+func TestAdaptMultiRefBackfillProducesExactUndistortedAsset(t *testing.T) {
+	svc, st := newRealCropAdaptService(t)
+
+	cases := []struct {
+		name   string
+		sizeID string
+		wantW  int
+		wantH  int
+	}{
+		{"exact-dim backfill", "taptap.banner.welfare-1920x1080", 1920, 1080},
+		{"same-ratio rescale", "taptap.banner.today-1280x720", 1280, 720},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			outcomes, err := svc.AdaptToPlatform(context.Background(), "s", []string{"src", "aux"}, []string{tc.sizeID}, false, nil, "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(outcomes) != 1 || outcomes[0].Via != AdaptViaCrop {
+				t.Fatalf("want 1 crop outcome, got %+v", outcomes)
+			}
+			if outcomes[0].TaskID != "" {
+				t.Errorf("backfill must not spawn an AI task, got taskID=%q", outcomes[0].TaskID)
+			}
+			asset, _ := st.GetAsset("s", outcomes[0].AssetID)
+			if asset == nil {
+				t.Fatal("backfill asset not persisted")
+			}
+			if asset.Kind != "cropped" {
+				t.Errorf("asset kind = %q, want cropped", asset.Kind)
+			}
+			// Decode the actual bytes on disk and assert exact target dimensions —
+			// the source was 16:9, so a 16:9 target must never be stretched.
+			data, err := os.ReadFile(asset.Path)
+			if err != nil {
+				t.Fatalf("read backfill file: %v", err)
+			}
+			img, _, err := image.Decode(bytes.NewReader(data))
+			if err != nil {
+				t.Fatalf("decode backfill file: %v", err)
+			}
+			b := img.Bounds()
+			if b.Dx() != tc.wantW || b.Dy() != tc.wantH {
+				t.Errorf("backfill dims = %dx%d, want %dx%d", b.Dx(), b.Dy(), tc.wantW, tc.wantH)
+			}
+		})
 	}
 }
 
