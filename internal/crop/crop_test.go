@@ -137,6 +137,52 @@ func TestContainTransparentDefault(t *testing.T) {
 	}
 }
 
+func TestContainPadBytesPreservesAspectWithTransparentMargins(t *testing.T) {
+	// 16:9 source onto a wider 2.5:1 canvas: the subject must keep its proportions
+	// (fit by height, NOT stretched to fill width) with transparent side margins
+	// the model is meant to extend into. Output must be PNG so the alpha survives.
+	src := makeSolidPNG(t, 1920, 1080, color.RGBA{200, 40, 40, 255})
+	res, err := ContainPadBytes(src, 2752, 1088)
+	if err != nil {
+		t.Fatalf("ContainPadBytes: %v", err)
+	}
+	if res.Width != 2752 || res.Height != 1088 {
+		t.Fatalf("canvas = %dx%d, want 2752x1088", res.Width, res.Height)
+	}
+	if res.Mime != "image/png" {
+		t.Errorf("mime = %q, want image/png (alpha must survive)", res.Mime)
+	}
+	img := decodePNG(t, res.Data)
+	// Fit by height (1088/1080 ≈ 1.0): inner width ≈ 1934, centered → ~409px
+	// transparent bands left/right. Far-left column is transparent margin.
+	if _, _, _, a := img.At(10, 544).RGBA(); a>>8 != 0 {
+		t.Errorf("left-margin alpha = %d, want 0 (transparent)", a>>8)
+	}
+	// Center is the opaque subject.
+	if _, _, _, a := img.At(1376, 544).RGBA(); a>>8 != 255 {
+		t.Errorf("center alpha = %d, want 255 (opaque subject)", a>>8)
+	}
+	// The opaque content's aspect ratio must stay ~16:9 (not stretched to 2.5:1).
+	// Scan the center row for the opaque span width, and the center column for
+	// opaque span height; their ratio must match the source, not the canvas.
+	leftEdge, rightEdge := 2752, 0
+	for x := 0; x < 2752; x++ {
+		if _, _, _, a := img.At(x, 544).RGBA(); a>>8 == 255 {
+			if x < leftEdge {
+				leftEdge = x
+			}
+			if x > rightEdge {
+				rightEdge = x
+			}
+		}
+	}
+	contentW := rightEdge - leftEdge + 1
+	contentAR := float64(contentW) / 1088.0
+	if contentAR < 1.6 || contentAR > 1.95 {
+		t.Errorf("content aspect ratio = %.3f, want ≈1.78 (16:9, undistorted); got a stretched subject", contentAR)
+	}
+}
+
 func TestPadToAspectWidensAndCentersWithTransparency(t *testing.T) {
 	// 2:1 source toward a 4:1 target → canvas widens to 4:1, height unchanged,
 	// source centered with transparent bands left/right.

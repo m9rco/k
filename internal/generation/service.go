@@ -750,14 +750,19 @@ func (s *Service) run(ctx context.Context, taskID string, p GenerateParams) {
 	// Adapt: many edit-endpoint providers ignore the size parameter and return
 	// the input image's dimensions. Pre-upscale the source to wantW×wantH so
 	// the provider output is at gen resolution rather than the (smaller) source
-	// resolution — producing more AI-generated detail in the final product.
+	// resolution — producing more AI-generated detail in the final product. The
+	// fit is ASPECT-PRESERVING (contain): when the gen canvas ratio differs from
+	// the source, the subject keeps its proportions and the introduced margins are
+	// left transparent for the model to extend the scene into — NEVER a non-uniform
+	// stretch (which would squash the subject before the model ever sees it).
 	if p.Slots.Kind == EditAdaptPlatform && len(srcBytes) > 0 && wantW > srcW && wantH > srcH {
-		if conv, cerr := crop.CropBytesWithOptions(srcBytes, wantW, wantH, crop.Options{Mode: crop.ModeScale}); cerr == nil {
+		if conv, cerr := crop.ContainPadBytes(srcBytes, wantW, wantH); cerr == nil {
 			srcBytes = conv.Data
 			srcMime = conv.Mime
 			applog.From(ctx).Info().Str("event", "gen.src_upscale").Str("task", taskID).
 				Int("src_w", srcW).Int("src_h", srcH).
 				Int("gen_w", wantW).Int("gen_h", wantH).
+				Str("fit", "contain").
 				Msg("pre-upscaled source to gen dims for adapt")
 		}
 	}

@@ -320,6 +320,7 @@ func BuildPrompt(slots Slots, palette []PaletteColor) (string, error) {
 			b.WriteString(" ")
 		}
 		b.WriteString("Re-frame and extend/repaint the scene and background to fill the new aspect ratio naturally, rather than cropping; reposition the subject for a balanced composition at the target proportions. ")
+		b.WriteString("The input may arrive at the target proportions with empty/transparent margins around the original artwork — treat those margins as scene to invent: seamlessly extend the background, scenery and atmosphere into them. Do NOT leave blank, black, white, solid-color or letterbox bands, and do NOT stretch or distort the subject to fill the frame. ")
 		if note := rewriteSizeNote(Sanitize(slots.SizeNote), slots.ProviderSupportsTransparency); note != "" {
 			b.WriteString("Respect this placement constraint: ")
 			b.WriteString(note)

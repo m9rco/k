@@ -52,13 +52,17 @@ type AdaptOutcome struct {
 // palette; references[1:] are auxiliary (style/element only, must not replace the
 // anchor subject). The legacy single-image call passes a one-element slice.
 //
-// Routing per size:
-//   - reference group of ≥2 → ALWAYS AI repaint. The deterministic crop fast path
-//     can only act on one image, so it would silently drop the auxiliary
-//     references; only an AI repaint lets the whole group inform the composition.
-//   - single reference → the original ratio-based split: crop fast path when the
-//     anchor and target aspect ratios match within ratioTolerance and share
-//     orientation, else AI repaint.
+// Routing per size (evaluated against the ANCHOR, independent of ref count):
+//   - anchor and target aspect ratios match within ratioTolerance and share
+//     orientation → deterministic crop fast path (no AI). This holds even for a
+//     reference group: a ratio-matching size needs no recomposition, so the
+//     auxiliary references have nothing to contribute and an AI repaint would only
+//     add latency and distortion risk. Exact-dimension matches resolve to an
+//     identity rescale (verbatim backfill); equal-ratio/different-size matches to a
+//     clean no-crop rescale.
+//   - otherwise (ratio reshape or orientation flip) → AI repaint. A reference group
+//     of ≥2 feeds the whole group to the image model so every reference informs the
+//     new composition; a single reference repaints from itself.
 //
 // The crop fast path is synchronous (asset ready on return); the AI path returns
 // a task id whose progress streams over SSE.
@@ -81,7 +85,6 @@ func (s *Service) AdaptToPlatform(ctx context.Context, sessionID string, referen
 		return nil, fmt.Errorf("adapt requires at least one source/reference asset id")
 	}
 	anchorID := refs[0]
-	multiRef := len(refs) >= 2
 	if len(sizeIDs) == 0 {
 		return nil, fmt.Errorf("adapt requires at least one target size id")
 	}
@@ -109,9 +112,14 @@ func (s *Service) AdaptToPlatform(ctx context.Context, sessionID string, referen
 
 	outcomes := make([]AdaptOutcome, 0, len(specs))
 	for _, spec := range specs {
-		// Route: single reference + ratio match → deterministic crop; a reference
-		// group (≥2) always takes AI repaint so the auxiliary refs aren't dropped.
-		if !multiRef && aspectClose(src.Width, src.Height, spec.Width, spec.Height) {
+		// Route on the ANCHOR's ratio, regardless of ref count: a size whose ratio
+		// matches the anchor (within tolerance, same orientation) needs no
+		// recomposition, so it takes the deterministic crop fast path — even with a
+		// reference group. ModeCover at a matching ratio performs no crop (a clean
+		// rescale), and at exact dimensions resolves to an identity backfill. Only
+		// genuine reshapes fall through to AI repaint, where the whole reference
+		// group informs the new composition.
+		if aspectClose(src.Width, src.Height, spec.Width, spec.Height) {
 			results, err := s.cropper.CropToSizes(sessionID, anchorID, []string{spec.SizeID}, lossless, crop.Options{Mode: crop.ModeCover})
 			if err != nil {
 				return nil, fmt.Errorf("adapt %s via crop: %w", spec.SizeID, err)

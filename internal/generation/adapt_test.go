@@ -178,9 +178,9 @@ func TestRetryAssetRejectsNonRetryable(t *testing.T) {
 	}
 }
 
-func TestAdaptMultiRefForcesAIEvenOnRatioMatch(t *testing.T) {
+func TestAdaptMultiRefRatioMatchTakesCropPath(t *testing.T) {
 	svc, st, dir, _ := newAdaptService(t)
-	// Add a second reference asset (same 16:9 ratio as the target).
+	// Add a second reference asset (same 16:9 ratio as the anchor).
 	now := time.Now().UTC()
 	auxPath := filepath.Join(dir, "aux.png")
 	_ = os.WriteFile(auxPath, solidPNGAdapt(t, 1920, 1080), 0o644)
@@ -188,10 +188,51 @@ func TestAdaptMultiRefForcesAIEvenOnRatioMatch(t *testing.T) {
 		ID: "aux", SessionID: "s", Kind: "upload", Path: auxPath, Mime: "image/png",
 		Width: 1920, Height: 1080, CreatedAt: now,
 	})
-	// Anchor 1920×1080 → 1280×720 is a 16:9 ratio match (single image would crop),
-	// but a 2-image reference group must force the AI repaint path so the auxiliary
-	// reference isn't silently dropped.
-	outcomes, err := svc.AdaptToPlatform(context.Background(), "s", []string{"src", "aux"}, []string{"same.landscape.1280x720"}, false, nil, "")
+
+	// A reference group (≥2) no longer forces AI for ratio-matching sizes: a size
+	// that matches the ANCHOR ratio needs no recomposition, so it takes the
+	// deterministic crop fast path even with auxiliary references in play.
+	cases := []struct {
+		name   string
+		sizeID string
+	}{
+		{"exact dims → verbatim backfill", "same.landscape.1920x1080"},
+		{"same ratio, smaller → clean rescale", "same.landscape.1280x720"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			outcomes, err := svc.AdaptToPlatform(context.Background(), "s", []string{"src", "aux"}, []string{tc.sizeID}, false, nil, "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(outcomes) != 1 {
+				t.Fatalf("want 1 outcome, got %d", len(outcomes))
+			}
+			if outcomes[0].Via != AdaptViaCrop {
+				t.Errorf("multi-ref ratio match must take crop path, got via=%q", outcomes[0].Via)
+			}
+			if outcomes[0].AssetID == "" {
+				t.Error("crop path must return assetID immediately")
+			}
+			if outcomes[0].TaskID != "" {
+				t.Errorf("crop path must not spawn an AI task, got taskID=%q", outcomes[0].TaskID)
+			}
+		})
+	}
+}
+
+func TestAdaptMultiRefReshapeTakesAIPath(t *testing.T) {
+	svc, st, dir, _ := newAdaptService(t)
+	now := time.Now().UTC()
+	auxPath := filepath.Join(dir, "auxr.png")
+	_ = os.WriteFile(auxPath, solidPNGAdapt(t, 1920, 1080), 0o644)
+	_ = st.InsertAsset(store.AssetRecord{
+		ID: "auxr", SessionID: "s", Kind: "upload", Path: auxPath, Mime: "image/png",
+		Width: 1920, Height: 1080, CreatedAt: now,
+	})
+	// A genuine reshape relative to the anchor (landscape → portrait) still forces
+	// AI repaint, where the whole reference group informs the new composition.
+	outcomes, err := svc.AdaptToPlatform(context.Background(), "s", []string{"src", "auxr"}, []string{"flip.portrait.720x1280"}, false, nil, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -199,7 +240,7 @@ func TestAdaptMultiRefForcesAIEvenOnRatioMatch(t *testing.T) {
 		t.Fatalf("want 1 outcome, got %d", len(outcomes))
 	}
 	if outcomes[0].Via != AdaptViaAI {
-		t.Errorf("reference group must force AI path, got via=%q", outcomes[0].Via)
+		t.Errorf("multi-ref reshape must take AI path, got via=%q", outcomes[0].Via)
 	}
 	rec := waitTask(t, st, "s", outcomes[0].TaskID)
 	if rec.Status != "done" {

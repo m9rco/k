@@ -604,6 +604,31 @@ func PadToAspectBytes(data []byte, targetW, targetH int) (Result, error) {
 	return Result{Data: encoded, Width: canvasW, Height: canvasH, Mime: outMime}, nil
 }
 
+// ContainPadBytes scales the source to fully fit inside a targetW×targetH canvas
+// at its native aspect ratio (uniform scale, never stretched), centers it, and
+// leaves the surrounding margin transparent. Output is always PNG so the alpha
+// survives — the transparent margin is the exact region an edit/outpaint model is
+// meant to fill. Used to prep an adaptation source for a wider/taller generation
+// canvas without distorting the subject (the pre-upscale step).
+func ContainPadBytes(data []byte, targetW, targetH int) (Result, error) {
+	if targetW <= 0 || targetH <= 0 {
+		return Result{}, fmt.Errorf("invalid target size %dx%d", targetW, targetH)
+	}
+	img, _, err := Decode(data)
+	if err != nil {
+		return Result{}, err
+	}
+	padded, err := ContainCrop(img, targetW, targetH, nil)
+	if err != nil {
+		return Result{}, err
+	}
+	out, outMime, err := Encode(padded, "image/png")
+	if err != nil {
+		return Result{}, err
+	}
+	return Result{Data: out, Width: targetW, Height: targetH, Mime: outMime}, nil
+}
+
 // ExtendEdgesBytes converges an image to the target aspect ratio purely by
 // procedural edge extension — no AI, so it can never introduce a second subject,
 // drift the style, or downscale the center. It keeps the source at native

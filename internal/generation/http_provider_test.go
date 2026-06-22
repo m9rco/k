@@ -112,6 +112,52 @@ func TestResolveGptImage2Size(t *testing.T) {
 	}
 }
 
+// TestResolveGptImage2SizeBudgetCap asserts large targets (already ≥ the legal
+// minimum) generate near their own pixel count instead of being gratuitously
+// upscaled to the ~3MP quality budget (the latency fix), while sub-minimum targets
+// still upscale toward the budget for a crisp downsample.
+func TestResolveGptImage2SizeBudgetCap(t *testing.T) {
+	pixels := func(w, h int) int { return w * h }
+
+	// Large, balanced targets: gen pixels should stay close to the target's own
+	// count (within ~10%), NOT balloon toward 3MP.
+	large := []struct {
+		w, h  int
+		label string
+	}{
+		{2080, 828, "TapTap search banner (~1.72MP)"},
+		{1920, 1080, "16:9 welfare banner (~2.07MP)"},
+	}
+	for _, c := range large {
+		gw, gh := parseSize(t, resolveGptImage2Size(c.w, c.h))
+		assertLegal(t, c.label, gw, gh)
+		tp := pixels(c.w, c.h)
+		gp := pixels(gw, gh)
+		if gp > tp*110/100 {
+			t.Errorf("[%s] gen %dx%d (%dMP) over-upscaled target %dx%d (%dMP); want ≈ target, not ~3MP",
+				c.label, gw, gh, gp/1_000_000, c.w, c.h, tp/1_000_000)
+		}
+	}
+
+	// Sub-minimum targets: must still be upscaled toward the budget (well above the
+	// target's own pixel count) so the downsample stays sharp.
+	small := []struct {
+		w, h  int
+		label string
+	}{
+		{512, 512, "icon (0.26MP)"},
+		{900, 600, "small cover (0.54MP)"},
+	}
+	for _, c := range small {
+		gw, gh := parseSize(t, resolveGptImage2Size(c.w, c.h))
+		assertLegal(t, c.label, gw, gh)
+		if pixels(gw, gh) <= pixels(c.w, c.h) {
+			t.Errorf("[%s] gen %dx%d not upscaled above target %dx%d; small-target sharpening lost",
+				c.label, gw, gh, c.w, c.h)
+		}
+	}
+}
+
 // TestResolveGptImage2SizeCoversCatalog asserts the resolver produces a legal
 // gpt-image-2 size for EVERY producible catalog entry — no size in channels.json
 // can drive the resolver outside the model's constraints (design task 1.4).

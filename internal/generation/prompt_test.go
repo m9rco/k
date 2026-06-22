@@ -112,14 +112,39 @@ func TestBuildPromptExtremeSafeZone(t *testing.T) {
 	}
 }
 
+// TestBuildPromptAdaptMarginExtension asserts the adapt MODIFY body instructs the
+// model to fill the transparent margins introduced by the aspect-preserving
+// pre-upscale (extend the scene) and to NOT stretch the subject or leave bands.
+func TestBuildPromptAdaptMarginExtension(t *testing.T) {
+	s := Slots{
+		Kind:         EditAdaptPlatform,
+		AssetTypeKey: "banner",
+		SourceWidth:  1920,
+		SourceHeight: 1080,
+		TargetWidth:  2080,
+		TargetHeight: 828,
+		GenWidth:     2752,
+		GenHeight:    1088,
+	}
+	got, err := BuildPrompt(s, nil)
+	if err != nil {
+		t.Fatalf("BuildPrompt: %v", err)
+	}
+	for _, sub := range []string{"empty/transparent margins", "do NOT stretch or distort", "letterbox"} {
+		if !strings.Contains(got, sub) {
+			t.Errorf("adapt prompt missing margin-extension cue %q:\n%s", sub, got)
+		}
+	}
+}
+
 // TestReproportionHint verifies the copy-preserving recompose cue (Q2 fix).
 func TestReproportionHint(t *testing.T) {
 	tests := []struct {
-		name     string
-		srcW,srcH,dstW,dstH int
-		sizeNote string
-		wantHint bool
-		wantCopy bool // true = hint should mention copy/text
+		name                   string
+		srcW, srcH, dstW, dstH int
+		sizeNote               string
+		wantHint               bool
+		wantCopy               bool // true = hint should mention copy/text
 	}{
 		// 16:9 → 3:2: diff 15.6%, triggers cue with copy mention
 		{"16:9 to 3:2 needs cue", 1920, 1080, 900, 600, "", true, true},

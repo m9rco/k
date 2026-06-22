@@ -248,13 +248,34 @@ func resolveGptImage2Size(dstW, dstH int) string {
 	// Generation aspect ratio = target ratio, clamped into the ≤3:1 band. Extreme
 	// banners (4:1, 6:1) generate at 3:1 and are cover-cropped to exact later.
 	ar := float64(dstW) / float64(dstH) // w/h
+	clamped := false
 	if maxAR := gptImage2MaxRatio; ar > maxAR {
 		ar = maxAR
+		clamped = true
 	} else if minAR := 1.0 / gptImage2MaxRatio; ar < minAR {
 		ar = minAR
+		clamped = true
+	}
+	// Generation pixel budget. Quality-first by default, but DON'T gratuitously
+	// upscale a target that is already at/above gpt-image-2's legal minimum: that
+	// only inflates latency (a ~1.7MP banner generated at the 3MP budget measured
+	// ~166s) for no real sharpness gain, since the source is already high-res.
+	// Sub-minimum targets (icons/small covers) keep the full budget so their
+	// downsample stays crisp. The 3MP ceiling is retained, so a >2K target (iOS
+	// 2732×2048) is still clamped to ~2K and upsampled during convergence. The cap
+	// is skipped for ratio-clamped (extreme) targets: their gen ratio differs from
+	// the target, so the target pixel count is not a meaningful budget, and a
+	// smaller budget leaves too little headroom for the 16-grid rounding to stay
+	// within the 3:1 band — they cover-crop to exact later and aren't the latency
+	// concern anyway.
+	budget := gptImage2GenBudget
+	if !clamped {
+		if tp := float64(dstW) * float64(dstH); tp >= gptImage2MinPixels && tp < budget {
+			budget = tp
+		}
 	}
 	// Solve W,H from ratio + pixel budget: w = ar·h, w·h = budget → h = √(budget/ar).
-	h := math.Sqrt(gptImage2GenBudget / ar)
+	h := math.Sqrt(budget / ar)
 	w := ar * h
 	wi := roundTo16(w)
 	hi := roundTo16(h)
