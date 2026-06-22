@@ -17,6 +17,16 @@ const DEMO_PROMPTS = [
   "根据图2和图3的风格生成一张新图…",
 ];
 
+// Quick-start chips under the onboarding input — one tap fills a concrete
+// starter request, so a first-time user gets a direction without composing a
+// prompt from scratch. Each is a (label, text-to-fill) pair.
+const QUICK_STARTS: { label: string; fill: string }[] = [
+  { label: "换背景", fill: "把这张图的背景换成" },
+  { label: "切投放尺寸", fill: "把这张图切成抖音和小红书的投放尺寸" },
+  { label: "生成短视频", fill: "让这张图里的角色动起来，" },
+  { label: "写宣发文案", fill: "为这款游戏写一组宣发文案：主标题、广告语、卖点" },
+];
+
 const prefersReducedMotion = () =>
   typeof window !== "undefined" && window.matchMedia?.("(prefers-reduced-motion: reduce)").matches;
 
@@ -125,7 +135,7 @@ export function Composer({ onboarding = false }: { onboarding?: boolean }) {
   };
 
   return (
-    <div className="relative border-t border-line px-4 pb-4 pt-3">
+    <div className={cn("relative", onboarding ? "px-1" : "border-t border-line px-4 pb-4 pt-3")}>
       {/* Mascot perched above the input during onboarding; exits as the layout
           expands into the workspace. */}
       <AnimatePresence>
@@ -192,7 +202,7 @@ export function Composer({ onboarding = false }: { onboarding?: boolean }) {
           ))}
         </div>
       )}
-      <form onSubmit={submit} className="flex items-center gap-2">
+      <form onSubmit={submit} className={cn("flex items-center gap-2", onboarding && "rounded-2xl border border-line bg-bg-elev px-2.5 py-2 shadow-sm transition-all duration-200 ease-out focus-within:border-accent/60 focus-within:shadow-md")}>
         <input
           ref={fileRef}
           type="file"
@@ -224,7 +234,10 @@ export function Composer({ onboarding = false }: { onboarding?: boolean }) {
           onBlur={() => setFocused(false)}
           placeholder={demoActive && demoText ? demoText : "例如：把背景换成夜晚的赛博朋克城市"}
           className={cn(
-            "h-9 flex-1 rounded-md border border-line bg-bg-elev px-3 text-[13px] text-fg outline-none placeholder:text-fg-mute focus:border-accent/60",
+            "flex-1 bg-transparent text-fg outline-none placeholder:text-fg-mute",
+            onboarding
+              ? "h-9 px-1 text-sm"
+              : "h-9 rounded-md border border-line bg-bg-elev px-3 text-[13px] focus:border-accent/60",
             demoActive && "placeholder:text-fg-dim",
           )}
         />
@@ -242,15 +255,17 @@ export function Composer({ onboarding = false }: { onboarding?: boolean }) {
           </TooltipTrigger>
           <TooltipContent>优化提示词</TooltipContent>
         </Tooltip>
-        <Button
-          type="button"
-          variant={state.lossless ? "subtle" : "ghost"}
-          size="sm"
-          onClick={() => app.setLossless(!state.lossless)}
-          title="无损压缩：开启时对 PNG 产物做无损优化"
-        >
-          {state.lossless ? "无损" : "原图"}
-        </Button>
+        {!onboarding && (
+          <Button
+            type="button"
+            variant={state.lossless ? "subtle" : "ghost"}
+            size="sm"
+            onClick={() => app.setLossless(!state.lossless)}
+            title="无损压缩：开启时对 PNG 产物做无损优化"
+          >
+            {state.lossless ? "无损" : "原图"}
+          </Button>
+        )}
         {state.thinking && text.trim() && (
           <Tooltip>
             <TooltipTrigger asChild>
@@ -275,6 +290,20 @@ export function Composer({ onboarding = false }: { onboarding?: boolean }) {
           <Send />
         </Button>
       </form>
+      {onboarding && !text && (
+        <div className="mt-3 flex flex-wrap items-center justify-center gap-2">
+          {QUICK_STARTS.map((q) => (
+            <button
+              key={q.label}
+              type="button"
+              onClick={() => setText(q.fill)}
+              className="rounded-full border border-line bg-bg-elev/40 px-3 py-1.5 text-xs text-fg-dim transition-all duration-200 ease-out hover:border-accent/50 hover:text-fg"
+            >
+              {q.label}
+            </button>
+          ))}
+        </div>
+      )}
     </div>
   );
 }
