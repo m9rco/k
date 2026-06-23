@@ -28,12 +28,13 @@ const MAX_PREVIEW_H = 460;
 
 // CompositingCanvas is the per-image 图层精修 surface. It is opened FOR a specific
 // source image (splitFor): on open it runs a layer split — detect foreground
-// subjects, cut each onto a transparent layer (Gemini) and inpaint a clean
-// background — then stacks the returned layers on a canvas whose size is LOCKED to
-// the source image dimensions (不可调整). The user moves / uniformly scales /
-// reorders / removes the SUBJECT layers over the locked background, then flattens
-// to a PNG that lands in the workspace. Pure browser compositing on export — no
-// generation cost beyond the initial split.
+// subjects (people + marketing copy) and cut each onto a TRANSPARENT layer using a
+// segmentation mask over the original pixels (真抠图, no repaint), with the original
+// image itself as the locked background — then stacks the returned layers on a
+// canvas whose size is LOCKED to the source image dimensions (不可调整). The user
+// moves / uniformly scales / reorders / removes the SUBJECT layers over the locked
+// background, then flattens to a PNG that lands in the workspace. Pure browser
+// compositing on export — no generation cost beyond the initial split.
 export function CompositingCanvas({
   splitFor,
   onOpenChange,
@@ -83,8 +84,11 @@ export function CompositingCanvas({
           asset: app.state.assets.get(l.assetId) || ({ id: l.assetId, kind: "composite", url: `/api/session/${app.state.sessionId}/assets/${l.assetId}/download`, width: res.width, height: res.height } as Asset),
           role: l.role,
           desc: l.desc,
-          x: 0,
-          y: 0,
+          // Subject layers are verbatim crops sized to their box; place each at its
+          // box origin so it lands back in register with the original. The
+          // background spans the whole frame (box {0,0,1,1} → origin 0,0).
+          x: (l.box?.x ?? 0) * (res.width || 0),
+          y: (l.box?.y ?? 0) * (res.height || 0),
           scale: 1,
         }));
         setLayers(built);
@@ -218,7 +222,7 @@ export function CompositingCanvas({
             <div className="grid h-64 place-items-center rounded-md border border-line">
               <div className="flex flex-col items-center gap-2 text-fg-mute">
                 <Loader2 className="size-5 animate-spin text-accent" />
-                <span className="text-[12px]">正在分析原图并分割图层（抠主体 + 补全背景）…</span>
+                <span className="text-[12px]">正在分析原图并把主体抠成透明图层（人物 + 宣发文案）…</span>
               </div>
             </div>
           ) : (

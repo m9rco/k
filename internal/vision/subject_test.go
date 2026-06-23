@@ -1,6 +1,9 @@
 package vision
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestParseSubject(t *testing.T) {
 	cases := []struct {
@@ -107,9 +110,118 @@ func TestParseSubjects(t *testing.T) {
 			t.Errorf("box not clamped: %+v", subs[0].Box)
 		}
 	})
+	t.Run("caps at maxDetectedSubjects (5)", func(t *testing.T) {
+		// Seven candidates → only the first 5 (by model order) are kept.
+		content := `{"subjects":[` +
+			`{"desc":"s1","box":{"x":0,"y":0,"w":0.1,"h":0.1}},` +
+			`{"desc":"s2","box":{"x":0,"y":0,"w":0.1,"h":0.1}},` +
+			`{"desc":"s3","box":{"x":0,"y":0,"w":0.1,"h":0.1}},` +
+			`{"desc":"s4","box":{"x":0,"y":0,"w":0.1,"h":0.1}},` +
+			`{"desc":"s5","box":{"x":0,"y":0,"w":0.1,"h":0.1}},` +
+			`{"desc":"s6","box":{"x":0,"y":0,"w":0.1,"h":0.1}},` +
+			`{"desc":"s7","box":{"x":0,"y":0,"w":0.1,"h":0.1}}]}`
+		subs, err := parseSubjects(content)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(subs) != maxDetectedSubjects {
+			t.Fatalf("want capped at %d, got %d", maxDetectedSubjects, len(subs))
+		}
+		if maxDetectedSubjects != 5 {
+			t.Errorf("maxDetectedSubjects should be 5, got %d", maxDetectedSubjects)
+		}
+	})
 	t.Run("no json", func(t *testing.T) {
 		if _, err := parseSubjects("no json here"); err == nil {
 			t.Error("expected error")
 		}
 	})
+}
+
+func TestParseSubjectMasks(t *testing.T) {
+	// A valid 1×1 PNG as a data URI, so mask decoding yields real bytes.
+	const png1x1 = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="
+	near := func(a, b float64) bool {
+		d := a - b
+		return d < 1e-9 && d > -1e-9
+	}
+
+	t.Run("box_2d→box conversion + mask decode", func(t *testing.T) {
+		// box_2d = [ymin,xmin,ymax,xmax] = [200,100,600,400] in 0..1000.
+		content := `{"subjects":[{"desc":"左侧战士","box_2d":[200,100,600,400],"mask":"` + png1x1 + `"}]}`
+		subs, err := parseSubjectMasks(content)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(subs) != 1 {
+			t.Fatalf("want 1 subject, got %d", len(subs))
+		}
+		s := subs[0]
+		if !near(s.Box.X, 0.1) || !near(s.Box.Y, 0.2) || !near(s.Box.W, 0.3) || !near(s.Box.H, 0.4) {
+			t.Errorf("box_2d conversion wrong: %+v", s.Box)
+		}
+		if len(s.Mask) == 0 {
+			t.Error("mask data URI should decode to bytes")
+		}
+	})
+	t.Run("label fallback + missing mask kept as nil", func(t *testing.T) {
+		content := `{"subjects":[{"label":"顶部主标题","box_2d":[0,0,100,200]}]}`
+		subs, err := parseSubjectMasks(content)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(subs) != 1 || subs[0].Desc != "顶部主标题" {
+			t.Fatalf("label should fill desc when desc empty: %+v", subs)
+		}
+		if subs[0].Mask != nil {
+			t.Error("a subject with no mask must keep Mask=nil (caller falls back to opaque crop)")
+		}
+	})
+	t.Run("drops empty desc and degenerate box", func(t *testing.T) {
+		content := `{"subjects":[{"desc":"","box_2d":[0,0,100,100]},{"desc":"x","box_2d":[500,500,500,500]}]}`
+		subs, err := parseSubjectMasks(content)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(subs) != 0 {
+			t.Fatalf("want 0 (empty desc dropped, zero-area box dropped), got %d: %+v", len(subs), subs)
+		}
+	})
+	t.Run("caps at maxDetectedSubjects (5)", func(t *testing.T) {
+		var b strings.Builder
+		b.WriteString(`{"subjects":[`)
+		for i := 0; i < 7; i++ {
+			if i > 0 {
+				b.WriteByte(',')
+			}
+			b.WriteString(`{"desc":"s","box_2d":[0,0,100,100]}`)
+		}
+		b.WriteString(`]}`)
+		subs, err := parseSubjectMasks(b.String())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(subs) != maxDetectedSubjects {
+			t.Fatalf("want capped at %d, got %d", maxDetectedSubjects, len(subs))
+		}
+	})
+	t.Run("no json", func(t *testing.T) {
+		if _, err := parseSubjectMasks("nope"); err == nil {
+			t.Error("expected error")
+		}
+	})
+}
+
+// TestSubjectsPromptScopesToTwoKinds locks the detection scope to people +
+// marketing copy only — LOGO / props / scenery must be steered to the background.
+func TestSubjectsPromptScopesToTwoKinds(t *testing.T) {
+	for _, want := range []string{"角色/人物", "宣发文案", "品牌 LOGO", "道具", "保留在背景层", "最多列出 5 个"} {
+		if !strings.Contains(subjectsPrompt, want) {
+			t.Errorf("subjectsPrompt missing %q", want)
+		}
+	}
+	// Must NOT invite the model to split out the hero object/prop as its own layer.
+	if strings.Contains(subjectsPrompt, "核心主体或显著道具") {
+		t.Error("subjectsPrompt should no longer list 核心主体/道具 as a separable subject")
+	}
 }

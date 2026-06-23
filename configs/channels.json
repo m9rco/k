@@ -18,7 +18,7 @@
           "name": "视频封面 / 封面图",
           "sizes": [
             { "id": "taptap.cover.900x600", "name": "视频封面", "width": 900, "height": 600, "orientation": "landscape", "format": "jpg", "note": "无文案", "producible": true },
-            { "id": "taptap.cover.caption", "name": "带文案封面图", "width": 900, "height": 600, "orientation": "landscape", "format": "jpg", "producible": true }
+            { "id": "taptap.cover.caption", "name": "带文案封面图", "width": 900, "height": 600, "orientation": "landscape", "format": "jpg", "note": "人物放大", "producible": true }
           ]
         },
         {
@@ -26,7 +26,7 @@
           "name": "ICON",
           "sizes": [
             { "id": "taptap.icon.512", "name": "ICON 512", "width": 512, "height": 512, "orientation": "square", "format": "png", "producible": true },
-            { "id": "taptap.icon.share-200", "name": "分享 ICON", "width": 200, "height": 200, "orientation": "square", "format": "png", "producible": true }
+            { "id": "taptap.icon.share-200", "name": "分享 ICON", "width": 200, "height": 200, "orientation": "square", "format": "png", "producible": false }
           ]
         },
         {

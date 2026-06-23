@@ -192,12 +192,15 @@ func run() error {
 	}
 
 	// Layer split (图层精修): right-click a workspace image → detect its foreground
-	// subjects, cut each onto a transparent layer (extract_layer, Gemini) and inpaint
-	// a clean base background (fill_background), then return the layers for the
-	// fixed-size compositing canvas. The subject splitter reuses the marketing-vision
-	// model (cfg.Vision) — a Gemini inline model that already reads these images;
-	// falls back to the quality-gate vision model when Vision lacks credentials.
-	layerDetBase, layerDetKey, layerDetModel := cfg.Vision.BaseURL, cfg.Vision.APIKey, cfg.Vision.Model
+	// subjects (people + marketing copy) and cut each onto a TRANSPARENT layer by
+	// applying the detector's segmentation mask as alpha over the verbatim original
+	// pixels (真抠图, no repaint, no inpaint), with the original image itself as the
+	// locked background — then return the layers for the fixed-size compositing
+	// canvas. Uses cfg.LayerSplit (default gemini-2.5-pro), kept SEPARATE from
+	// cfg.Vision so analysis can run on an image-output model while splitting uses a
+	// JSON/segmentation vision model. Credentials fall back to COMMON_*, then to the
+	// quality-gate vision model (box-only → opaque rectangle cutout).
+	layerDetBase, layerDetKey, layerDetModel := cfg.LayerSplit.BaseURL, cfg.LayerSplit.APIKey, cfg.LayerSplit.Model
 	if vb, vk := cfg.VisionCredential(); strings.TrimSpace(layerDetKey) == "" {
 		layerDetBase, layerDetKey = vb, vk
 	}
@@ -205,9 +208,21 @@ func run() error {
 		layerDetBase, layerDetKey, layerDetModel = cfg.Quality.BaseURL, cfg.Quality.APIKey, cfg.Quality.Model
 	}
 	if layerDet := vision.NewSubjectDetector(layerDetBase, layerDetKey, layerDetModel); layerDet != nil {
-		layeringSvc := layering.NewService(layerDet, genSvc, st)
+		// Segmentation masks (transparent cutouts) are OFF by default: the current
+		// gateway does not return real mask data (gemini-2.5-pro hangs past the
+		// timeout; flash returns "..." placeholders), so requesting them freezes the
+		// split. Box-only detection (opaque rectangle crops) returns in ~20s. Set
+		// LAYER_SPLIT_MASKS=1 only against a backend verified to return base64 masks.
+		wantMasks := strings.EqualFold(strings.TrimSpace(os.Getenv("LAYER_SPLIT_MASKS")), "1") ||
+			strings.EqualFold(strings.TrimSpace(os.Getenv("LAYER_SPLIT_MASKS")), "true")
+		layerDet.SetWantMasks(wantMasks)
+		layeringSvc := layering.NewService(layerDet, compositeSvc, st)
 		layeringSvc.RegisterRoutes(mux)
-		log.Printf("layer-split: %s enabled (subject detection → cutout layers + inpaint background)", layerDetModel)
+		mode := "box-only opaque crops"
+		if wantMasks {
+			mode = "segmentation-mask transparent cutouts"
+		}
+		log.Printf("layer-split: %s enabled (%s) over original background", layerDetModel, mode)
 	} else {
 		log.Printf("layer-split: not configured (no vision model), 图层精修 disabled")
 	}

@@ -187,6 +187,15 @@ type Config struct {
 	// image_url path (still needs COS). Credentials fall back to COMMON_*.
 	Vision ImageProviderConfig
 
+	// LayerSplit is the 图层精修 subject-detection/segmentation backend, kept
+	// SEPARATE from Vision so marketing-analysis can run on an image-output model
+	// (e.g. gemini-3-pro-image) while layer splitting uses an analysis/segmentation
+	// model that returns JSON (boxes + masks). MUST be a vision-analysis model, NOT
+	// an image-generation model — a generation model hangs the :generateContent
+	// call (it tries to paint instead of returning JSON). Defaults to gemini-2.5-pro
+	// over the native inline API; credentials fall back to COMMON_*.
+	LayerSplit ImageProviderConfig
+
 	// Quality is the platform-adaptation quality-gate judge backend
 	// (doubao-seed-1-6-vision-250815 over OpenAI-compatible /chat/completions with
 	// inline data-URI images). When its APIKey is unset the quality gate is
@@ -401,6 +410,12 @@ func Load(platformsPath string) (*Config, error) {
 	// gemini-flash-latest model over the native inline API (no COS upload). The
 	// legacy OpenAI-compatible image_url path is selected with VISION_PROVIDER=openai.
 	visionEP := common.resolveEndpoint("VISION", "gemini", "gemini-flash-latest", endpointAliases{})
+	// 图层精修 subject detection/segmentation. SEPARATE from VISION so analysis can
+	// run on an image-output model while splitting uses a JSON-returning vision
+	// model. Default gemini-2.5-pro (native inline). MUST NOT be an image-generation
+	// model (e.g. gemini-3-pro-image) — that hangs :generateContent. Credentials
+	// fall back to COMMON_*.
+	layerSplitEP := common.resolveEndpoint("LAYER_SPLIT", "gemini", "gemini-2.5-pro", endpointAliases{})
 	// Quality-gate judge (doubao vision over OpenAI-compatible chat/completions).
 	// No API key => the quality gate is disabled and adapt behaves as before.
 	qualityEP := common.resolveEndpoint("QUALITY", "openai", "gemini-flash-latest", endpointAliases{})
@@ -482,6 +497,15 @@ func Load(platformsPath string) (*Config, error) {
 			BaseURL:  visionEP.baseURL,
 			APIKey:   visionEP.apiKey,
 			Model:    visionEP.model,
+		},
+
+		// 图层精修 subject detection/segmentation backend, separate from Vision.
+		LayerSplit: ImageProviderConfig{
+			Name:     env("LAYER_SPLIT_NAME", "layer-split"),
+			Provider: layerSplitEP.provider,
+			BaseURL:  layerSplitEP.baseURL,
+			APIKey:   layerSplitEP.apiKey,
+			Model:    layerSplitEP.model,
 		},
 
 		// Quality-gate judge. APIKey empty => quality gate disabled.

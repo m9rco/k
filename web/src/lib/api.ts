@@ -127,10 +127,14 @@ export function crop(sid: string, sourceAssetId: string, sizeIds: string[], loss
 
 // LayerSplitResult is the outcome of a 图层精修 split: the locked canvas size
 // (= source image size) plus the ordered layers (background first, then subjects).
+// Each layer's box is its normalized position in the source frame — the
+// background spans the whole frame {0,0,1,1}; each subject carries its verbatim
+// crop box so the canvas places the cut-out sub-image back at its origin.
 export interface SplitLayer {
   assetId: string;
   role: "background" | "subject";
   desc?: string;
+  box: { x: number; y: number; w: number; h: number };
 }
 export interface LayerSplitResult {
   sourceAssetId: string;
@@ -139,9 +143,11 @@ export interface LayerSplitResult {
   layers: SplitLayer[];
 }
 
-// layerSplit detects the source image's foreground subjects, cuts each onto a
-// transparent layer (Gemini) and inpaints a clean base background, returning the
-// layers for the fixed-size compositing canvas. Synchronous (drives generation).
+// layerSplit detects the source image's foreground subjects (people + marketing
+// copy), crops each one VERBATIM out of the original pixels into its own layer,
+// and uses the original image itself as the locked background — returning the
+// layers for the fixed-size compositing canvas. Synchronous and deterministic
+// (no generative model), so it returns in milliseconds.
 export function layerSplit(sid: string, sourceAssetId: string): Promise<LayerSplitResult> {
   return api(`/api/session/${sid}/layer-split`, {
     method: "POST",

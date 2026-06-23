@@ -51,6 +51,15 @@ type SubjectDetector struct {
 	model    string
 	isGemini bool
 	client   *http.Client
+
+	// wantMasks gates the segmentation-mask request path. OFF by default: a plain
+	// box-only detection returns in ~20s, while asking Gemini for per-subject masks
+	// over the yunwu gateway either hangs past the timeout (gemini-2.5-pro) or comes
+	// back with literal "..." placeholders instead of base64 PNGs (flash) — i.e. the
+	// gateway does not actually transmit masks. Turn ON (SetWantMasks) only against a
+	// backend verified to return real base64 mask data, so a "frozen" split can't be
+	// reintroduced silently.
+	wantMasks bool
 }
 
 // NewSubjectDetector returns a detector, or nil when baseURL/apiKey is empty
@@ -77,12 +86,23 @@ func NewSubjectDetector(baseURL, apiKey, model string) *SubjectDetector {
 		apiKey:   apiKey,
 		model:    model,
 		isGemini: isGemini,
-		client:   &http.Client{Timeout: 60 * time.Second},
+		client:   &http.Client{Timeout: 180 * time.Second},
 	}
 }
 
 // Configured reports whether the detector is ready to use.
 func (d *SubjectDetector) Configured() bool { return d != nil }
+
+// SetWantMasks enables the segmentation-mask request path (Gemini transport only).
+// Default is OFF: see SubjectDetector.wantMasks. Enable only against a backend
+// verified to return real base64 mask data — otherwise the split hangs or yields
+// placeholder masks. No-op on a nil detector or a non-Gemini transport.
+func (d *SubjectDetector) SetWantMasks(v bool) {
+	if d == nil {
+		return
+	}
+	d.wantMasks = v && d.isGemini
+}
 
 // rawSubject is the strict JSON the locator model is asked to emit.
 type rawSubject struct {
@@ -284,27 +304,58 @@ func clamp01(v float64) float64 {
 }
 
 // subjectsPrompt asks the model to enumerate the distinct FOREGROUND subjects in
-// a marketing image so each can be cut into its own layer for free recompositing.
-// The brand LOGO and the original scenery are deliberately KEPT in the background
-// (they become part of the inpainted base layer), so the separable layers are the
-// characters/people, the core hero subject(s)/key props, and the marketing copy
-// blocks. It returns a strict JSON object; nothing else.
-const subjectsPrompt = `你是图像图层分析器。下面给你一张【宣发素材图】。请列出画面中可以各自独立抠成一层的【前景主体】——只包括：每个角色/人物、画面核心主体或显著道具/物件、宣发文案块（标题/卖点/活动文案）。
+// a marketing image so each can be cut into its own layer for manual fine-tuning.
+// Only TWO kinds are separable: every character/person, and every marketing-copy
+// block (title / selling point / campaign text). The brand LOGO, the hero
+// object/prop, and the original scenery are deliberately KEPT in the background
+// (the background layer is just the original image), so the layer count stays
+// small and matches the "I only want to nudge people and copy" intent. It returns
+// a strict JSON object; nothing else.
+const subjectsPrompt = `你是图像图层分析器。下面给你一张【宣发素材图】。请列出画面中可以各自独立抠成一层、供人工微调的【前景主体】——只包括以下两类：
+① 每个角色/人物；
+② 每个宣发文案块（标题/卖点/活动文案）。
 
-【重要】不要把以下内容列为主体（它们要保留在背景层里）：品牌 LOGO、原始背景/场景、天空、地面、氛围、光效、装饰底纹。LOGO 属于背景，不要单独抠出。
+【重要】不要把以下内容列为主体（它们要保留在背景层里）：品牌 LOGO、画面里的核心物件/道具/商品、原始背景/场景、天空、地面、氛围、光效、装饰底纹。只分「人物」和「宣发文案」两类，不要分出过多碎片元素。
 
 坐标系：以图片左上角为原点 (0,0)、右下角为 (1,1)。每个主体给出：
 - desc：对该主体的简短中文描述（10~30字，足以让人/模型唯一指认它，如“画面左侧穿红色铠甲的男性战士”或“顶部金色描边主标题文案”）
-- box：归一化包围盒 {x,y,w,h}，均 ∈ [0,1]
+- box：紧贴该主体的归一化包围盒 {x,y,w,h}，均 ∈ [0,1]，尽量贴合主体轮廓但不要裁掉其边缘
 
-最多列出 8 个，按视觉重要性从高到低排序；没有可独立分层的前景主体时返回空数组。只输出 JSON 对象，不要任何解释、前后缀或 Markdown：
+最多列出 5 个，按视觉重要性从高到低排序；没有可独立分层的前景主体时返回空数组。只输出 JSON 对象，不要任何解释、前后缀或 Markdown：
 {"subjects":[{"desc":"...","box":{"x":0.0,"y":0.0,"w":0.0,"h":0.0}}]}`
 
-// Subject is one detected foreground subject: a description (used as the cutout
-// region_desc) and its normalized bounding box.
+// subjectMasksPrompt is the Gemini-only variant that ALSO asks for a per-subject
+// segmentation mask, so each subject can be cut onto a transparent background by
+// applying the mask as alpha over the original pixels (真抠图, no repaint). It uses
+// Gemini's native segmentation output (box_2d in 0–1000 + a base64 PNG mask sized
+// to that box). Same two subject kinds and cap as subjectsPrompt.
+const subjectMasksPrompt = `你是图像分割器。下面给你一张【宣发素材图】。请把画面中可以各自独立抠成一层、供人工微调的【前景主体】分割出来——只包括以下两类：
+① 每个角色/人物；
+② 每个宣发文案块（标题/卖点/活动文案）。
+
+【重要】不要分割以下内容（它们要保留在背景层里）：品牌 LOGO、画面里的核心物件/道具/商品、原始背景/场景、天空、地面、氛围、光效、装饰底纹。只分「人物」和「宣发文案」两类，不要分出过多碎片元素。
+
+为每个主体输出：
+- desc：该主体的简短中文描述（10~30字，足以唯一指认它）
+- box_2d：该主体的边界框，格式 [ymin, xmin, ymax, xmax]，坐标归一化到 0–1000（左上角为原点）
+- mask：该主体的分割掩码，base64 编码的 PNG（"data:image/png;base64,..."），尺寸与 box_2d 对齐，前景为高亮、背景为黑
+
+最多 5 个，按视觉重要性从高到低排序；没有可独立分层的前景主体时返回空数组。只输出 JSON 对象，不要任何解释、前后缀或 Markdown：
+{"subjects":[{"desc":"...","box_2d":[0,0,0,0],"mask":"data:image/png;base64,..."}]}`
+
+// Subject is one detected foreground subject: a description, its normalized
+// bounding box, and (when the detector is segmentation-capable) a Mask. Mask is
+// the raw bytes of a grayscale PNG probability map sized to Box — pixel intensity
+// is the foreground confidence (0=background, 255=subject). The caller applies it
+// as the alpha channel over the box's VERBATIM original pixels to cut the subject
+// onto a transparent background WITHOUT repainting (so the layer stays pixel-exact
+// and drops back in perfect register). Mask is nil when the detector can't return
+// one (non-Gemini transport, or the model omitted it) — the caller then falls
+// back to an opaque rectangular crop.
 type Subject struct {
 	Desc string `json:"desc"`
 	Box  Box    `json:"box"`
+	Mask []byte `json:"-"`
 }
 
 // rawSubjectList is the strict JSON the splitter model is asked to emit.
@@ -320,9 +371,10 @@ type rawSubjectList struct {
 	} `json:"subjects"`
 }
 
-// maxDetectedSubjects bounds how many layers one split produces, capping the
-// number of downstream cutout generations (cost/latency) regardless of model output.
-const maxDetectedSubjects = 8
+// maxDetectedSubjects bounds how many layers one split produces. Kept small so a
+// split yields a handful of fine-tunable subject layers (people + copy) rather
+// than a swarm of fragment layers.
+const maxDetectedSubjects = 5
 
 // DetectSubjects enumerates the distinct foreground subjects in the image so each
 // can be cut into its own layer. Returns an ordered list (most important first),
@@ -338,7 +390,14 @@ func (d *SubjectDetector) DetectSubjects(ctx context.Context, img []byte, mime s
 	start := time.Now()
 	var content string
 	var err error
-	if d.isGemini {
+	// Only ask for segmentation masks when explicitly enabled AND on a Gemini
+	// transport. Otherwise use the box-only prompt (fast, reliable) and let the
+	// caller fall back to an opaque rectangular crop. See SubjectDetector.wantMasks
+	// for why masks are off by default over the current gateway.
+	useMasks := d.wantMasks && d.isGemini
+	if useMasks {
+		content, err = d.askGemini(ctx, subjectMasksPrompt, img, mime)
+	} else if d.isGemini {
 		content, err = d.askGemini(ctx, subjectsPrompt, img, mime)
 	} else {
 		content, err = d.askOpenAI(ctx, subjectsPrompt, img, mime)
@@ -346,16 +405,36 @@ func (d *SubjectDetector) DetectSubjects(ctx context.Context, img []byte, mime s
 	if err != nil {
 		return nil, err
 	}
-	subs, err := parseSubjects(content)
+	// Diagnostic: how big is the raw model output and did it even contain mask
+	// fields? Distinguishes "model returned no masks" from "parser dropped them".
+	applog.From(ctx).Debug().Str("event", "subjects.raw").
+		Str("model", d.model).Bool("gemini", d.isGemini).Bool("want_masks", useMasks).
+		Int("raw_bytes", len(content)).
+		Bool("has_mask_field", strings.Contains(content, "\"mask\"")).
+		Bool("has_box2d_field", strings.Contains(content, "box_2d")).
+		Str("head", truncate(content, 200)).
+		Msg("主体检测原始返回")
+	var subs []Subject
+	if useMasks {
+		subs, err = parseSubjectMasks(content)
+	} else {
+		subs, err = parseSubjects(content)
+	}
 	if err != nil {
 		applog.From(ctx).Warn().Str("event", "subjects.parse_failed").
 			Str("model", d.model).Err(err).Str("raw", truncate(content, 400)).
 			Msg("subject list unparseable")
 		return nil, err
 	}
+	masked := 0
+	for _, s := range subs {
+		if len(s.Mask) > 0 {
+			masked++
+		}
+	}
 	applog.From(ctx).Info().Str("event", "subjects.detect").
 		Str("model", d.model).Dur("dur", time.Since(start)).Int("count", len(subs)).
-		Msg("foreground subjects detected")
+		Int("masked", masked).Msg("foreground subjects detected")
 	return subs, nil
 }
 
@@ -385,4 +464,84 @@ func parseSubjects(content string) ([]Subject, error) {
 		}
 	}
 	return out, nil
+}
+
+// rawSubjectMaskList is the strict JSON the segmentation model is asked to emit:
+// each subject carries a desc, a box_2d ([ymin,xmin,ymax,xmax] in 0..1000), and a
+// base64 PNG mask sized to that box.
+type rawSubjectMaskList struct {
+	Subjects []struct {
+		Desc  string    `json:"desc"`
+		Label string    `json:"label"`
+		Box2D []float64 `json:"box_2d"`
+		Mask  string    `json:"mask"`
+	} `json:"subjects"`
+}
+
+// parseSubjectMasks parses the segmentation response: it converts box_2d
+// (0..1000, [ymin,xmin,ymax,xmax]) into a normalized Box, decodes each mask data
+// URI into raw PNG bytes, drops entries with an empty desc or degenerate box, and
+// caps the count. A subject whose mask is missing/undecodable is still kept
+// (Mask=nil) so the caller falls back to an opaque crop for it rather than
+// dropping the subject entirely.
+func parseSubjectMasks(content string) ([]Subject, error) {
+	js := extractJSON(content)
+	if js == "" {
+		return nil, fmt.Errorf("subject: no JSON in output")
+	}
+	var rl rawSubjectMaskList
+	if err := json.Unmarshal([]byte(js), &rl); err != nil {
+		return nil, fmt.Errorf("subject: parse mask list: %w", err)
+	}
+	out := make([]Subject, 0, len(rl.Subjects))
+	for _, r := range rl.Subjects {
+		desc := strings.TrimSpace(r.Desc)
+		if desc == "" {
+			desc = strings.TrimSpace(r.Label)
+		}
+		if desc == "" || len(r.Box2D) != 4 {
+			continue
+		}
+		box := box2DToBox(r.Box2D)
+		if box.W <= 0 || box.H <= 0 {
+			continue
+		}
+		out = append(out, Subject{Desc: desc, Box: box, Mask: decodeMaskDataURI(r.Mask)})
+		if len(out) >= maxDetectedSubjects {
+			break
+		}
+	}
+	return out, nil
+}
+
+// box2DToBox converts Gemini's [ymin,xmin,ymax,xmax] (0..1000) into a normalized
+// {x,y,w,h} box clamped to [0,1], tolerating swapped min/max.
+func box2DToBox(b []float64) Box {
+	ymin, xmin, ymax, xmax := b[0]/1000, b[1]/1000, b[2]/1000, b[3]/1000
+	if xmax < xmin {
+		xmin, xmax = xmax, xmin
+	}
+	if ymax < ymin {
+		ymin, ymax = ymax, ymin
+	}
+	x, y := clamp01(xmin), clamp01(ymin)
+	return Box{X: x, Y: y, W: clamp01(xmax) - x, H: clamp01(ymax) - y}
+}
+
+// decodeMaskDataURI strips an optional "data:...;base64," prefix and decodes the
+// remainder into raw bytes (the mask PNG). Returns nil on any error so the caller
+// degrades to an opaque crop rather than failing the whole subject.
+func decodeMaskDataURI(s string) []byte {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return nil
+	}
+	if i := strings.Index(s, "base64,"); i >= 0 {
+		s = s[i+len("base64,"):]
+	}
+	data, err := base64.StdEncoding.DecodeString(strings.TrimSpace(s))
+	if err != nil {
+		return nil
+	}
+	return data
 }

@@ -4,11 +4,10 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"strings"
-	"sync"
 	"time"
 
-	"gameasset/internal/generation"
+	"gameasset/internal/composite"
+	applog "gameasset/internal/log"
 	"gameasset/internal/store"
 	"gameasset/internal/vision"
 )
@@ -20,38 +19,33 @@ type detector interface {
 	DetectSubjects(ctx context.Context, img []byte, mime string) ([]vision.Subject, error)
 }
 
-// generator starts a generation task and is the layering service's only coupling
-// to the generation pipeline. Implemented by *generation.Service.
-type generator interface {
-	Start(ctx context.Context, p generation.GenerateParams) (string, error)
+// persister stores a cut-out subject layer as a session-scoped workspace asset.
+// Implemented by *composite.Service, reused so the deterministically-cropped
+// layers land through the same lossless-PNG pipeline (and "composite" asset kind)
+// as the final composite export. Kept as a local interface for testability.
+type persister interface {
+	Persist(sessionID string, data []byte, sourceAssetIDs []string, lossless bool) (composite.Result, error)
 }
 
-// Service orchestrates a layer split (图层精修): it detects the foreground
-// subjects in a source image, then drives the generation pipeline to (1) cut each
-// subject onto a transparent layer (extract_layer, Gemini) and (2) inpaint a clean
-// background (fill_background) as the locked base layer. The produced layers are
-// all source-sized and positioned at the origin, so the compositing canvas stacks
-// them directly at the original (fixed) dimensions.
+// Service orchestrates a layer split (图层精修) WITHOUT any generative image model.
+// It detects the foreground subjects (people + marketing copy only) in a source
+// image and cuts each one out of the ORIGINAL pixels into its own layer — onto a
+// transparent background via the detector's segmentation mask (a true 抠图), or as
+// an opaque rectangle when no mask is available. Either way every subject layer's
+// RGB comes straight from the source, so layers drop back onto a source-sized
+// canvas in perfect register (no AI repaint → no misalignment, no missing edges,
+// no halos). The original image itself is the locked background base. The split is
+// synchronous: detect → cut → persist, with no generation task to await.
 type Service struct {
 	det      detector
-	gen      generator
+	persist  persister
 	store    *store.Store
 	lossless bool
-	// awaitTimeout bounds how long Split waits for the spawned tasks. Tests shrink it.
-	awaitTimeout time.Duration
-	poll         time.Duration
 }
 
 // NewService constructs a layering service.
-func NewService(det detector, gen generator, st *store.Store) *Service {
-	return &Service{
-		det:          det,
-		gen:          gen,
-		store:        st,
-		lossless:     true,
-		awaitTimeout: 180 * time.Second,
-		poll:         2 * time.Second,
-	}
+func NewService(det detector, persist persister, st *store.Store) *Service {
+	return &Service{det: det, persist: persist, store: st, lossless: true}
 }
 
 // Configured reports whether a layer split can run (a subject detector is wired).
@@ -64,11 +58,15 @@ const (
 )
 
 // Layer is one produced layer in the split, bottom-first (background, then
-// subjects in detection order). All layers share the source dimensions.
+// subjects in detection order). Box is the layer's normalized position in the
+// source frame: the background spans the whole frame {0,0,1,1}; each subject
+// layer carries the actual (clamped) crop box so the canvas places the cut-out
+// sub-image back at its origin.
 type Layer struct {
-	AssetID string `json:"assetId"`
-	Role    string `json:"role"`
-	Desc    string `json:"desc,omitempty"`
+	AssetID string     `json:"assetId"`
+	Role    string     `json:"role"`
+	Desc    string     `json:"desc,omitempty"`
+	Box     vision.Box `json:"box"`
 }
 
 // Result is the outcome of a split: the locked canvas size plus the ordered layers.
@@ -79,10 +77,18 @@ type Result struct {
 	Layers        []Layer `json:"layers"`
 }
 
-// Split runs the full analyze→split pipeline synchronously and returns the
+// fullFrame is the background layer's box: the entire source frame.
+var fullFrame = vision.Box{X: 0, Y: 0, W: 1, H: 1}
+
+// Split runs the full analyze→crop pipeline synchronously and returns the
 // produced layers. It fails with a clear message when the detector is not
 // configured or no separable foreground subject is found (nothing to layer).
+// The background layer is always the original source image (a fixed, faithful
+// base); subject layers are verbatim crops of the original pixels.
 func (s *Service) Split(ctx context.Context, sessionID, sourceAssetID string) (Result, error) {
+	lg := applog.From(ctx)
+	t0 := time.Now()
+	lg.Info().Str("event", "layer.split.start").Str("session", sessionID).Str("source", sourceAssetID).Msg("图层精修开始")
 	if !s.Configured() {
 		return Result{}, fmt.Errorf("图层分割不可用：未配置主体检测视觉模型")
 	}
@@ -97,111 +103,59 @@ func (s *Service) Split(ctx context.Context, sessionID, sourceAssetID string) (R
 	if err != nil {
 		return Result{}, fmt.Errorf("读取源图: %w", err)
 	}
+	lg.Info().Str("event", "layer.split.source_read").
+		Int("bytes", len(img)).Str("mime", asset.Mime).Int("w", asset.Width).Int("h", asset.Height).
+		Msg("源图已读取")
 
+	// Detection is a synchronous vision-model call and the slow step (tens of
+	// seconds, more when masks are requested). Log a marker right before it so a
+	// "frozen" UI is visibly waiting HERE, not stuck elsewhere.
+	lg.Info().Str("event", "layer.split.detect_begin").Str("model_call", "DetectSubjects").
+		Msg("调用视觉模型检测前景主体（可能耗时数十秒）…")
+	dt := time.Now()
 	subjects, err := s.det.DetectSubjects(ctx, img, asset.Mime)
 	if err != nil {
+		lg.Error().Str("event", "layer.split.detect_failed").Dur("dur", time.Since(dt)).Err(err).Msg("主体检测失败")
 		return Result{}, fmt.Errorf("主体检测失败: %w", err)
 	}
+	lg.Info().Str("event", "layer.split.detect_done").Dur("dur", time.Since(dt)).Int("count", len(subjects)).Msg("主体检测返回")
 	if len(subjects) == 0 {
-		return Result{}, fmt.Errorf("未检测到可独立分层的前景主体")
+		return Result{}, fmt.Errorf("未检测到可分层的前景主体（人物或宣发文案）")
 	}
 
-	descs := make([]string, 0, len(subjects))
-	for _, sub := range subjects {
-		descs = append(descs, sub.Desc)
-	}
+	// Background layer (bottom, locked): the ORIGINAL image itself — a stable,
+	// pixel-faithful base. No inpaint, no AI, no failure mode.
+	layers := []Layer{{AssetID: sourceAssetID, Role: RoleBackground, Box: fullFrame}}
 
-	// Spawn the background inpaint + one cutout per subject, then await all
-	// concurrently. A failed individual layer is dropped (best-effort) so a single
-	// flaky generation doesn't sink the whole split; the background failing is fatal
-	// (there'd be no base to composite onto).
-	type spawn struct {
-		taskID string
-		role   string
-		desc   string
-	}
-	var spawns []spawn
-
-	bgTask, err := s.gen.Start(ctx, generation.GenerateParams{
-		SessionID:     sessionID,
-		SourceAssetID: sourceAssetID,
-		Lossless:      s.lossless,
-		Slots:         generation.Slots{Kind: generation.EditBackgroundFill, BackgroundDesc: strings.Join(descs, ", ")},
-	})
-	if err != nil {
-		return Result{}, fmt.Errorf("启动背景层: %w", err)
-	}
-	spawns = append(spawns, spawn{taskID: bgTask, role: RoleBackground})
-
-	for _, sub := range subjects {
-		tid, err := s.gen.Start(ctx, generation.GenerateParams{
-			SessionID:     sessionID,
-			SourceAssetID: sourceAssetID,
-			Lossless:      s.lossless,
-			Slots:         generation.Slots{Kind: generation.EditExtractLayer, RegionDesc: sub.Desc},
-		})
-		if err != nil {
-			continue // best-effort: skip a subject that failed to start
+	// Subject layers: cut each detected subject out of the source and persist it.
+	// When the detector returned a segmentation mask the subject is cut onto a
+	// TRANSPARENT background (mask as alpha over the verbatim original pixels — a
+	// true 抠图, no repaint); otherwise it falls back to an opaque rectangular crop.
+	// A subject that yields a degenerate crop or fails to persist is skipped
+	// (best-effort) so one bad box doesn't sink the whole split.
+	for i, sub := range subjects {
+		sl := lg.With().Int("idx", i).Str("desc", sub.Desc).Int("mask_bytes", len(sub.Mask)).Logger()
+		data, box, ok, cerr := cropSubject(img, sub.Box, sub.Mask)
+		if cerr != nil || !ok {
+			sl.Warn().Str("event", "layer.split.crop_skip").Bool("ok", ok).Err(cerr).Msg("主体裁切跳过（退化框或解码失败）")
+			continue
 		}
-		spawns = append(spawns, spawn{taskID: tid, role: RoleSubject, desc: sub.Desc})
-	}
-
-	// Await all spawned tasks concurrently.
-	results := make([]Layer, len(spawns))
-	var wg sync.WaitGroup
-	for i, sp := range spawns {
-		wg.Add(1)
-		go func(i int, sp spawn) {
-			defer wg.Done()
-			rec := s.await(ctx, sessionID, sp.taskID)
-			if rec != nil && rec.Status == "done" && rec.AssetID != "" {
-				results[i] = Layer{AssetID: rec.AssetID, Role: sp.role, Desc: sp.desc}
-			}
-		}(i, sp)
-	}
-	wg.Wait()
-
-	// Background layer: if the inpaint failed (transient provider hiccup like
-	// Gemini "empty image data", or a safety block), fall back to the ORIGINAL
-	// source image as the locked base. It is a valid opaque background — the
-	// subjects simply composite over the unmodified original. This keeps a single
-	// flaky background generation from sinking an otherwise-good split. (When the
-	// fill succeeded, results[0] already holds the clean inpainted background.)
-	if results[0].AssetID == "" {
-		results[0] = Layer{AssetID: sourceAssetID, Role: RoleBackground}
-	}
-
-	layers := make([]Layer, 0, len(results))
-	for _, r := range results {
-		if r.AssetID != "" {
-			layers = append(layers, r)
+		sl.Info().Str("event", "layer.split.crop_ok").Bool("has_mask", len(sub.Mask) > 0).Int("png_bytes", len(data)).
+			Float64("box_w", box.W).Float64("box_h", box.H).Msg("主体已裁切")
+		res, perr := s.persist.Persist(sessionID, data, []string{sourceAssetID}, s.lossless)
+		if perr != nil || res.AssetID == "" {
+			sl.Warn().Str("event", "layer.split.persist_skip").Err(perr).Msg("主体层落库失败，跳过")
+			continue
 		}
+		sl.Info().Str("event", "layer.split.persist_ok").Str("asset", res.AssetID).Msg("主体层已落库")
+		layers = append(layers, Layer{AssetID: res.AssetID, Role: RoleSubject, Desc: sub.Desc, Box: box})
 	}
+
 	if len(layers) < 2 {
-		return Result{}, fmt.Errorf("未能成功抠出任何主体图层")
+		lg.Error().Str("event", "layer.split.no_layers").Dur("dur", time.Since(t0)).Msg("未能裁出任何主体图层")
+		return Result{}, fmt.Errorf("未能裁出任何主体图层")
 	}
+	lg.Info().Str("event", "layer.split.done").Dur("dur", time.Since(t0)).
+		Int("layers", len(layers)).Int("subjects", len(layers)-1).Msg("图层精修完成")
 	return Result{SourceAssetID: sourceAssetID, Width: asset.Width, Height: asset.Height, Layers: layers}, nil
-}
-
-// await polls the store for a spawned task until it reaches a terminal state or
-// the timeout elapses. Returns nil on timeout/error so the caller drops the layer.
-func (s *Service) await(ctx context.Context, sessionID, taskID string) *store.TaskRecord {
-	ctx, cancel := context.WithTimeout(ctx, s.awaitTimeout)
-	defer cancel()
-	ticker := time.NewTicker(s.poll)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return nil
-		case <-ticker.C:
-			rec, err := s.store.GetTask(sessionID, taskID)
-			if err != nil || rec == nil {
-				continue
-			}
-			if rec.Status == "done" || rec.Status == "failed" {
-				return rec
-			}
-		}
-	}
 }
