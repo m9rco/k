@@ -10,6 +10,8 @@ import {
   ContextMenuItem,
   ContextMenuSeparator,
 } from "@/components/ui/context-menu";
+import { OverlayPicker } from "./overlay-picker";
+import { VariantsPicker } from "./variants-picker";
 import { cn } from "@/lib/utils";
 
 const KIND_LABEL: Record<string, string> = {
@@ -63,6 +65,10 @@ export function AssetCard({
   const vidRef = React.useRef<HTMLVideoElement>(null);
   const cardRef = React.useRef<HTMLDivElement>(null);
   const [retrying, setRetrying] = React.useState(false);
+  // Quick-action dialogs: text overlay & batch variants. Self-contained here so
+  // every grid/timeline caller gets them for free — no callback threading needed.
+  const [overlayOpen, setOverlayOpen] = React.useState(false);
+  const [variantsOpen, setVariantsOpen] = React.useState(false);
 
   const openMenu = (e: React.MouseEvent) => {
     e.stopPropagation();
@@ -88,6 +94,7 @@ export function AssetCard({
   const hasRefs = (asset.referenceIds?.length ?? 0) >= 2;
 
   return (
+    <>
     <ContextMenu>
       <ContextMenuTrigger asChild>
         <motion.div
@@ -183,6 +190,9 @@ export function AssetCard({
         {!isVideo && <ContextMenuItem onSelect={() => onCrop(asset)}>适配尺寸</ContextMenuItem>}
         {!isVideo && <ContextMenuItem onSelect={() => onPreview(asset)}>二次调整</ContextMenuItem>}
         {!isVideo && <ContextMenuItem onSelect={() => onVideo(asset)}>生成视频</ContextMenuItem>}
+        {!isVideo && <ContextMenuSeparator />}
+        {!isVideo && <ContextMenuItem onSelect={() => setOverlayOpen(true)}>文字叠加</ContextMenuItem>}
+        {!isVideo && <ContextMenuItem onSelect={() => setVariantsOpen(true)}>批量变体</ContextMenuItem>}
         {asset.retryable && (
           <ContextMenuItem disabled={retrying} onSelect={handleRetry}>
             {retrying ? "重试中…" : "重试生成"}
@@ -193,6 +203,9 @@ export function AssetCard({
         <ContextMenuItem destructive onSelect={() => app.removeAsset(asset.id)}>移除</ContextMenuItem>
       </ContextMenuContent>
     </ContextMenu>
+    {!isVideo && <OverlayPicker asset={overlayOpen ? asset : null} onOpenChange={(o) => !o && setOverlayOpen(false)} />}
+    {!isVideo && <VariantsPicker asset={variantsOpen ? asset : null} onOpenChange={(o) => !o && setVariantsOpen(false)} />}
+    </>
   );
 }
 

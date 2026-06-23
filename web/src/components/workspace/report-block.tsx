@@ -25,7 +25,10 @@ export function ReportBlock({
   onSave?: (report: string) => Promise<void> | void;
   onReanalyze?: () => Promise<void> | void;
 }) {
-  const [collapsed, setCollapsed] = React.useState(false);
+  // Default collapsed: the marketing analysis lives in the reference panel as an
+  // opt-in detail, not something that expands on its own each time the selection
+  // changes. The user opens it by clicking the header.
+  const [collapsed, setCollapsed] = React.useState(true);
   const [editing, setEditing] = React.useState(false);
   const [draft, setDraft] = React.useState(text);
   const [saving, setSaving] = React.useState(false);

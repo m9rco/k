@@ -95,12 +95,29 @@ function NodeBody({
 }) {
   if (node.state === "done") {
     // Crop nodes keep all products in a single scrollable row so a batch of
-    // platform sizes doesn't push subsequent timeline entries far down.
+    // platform sizes doesn't push subsequent timeline entries far down. Each card
+    // gets a fixed width (the AssetCard is only aspect-square — without a width
+    // basis a flex row lets it blow up to the image's intrinsic size).
     const isCrop = node.kind === "crop";
+    if (isCrop) {
+      return (
+        <div className="flex gap-2 overflow-x-auto pb-1">
+          {node.assets.map((a) => (
+            <div key={a.id} className="w-[120px] shrink-0">
+              <AssetCard
+                asset={a}
+                label={labels.get(a.id)}
+                onPreview={onPreview}
+                onCrop={onCrop}
+                onVideo={onVideo}
+              />
+            </div>
+          ))}
+        </div>
+      );
+    }
     return (
-      <div className={isCrop
-        ? "flex gap-2 overflow-x-auto pb-1"
-        : "grid grid-cols-[repeat(auto-fill,minmax(120px,1fr))] gap-2"}>
+      <div className="grid grid-cols-[repeat(auto-fill,minmax(120px,1fr))] gap-2">
         {node.assets.map((a) => (
           <AssetCard
             key={a.id}

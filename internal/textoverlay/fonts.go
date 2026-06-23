@@ -22,12 +22,24 @@ type faceSet struct {
 	faces map[int]font.Face
 }
 
+// newFaceSet parses a single-font (.ttf/.otf) or font-collection (.ttc) byte
+// blob. Collections (common for system CJK fonts like PingFang.ttc) are not
+// handled by opentype.Parse, so we fall back to ParseCollection and take the
+// first face — enough for coverage + rendering of one weight.
 func newFaceSet(data []byte) (*faceSet, error) {
 	f, err := opentype.Parse(data)
-	if err != nil {
+	if err == nil {
+		return &faceSet{font: f, faces: make(map[int]font.Face)}, nil
+	}
+	coll, cerr := opentype.ParseCollection(data)
+	if cerr != nil {
 		return nil, fmt.Errorf("parse font: %w", err)
 	}
-	return &faceSet{font: f, faces: make(map[int]font.Face)}, nil
+	cf, ferr := coll.Font(0)
+	if ferr != nil {
+		return nil, fmt.Errorf("parse font collection: %w", ferr)
+	}
+	return &faceSet{font: cf, faces: make(map[int]font.Face)}, nil
 }
 
 // face returns (creating + caching) a font.Face at the given pixel em size.
@@ -62,12 +74,14 @@ func (fs *faceSet) covers(r rune) bool {
 	return err == nil && idx != 0
 }
 
-// LoadFonts resolves the primary + fallback font faces. The primary font is a
-// CJK-capable TTF/OTF loaded from (in priority) the OVERLAY_FONT env path, else
-// the given vendored path when it exists; the fallback is the always-embedded Go
-// Bold face (ASCII + Latin coverage, redistributable). When no primary font is
-// available the primary is nil and only ASCII/Latin text can be rendered — a CJK
-// overlay then fails validation rather than producing tofu.
+// LoadFonts resolves the primary + fallback font faces. The primary font is the
+// CJK-capable file vendored in the repo (configs/fonts/…), resolved from the
+// OVERLAY_FONT env override first, else the given vendored path. The fallback is
+// the always-embedded Go Bold face (ASCII + Latin coverage, redistributable).
+// We deliberately do NOT probe host/system fonts — the vendored file is the
+// single source of truth so behaviour is identical across every machine. When
+// the vendored font can't be loaded the primary is nil and only ASCII/Latin text
+// renders — a CJK overlay then fails validation rather than producing tofu.
 func LoadFonts(vendoredPath string) (*Fonts, error) {
 	fallback, err := newFaceSet(gobold.TTF)
 	if err != nil {
@@ -75,16 +89,27 @@ func LoadFonts(vendoredPath string) (*Fonts, error) {
 	}
 	fonts := &Fonts{fallback: fallback}
 
-	path := os.Getenv("OVERLAY_FONT")
-	if path == "" {
-		path = vendoredPath
+	// First explicit candidate that parses wins: env override, then the vendored
+	// repo path. No system-font fallback by design.
+	candidates := make([]string, 0, 2)
+	if p := os.Getenv("OVERLAY_FONT"); p != "" {
+		candidates = append(candidates, p)
 	}
-	if path != "" {
-		if data, err := os.ReadFile(path); err == nil {
-			if primary, perr := newFaceSet(data); perr == nil {
-				fonts.primary = primary
-			}
+	if vendoredPath != "" {
+		candidates = append(candidates, vendoredPath)
+	}
+
+	for _, path := range candidates {
+		data, rerr := os.ReadFile(path)
+		if rerr != nil {
+			continue
 		}
+		primary, perr := newFaceSet(data)
+		if perr != nil {
+			continue
+		}
+		fonts.primary = primary
+		break
 	}
 	return fonts, nil
 }

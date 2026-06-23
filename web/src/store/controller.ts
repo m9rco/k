@@ -15,6 +15,35 @@ export const MAX_SELECTED = 6;
 // the user's pick. Restored on boot, filtered to assets that still exist.
 const SELECTED_KEY = "gas.selected";
 
+// ADAPT_PANELS_KEY persists the in-flight "适配流程" pipeline panels across reloads.
+// These chat items are inserted only on the live tool_result event, so a refresh
+// mid-adaptation would otherwise drop the panel while the tasks keep running. We
+// stash {id, taskIds} per session and rebuild the panel on boot, keeping only
+// panels that still have an unfinished (queued/running) task.
+const ADAPT_PANELS_KEY = "gas.adaptPanels";
+const adaptPanelsKey = (sid: string) => `${ADAPT_PANELS_KEY}:${sid}`;
+
+type StashedAdaptPanel = { id: string; taskIds: string[] };
+
+function loadAdaptPanels(sid: string): StashedAdaptPanel[] {
+  try {
+    const raw = sessionStorage.getItem(adaptPanelsKey(sid));
+    const arr = raw ? JSON.parse(raw) : [];
+    return Array.isArray(arr) ? arr : [];
+  } catch {
+    return [];
+  }
+}
+
+function saveAdaptPanels(sid: string, panels: StashedAdaptPanel[]) {
+  try {
+    if (panels.length) sessionStorage.setItem(adaptPanelsKey(sid), JSON.stringify(panels));
+    else sessionStorage.removeItem(adaptPanelsKey(sid));
+  } catch {
+    /* ignore quota/serialization errors */
+  }
+}
+
 // orderedAssetIds returns the session's asset ids in timeline order (by real
 // creation time, earliest first). Sent as `assetOrder` so the backend builds the
 // "图N/视频N → id" map the agent uses to resolve user references. Timeline order
@@ -159,8 +188,10 @@ export function useAppController() {
         return { ...s, assets: merged_assets, tasks: merged };
       });
       subscribeRunningTasks(sid, tasks);
+      return tasks;
     } catch (e) {
       toast("工作区加载失败：" + (e as Error).message);
+      return [];
     }
   }, [toast]); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -669,8 +700,13 @@ export function useAppController() {
     // Insert an adapt pipeline timeline after the tool card for adapt_to_platform.
     if (ok && name === "adapt_to_platform") {
       const ids = [...pendingAdaptRef.current];
-      if (ids.length > 0)
-        setChat((c) => [...c, { kind: "adapt_pipeline" as const, id: uid("ap"), taskIds: ids }]);
+      if (ids.length > 0) {
+        const panelId = uid("ap");
+        setChat((c) => [...c, { kind: "adapt_pipeline" as const, id: panelId, taskIds: ids }]);
+        // Stash so a refresh mid-adaptation can rebuild this panel (Bug: panel
+        // vanished on reload while its tasks kept running).
+        saveAdaptPanels(sid, [...loadAdaptPanels(sid), { id: panelId, taskIds: ids }]);
+      }
     }
     // generate_copy is synchronous: its structured copy rides in the tool_result
     // data. Render it as a dedicated copy card so the user gets a grouped,
@@ -998,7 +1034,31 @@ export function useAppController() {
         if (!alive) return;
         setState((s) => ({ ...s, sessionId: sid }));
         connectWS(sid);
-        await refreshWorkspace(sid);
+        const bootTasks = await refreshWorkspace(sid);
+        // Rebuild any in-flight "适配流程" panels stashed before the reload. Keep
+        // only panels whose tasks still exist and have at least one unfinished
+        // (queued/running) task; rewrite the stash to the surviving set so done
+        // batches don't accumulate. Use the freshly-fetched bootTasks (not stateRef,
+        // which may not have re-rendered yet after refreshWorkspace's setState).
+        if (alive) {
+          const byId = new Map(bootTasks.map((t) => [t.id, t] as const));
+          const survivors: StashedAdaptPanel[] = [];
+          for (const p of loadAdaptPanels(sid)) {
+            const live = p.taskIds.filter((id) => byId.has(id));
+            const unfinished = live.some((id) => {
+              const t = byId.get(id);
+              return t && t.status !== "done" && t.status !== "failed";
+            });
+            if (live.length && unfinished) survivors.push({ id: p.id, taskIds: live });
+          }
+          saveAdaptPanels(sid, survivors);
+          if (survivors.length) {
+            setChat((c) => [
+              ...c,
+              ...survivors.map((p) => ({ kind: "adapt_pipeline" as const, id: p.id, taskIds: p.taskIds })),
+            ]);
+          }
+        }
         // Restore the reference selection persisted before the reload, filtered to
         // assets that still exist (a deleted/cleared asset must not resurrect). The
         // chat "已选 N 张" count is purely client-side, so without this a refresh
@@ -1199,6 +1259,7 @@ export function useAppController() {
       // now-deleted assets on its own — leaving state.assets non-empty and
       // trapping the Shell out of its empty/home state. Reset here first.
       setState((s) => ({ ...s, selected: new Set(), chat: [], assets: new Map(), tasks: new Map() }));
+      saveAdaptPanels(sid, []); // tasks are gone — drop any stashed adapt panels
       typer.current = { id: "", target: "", shown: 0, done: false };
       reasoner.current = { id: "", target: "", shown: 0 };
       await refreshWorkspace(sid);

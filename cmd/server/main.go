@@ -17,7 +17,6 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
@@ -282,11 +281,17 @@ func run() error {
 		log.Printf("copywriting: chat credential absent, generate_copy disabled")
 	}
 	// Text overlay (overlay_text): deterministic font-rendered CTA/badge/headline
-	// compositing. Always enabled (the Go Bold fallback font is embedded); a
-	// CJK-capable primary font is loaded from $OVERLAY_FONT or the vendored
-	// data/fonts/overlay-cjk.ttf when present, enabling Chinese text. Without it,
-	// CJK overlays fail loudly (no tofu) while Latin/ASCII overlays still work.
-	overlayFonts, ferr := textoverlay.LoadFonts(filepath.Join(cfg.AssetDir, "..", "fonts", "overlay-cjk.ttf"))
+	// compositing. Always enabled (the Go Bold fallback font is embedded); the
+	// CJK-capable primary font is the OFL Noto Sans SC vendored in the repo at
+	// configs/fonts/ (overridable via $OVERLAY_FONT), enabling Chinese text. No
+	// system-font probing — the vendored file is the single source of truth so
+	// behaviour is identical on every machine. Without it, CJK overlays fail
+	// loudly (no tofu) while Latin/ASCII overlays still work.
+	overlayFontPath := os.Getenv("OVERLAY_FONT_PATH")
+	if overlayFontPath == "" {
+		overlayFontPath = "configs/fonts/NotoSansSC-Regular.otf"
+	}
+	overlayFonts, ferr := textoverlay.LoadFonts(overlayFontPath)
 	if ferr != nil {
 		log.Printf("text-overlay: font load failed, overlay_text disabled: %v", ferr)
 	} else {

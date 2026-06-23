@@ -1,5 +1,5 @@
 import * as React from "react";
-import { Download, Eye, RefreshCw, AlertTriangle, Sparkles } from "lucide-react";
+import { Download, Eye, RefreshCw, AlertTriangle, Sparkles, X } from "lucide-react";
 import type { Asset, Channel, SizePreset, Task } from "@/lib/types";
 import { useApp } from "@/store/context";
 import { Button } from "@/components/ui/button";
@@ -82,7 +82,21 @@ export function StampAlbum({ onPreview }: { onPreview: (a: Asset) => void }) {
     });
   }, [uploads, state.assets]);
 
-  // sizeId → newest filled asset
+  // sizeId → {width,height} over the whole catalog, so we can tell when an
+  // uploaded image already IS a platform size pixel-for-pixel.
+  const sizeDims = React.useMemo(() => {
+    const map = new Map<string, { w: number; h: number }>();
+    for (const ch of channels)
+      for (const at of ch.assetTypes)
+        for (const s of at.sizes)
+          if (s.producible) map.set(s.id, { w: s.width, h: s.height });
+    return map;
+  }, [channels]);
+
+  // sizeId → newest filled asset. An adapt product (carries sizeId) fills its
+  // slot directly. As a fallback, an UPLOADED image whose pixel dimensions match
+  // a slot exactly fills that slot too — no AI adaptation, no loading: the source
+  // already is that platform size, so it's done the moment it's uploaded.
   const filledBySize = React.useMemo(() => {
     const map = new Map<string, Asset>();
     for (const a of assets) {
@@ -91,8 +105,16 @@ export function StampAlbum({ onPreview }: { onPreview: (a: Asset) => void }) {
       if (!ex || Date.parse(a.createdAt ?? "0") > Date.parse(ex.createdAt ?? "0"))
         map.set(a.sizeId, a);
     }
+    // Exact-size uploads backfill any slot an adapt product hasn't already filled.
+    for (const a of assets) {
+      if (a.kind !== "upload" || !a.width || !a.height) continue;
+      for (const [sid, dim] of sizeDims) {
+        if (map.has(sid)) continue; // adapt product wins
+        if (a.width === dim.w && a.height === dim.h) map.set(sid, a);
+      }
+    }
     return map;
-  }, [assets]);
+  }, [assets, sizeDims]);
 
   // sizeId → its adapt task, split by lifecycle. A task carries sizeId from the
   // task_queued event (Start/Retry); the album maps it back to the slot since it
@@ -270,26 +292,39 @@ export function StampAlbum({ onPreview }: { onPreview: (a: Asset) => void }) {
               const selected = refIds.includes(a.id);
               const disabled = !selected && refIds.length >= MAX_REFS;
               return (
-                <button
-                  key={a.id}
-                  type="button"
-                  disabled={disabled}
-                  onClick={() => toggleRef(a.id)}
-                  className={cn(
-                    "relative size-16 shrink-0 overflow-hidden rounded-md border-2 transition-all duration-150",
-                    selected
-                      ? "border-accent shadow-[0_0_0_2px] shadow-accent/30"
-                      : "border-transparent opacity-60 hover:opacity-90",
-                    disabled && "cursor-not-allowed opacity-30",
-                  )}
-                >
-                  <img src={a.url} alt="" className="h-full w-full object-cover" />
-                  {selected && (
-                    <span className="absolute bottom-0.5 right-0.5 flex h-4 w-4 items-center justify-center rounded-full bg-accent text-[9px] font-bold text-white">
-                      {refIds.indexOf(a.id) + 1}
-                    </span>
-                  )}
-                </button>
+                <div key={a.id} className="group/ref relative size-16 shrink-0">
+                  <button
+                    type="button"
+                    disabled={disabled}
+                    onClick={() => toggleRef(a.id)}
+                    className={cn(
+                      "relative size-16 overflow-hidden rounded-md border-2 transition-all duration-150",
+                      selected
+                        ? "border-accent shadow-[0_0_0_2px] shadow-accent/30"
+                        : "border-transparent opacity-60 hover:opacity-90",
+                      disabled && "cursor-not-allowed opacity-30",
+                    )}
+                  >
+                    <img src={a.url} alt="" className="h-full w-full object-cover" />
+                    {selected && (
+                      <span className="absolute bottom-0.5 right-0.5 flex h-4 w-4 items-center justify-center rounded-full bg-accent text-[9px] font-bold text-white">
+                        {refIds.indexOf(a.id) + 1}
+                      </span>
+                    )}
+                  </button>
+                  {/* Remove this upload from the workspace entirely (also drops it
+                      from the reference selection). Hover-revealed so the row stays clean. */}
+                  <span
+                    role="button"
+                    tabIndex={0}
+                    title="移除该参考图"
+                    onClick={(e) => { e.stopPropagation(); app.removeAsset(a.id); }}
+                    onKeyDown={(e) => { if (e.key === "Enter") { e.stopPropagation(); app.removeAsset(a.id); } }}
+                    className="absolute -right-1 -top-1 flex size-4 cursor-pointer items-center justify-center rounded-full bg-bg-elev-2 text-fg-mute opacity-0 shadow-sm ring-1 ring-line transition-all duration-150 ease-out hover:bg-danger hover:text-white group-hover/ref:opacity-100"
+                  >
+                    <X className="size-2.5" />
+                  </span>
+                </div>
               );
             })}
           </div>
@@ -356,8 +391,8 @@ export function StampAlbum({ onPreview }: { onPreview: (a: Asset) => void }) {
                       key={sz.id}
                       size={sz}
                       asset={filledBySize.get(sz.id)}
-                      generating={pending.has(sz.id) || activeBySize.has(sz.id)}
-                      failed={failedBySize.has(sz.id)}
+                      generating={!filledBySize.has(sz.id) && (pending.has(sz.id) || activeBySize.has(sz.id))}
+                      failed={!filledBySize.has(sz.id) && failedBySize.has(sz.id)}
                       failReason={failedBySize.get(sz.id)?.error}
                       hasRefs={hasRefs}
                       onPreview={onPreview}
