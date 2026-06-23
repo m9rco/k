@@ -282,3 +282,107 @@ func clamp01(v float64) float64 {
 	}
 	return v
 }
+
+// subjectsPrompt asks the model to enumerate the distinct FOREGROUND subjects in
+// a marketing image so each can be cut into its own layer for free recompositing.
+// The brand LOGO and the original scenery are deliberately KEPT in the background
+// (they become part of the inpainted base layer), so the separable layers are the
+// characters/people, the core hero subject(s)/key props, and the marketing copy
+// blocks. It returns a strict JSON object; nothing else.
+const subjectsPrompt = `你是图像图层分析器。下面给你一张【宣发素材图】。请列出画面中可以各自独立抠成一层的【前景主体】——只包括：每个角色/人物、画面核心主体或显著道具/物件、宣发文案块（标题/卖点/活动文案）。
+
+【重要】不要把以下内容列为主体（它们要保留在背景层里）：品牌 LOGO、原始背景/场景、天空、地面、氛围、光效、装饰底纹。LOGO 属于背景，不要单独抠出。
+
+坐标系：以图片左上角为原点 (0,0)、右下角为 (1,1)。每个主体给出：
+- desc：对该主体的简短中文描述（10~30字，足以让人/模型唯一指认它，如“画面左侧穿红色铠甲的男性战士”或“顶部金色描边主标题文案”）
+- box：归一化包围盒 {x,y,w,h}，均 ∈ [0,1]
+
+最多列出 8 个，按视觉重要性从高到低排序；没有可独立分层的前景主体时返回空数组。只输出 JSON 对象，不要任何解释、前后缀或 Markdown：
+{"subjects":[{"desc":"...","box":{"x":0.0,"y":0.0,"w":0.0,"h":0.0}}]}`
+
+// Subject is one detected foreground subject: a description (used as the cutout
+// region_desc) and its normalized bounding box.
+type Subject struct {
+	Desc string `json:"desc"`
+	Box  Box    `json:"box"`
+}
+
+// rawSubjectList is the strict JSON the splitter model is asked to emit.
+type rawSubjectList struct {
+	Subjects []struct {
+		Desc string `json:"desc"`
+		Box  struct {
+			X float64 `json:"x"`
+			Y float64 `json:"y"`
+			W float64 `json:"w"`
+			H float64 `json:"h"`
+		} `json:"box"`
+	} `json:"subjects"`
+}
+
+// maxDetectedSubjects bounds how many layers one split produces, capping the
+// number of downstream cutout generations (cost/latency) regardless of model output.
+const maxDetectedSubjects = 8
+
+// DetectSubjects enumerates the distinct foreground subjects in the image so each
+// can be cut into its own layer. Returns an ordered list (most important first),
+// or an empty list when none are clearly separable. Any transport/parse error is
+// returned so the caller can decide whether to proceed with a background-only split.
+func (d *SubjectDetector) DetectSubjects(ctx context.Context, img []byte, mime string) ([]Subject, error) {
+	if d == nil {
+		return nil, fmt.Errorf("subject: detector not configured")
+	}
+	if len(img) == 0 {
+		return nil, fmt.Errorf("subject: no image bytes")
+	}
+	start := time.Now()
+	var content string
+	var err error
+	if d.isGemini {
+		content, err = d.askGemini(ctx, subjectsPrompt, img, mime)
+	} else {
+		content, err = d.askOpenAI(ctx, subjectsPrompt, img, mime)
+	}
+	if err != nil {
+		return nil, err
+	}
+	subs, err := parseSubjects(content)
+	if err != nil {
+		applog.From(ctx).Warn().Str("event", "subjects.parse_failed").
+			Str("model", d.model).Err(err).Str("raw", truncate(content, 400)).
+			Msg("subject list unparseable")
+		return nil, err
+	}
+	applog.From(ctx).Info().Str("event", "subjects.detect").
+		Str("model", d.model).Dur("dur", time.Since(start)).Int("count", len(subs)).
+		Msg("foreground subjects detected")
+	return subs, nil
+}
+
+// parseSubjects extracts the JSON array of subjects, clamps boxes into [0,1],
+// drops entries with an empty description, and caps the count.
+func parseSubjects(content string) ([]Subject, error) {
+	js := extractJSON(content)
+	if js == "" {
+		return nil, fmt.Errorf("subject: no JSON in output")
+	}
+	var rl rawSubjectList
+	if err := json.Unmarshal([]byte(js), &rl); err != nil {
+		return nil, fmt.Errorf("subject: parse list: %w", err)
+	}
+	out := make([]Subject, 0, len(rl.Subjects))
+	for _, r := range rl.Subjects {
+		desc := strings.TrimSpace(r.Desc)
+		if desc == "" {
+			continue
+		}
+		out = append(out, Subject{
+			Desc: desc,
+			Box:  Box{X: clamp01(r.Box.X), Y: clamp01(r.Box.Y), W: clamp01(r.Box.W), H: clamp01(r.Box.H)},
+		})
+		if len(out) >= maxDetectedSubjects {
+			break
+		}
+	}
+	return out, nil
+}

@@ -33,6 +33,19 @@ const (
 	// subject and core marketing intent. Output is converged to the exact target
 	// size after generation (see service.run, same范式 as EditIcon).
 	EditAdaptPlatform EditKind = "adapt_platform"
+	// EditExtractLayer cuts ONE subject out of the source image onto a fully
+	// transparent background, producing a same-size transparent PNG "layer" for
+	// free compositing. It REQUIRES a transparency-capable adapter (Gemini); the
+	// service refuses the intent when none is configured rather than producing a
+	// fake/opaque background (design D1). RegionDesc, when present, names the
+	// subject to extract; empty means the main foreground subject.
+	EditExtractLayer EditKind = "extract_layer"
+	// EditBackgroundFill removes the named foreground subjects and reconstructs a
+	// clean, complete background at the SAME dimensions — the inpainted base layer
+	// of a layer split. Output is opaque (no transparency needed), so it degrades
+	// to the default adapter when no Gemini is configured. BackgroundDesc carries
+	// the comma-joined subject descriptions to remove.
+	EditBackgroundFill EditKind = "fill_background"
 )
 
 // DefaultIconSize is the icon edge length used when the user gives no size.
@@ -332,6 +345,38 @@ func BuildPrompt(slots Slots, palette []PaletteColor) (string, error) {
 			b.WriteString(". ")
 		}
 		b.WriteString("Production-ready, polished result.")
+	case EditExtractLayer:
+		// Cut the named subject (or main foreground subject) out and place it on a
+		// SOLID FLAT CHROMA-KEY background (pure green), NOT a "transparent" one.
+		// Asking an image model for a "transparent PNG" makes it PAINT a literal
+		// checkerboard pattern (transparency as seen in editors) into the image —
+		// that看起来像马赛克 and carries no real alpha. A solid keyable color is
+		// reliably honored; the server then keys it out to real alpha deterministically
+		// (see chromaKeyToAlpha). Output keeps the source dimensions and the subject's
+		// original placement so the layer drops back onto a source-sized canvas.
+		if rd := Sanitize(slots.RegionDesc); rd != "" {
+			b.WriteString("Isolate ONLY this subject from the image — ")
+			b.WriteString(rd)
+			b.WriteString(" — and remove everything else.")
+		} else {
+			b.WriteString("Isolate ONLY the main foreground subject from the image and remove everything else.")
+		}
+		b.WriteString(" Keep the SAME image dimensions and the subject at its original position and size, pixel-faithful (identity, colors, shading and crisp edges).")
+		b.WriteString(" Replace the ENTIRE background and every area outside the subject with a SINGLE SOLID FLAT pure-green fill, exact color #00FF00 (RGB 0,255,0), uniform everywhere with no gradient, texture, pattern, shadow or checkerboard.")
+		b.WriteString(" The subject itself MUST NOT contain any pure #00FF00 green. Do NOT draw a transparency/checkerboard pattern; do NOT add new content, outlines, glow or halos; do NOT alter the subject.")
+	case EditBackgroundFill:
+		// Inpaint base layer for a layer split: remove the foreground subjects and
+		// reconstruct the background so the scene reads as complete with nothing on
+		// it. Same dimensions, opaque output.
+		b.WriteString("Remove the foreground subject(s) from the image")
+		if rd := Sanitize(slots.BackgroundDesc); rd != "" {
+			b.WriteString(" — specifically: ")
+			b.WriteString(rd)
+			b.WriteString(" —")
+		}
+		b.WriteString(" and reconstruct a clean, complete background where they were, seamlessly continuing the surrounding scenery, lighting and perspective so the result looks like a natural empty background.")
+		b.WriteString(" KEEP the brand LOGO and all original scenery/background intact — only the listed foreground subjects are removed.")
+		b.WriteString(" Keep the SAME image dimensions and all genuine background content unchanged. Do NOT leave holes, silhouettes, blur smears or ghosting; do NOT invent new subjects, characters, text or logos.")
 	default:
 		return "", fmt.Errorf("unsupported edit kind %q", slots.Kind)
 	}
@@ -343,9 +388,11 @@ func BuildPrompt(slots Slots, palette []PaletteColor) (string, error) {
 	// Region scoping: when the user selected one region, name its subject and
 	// constrain the edit to it, leaving the rest of the frame untouched. Pure
 	// prompt-layer (no provider mask). Appended to the MODIFY body; a matching
-	// preservation cue is added to AVOID below.
+	// preservation cue is added to AVOID below. Skipped for EditExtractLayer, which
+	// uses RegionDesc to name what to EXTRACT (handled in its case above), not to
+	// scope an in-place edit.
 	regionScoped := false
-	if rd := Sanitize(slots.RegionDesc); rd != "" {
+	if rd := Sanitize(slots.RegionDesc); rd != "" && slots.Kind != EditExtractLayer {
 		regionScoped = true
 		b.WriteString(" Apply this change ONLY to the selected region subject — ")
 		b.WriteString(rd)

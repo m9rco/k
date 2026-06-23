@@ -72,6 +72,14 @@ type Service struct {
 	// SetAdaptImageProvider; nil leaves the persisted (default) routing.
 	adaptImageProvider *config.ImageProviderConfig
 
+	// cutoutImageProvider, when set, is the request-scoped image provider that the
+	// extract_layer (抠图) intent forces — it MUST be a transparency-capable adapter
+	// (Gemini), because gpt-image-2 cannot produce a real alpha background. When nil
+	// and the default adapter also lacks transparency, the intent is refused rather
+	// than producing an opaque image masquerading as a layer. Wired via
+	// SetCutoutImageProvider; held here so RetryAsset re-forces it too.
+	cutoutImageProvider *config.ImageProviderConfig
+
 	// outpainter, when set, is the image provider used for the outpaint
 	// convergence step: extreme-ratio adaptations (e.g. a 2:1 product toward a
 	// 4:1 banner) are padded to the target ratio with transparent margins and
@@ -301,6 +309,32 @@ func qualitySpecLabel(p GenerateParams, adaptW, adaptH int) string {
 // nil leaves the persisted routing (service default).
 func (s *Service) SetAdaptImageProvider(pc *config.ImageProviderConfig) {
 	s.adaptImageProvider = pc
+}
+
+// SetCutoutImageProvider records the transparency-capable provider (Gemini) that
+// the extract_layer (抠图) intent forces, so RetryAsset can re-apply it too.
+// Optional; when nil the intent falls back to the default adapter only if that
+// adapter itself supports transparency, otherwise extract_layer is refused.
+func (s *Service) SetCutoutImageProvider(pc *config.ImageProviderConfig) {
+	s.cutoutImageProvider = pc
+}
+
+// resolveCutoutProvider picks the transparency-capable provider for extract_layer
+// and reports whether one is available. Preference: the explicitly-wired cutout
+// provider, else a per-task override that already supports transparency, else the
+// default adapter when it supports transparency. ok=false means no transparency-
+// capable adapter is configured and the intent must be refused.
+func (s *Service) resolveCutoutProvider(override *config.ImageProviderConfig) (config.ImageProviderConfig, bool) {
+	if s.cutoutImageProvider != nil {
+		return *s.cutoutImageProvider, true
+	}
+	if override != nil && providerSupportsTransparency(*override) {
+		return *override, true
+	}
+	if providerSupportsTransparency(s.defaultImageProvider) {
+		return s.defaultImageProvider, true
+	}
+	return config.ImageProviderConfig{}, false
 }
 
 // providerSupportsTransparency reports whether an image adapter can produce a
@@ -570,6 +604,10 @@ func (s *Service) RetryAsset(ctx context.Context, sessionID, assetID string, ove
 		p.ProviderOverride = override
 	case p.Slots.Kind == EditAdaptPlatform && s.adaptImageProvider != nil:
 		p.ProviderOverride = s.adaptImageProvider
+	case p.Slots.Kind == EditExtractLayer && s.cutoutImageProvider != nil:
+		p.ProviderOverride = s.cutoutImageProvider
+	case p.Slots.Kind == EditBackgroundFill && s.cutoutImageProvider != nil:
+		p.ProviderOverride = s.cutoutImageProvider
 	default:
 		p.ProviderOverride = nil
 	}
@@ -602,6 +640,25 @@ func (s *Service) run(ctx context.Context, taskID string, p GenerateParams) {
 		s.mu.Unlock()
 	}()
 	s.setStatus(taskID, p.SessionID, "running", transport.EventTaskRunning, 10, "", "")
+
+	// extract_layer (抠图) demands a real transparent background, which only a
+	// transparency-capable adapter (Gemini) can produce. Force that provider, or
+	// refuse the intent up front when none is configured — never fall back to an
+	// opaque adapter that would emit a fake background masquerading as a layer.
+	// extract_layer (抠图) places the subject on a solid green key (server keys it
+	// to alpha), so it does NOT hard-require a transparency-capable adapter — any
+	// image model can paint the flat green. Prefer the Gemini cutout provider for
+	// edge/removal fidelity, but degrade to the default adapter rather than refuse.
+	if p.Slots.Kind == EditExtractLayer && p.ProviderOverride == nil && s.cutoutImageProvider != nil {
+		cfg := *s.cutoutImageProvider
+		p.ProviderOverride = &cfg
+	}
+	// fill_background (分层底图) is an opaque edit; prefer the Gemini cutout provider
+	// for removal fidelity, but degrade to the default adapter rather than refuse.
+	if p.Slots.Kind == EditBackgroundFill && p.ProviderOverride == nil && s.cutoutImageProvider != nil {
+		cfg := *s.cutoutImageProvider
+		p.ProviderOverride = &cfg
+	}
 
 	// Resolve the primary reference (drives palette/size/parent) plus extras.
 	primaryID, extraIDs := p.primaryAndExtras()
@@ -898,6 +955,40 @@ func (s *Service) run(ctx context.Context, taskID string, p GenerateParams) {
 					Int("dst_w", adaptW).Int("dst_h", adaptH).
 					Str("mode", string(opts.Mode)).
 					Msg("adapt converged to target size")
+			}
+		}
+	}
+
+	// extract_layer (抠图): the model paints a solid green (#00FF00) background
+	// behind the subject (asking for "transparent" makes it paint a checkerboard
+	// instead). Key that green out to real alpha so the layer is genuinely
+	// transparent on the compositing canvas. Undecodable output is left untouched.
+	if p.Slots.Kind == EditExtractLayer {
+		if norm, m := chromaKeyToAlpha(out.Data); m != "" {
+			out.Data, out.Mime = norm, m
+		}
+	}
+
+	// Layer split products (抠图层 / 补全背景) MUST match the source image's exact
+	// dimensions so every layer stacks 1:1 on the source-sized compositing canvas
+	// (a 900×500 source → 900×500 layers, no scaling/letterbox). Gemini often
+	// returns its own size (e.g. 1024²); converge deterministically to source W×H.
+	// ModeScale keeps the full frame (no crop) and preserves alpha for the keyed
+	// cutout. Skipped when source dims are unknown or already match.
+	if (p.Slots.Kind == EditExtractLayer || p.Slots.Kind == EditBackgroundFill) && srcW > 0 && srcH > 0 {
+		if gw, gh := decodeDimensions(out.Data); gw != srcW || gh != srcH {
+			if conv, err := crop.CropBytesWithOptions(out.Data, srcW, srcH, crop.Options{Mode: crop.ModeScale}); err != nil {
+				applog.From(ctx).Warn().Str("event", "gen.layer_converge_failed").Str("task", taskID).
+					Int("gen_w", gw).Int("gen_h", gh).Int("src_w", srcW).Int("src_h", srcH).Err(err).
+					Msg("layer converge to source size failed; keeping provider output")
+			} else {
+				out.Data = conv.Data
+				if out.Mime == "" {
+					out.Mime = conv.Mime
+				}
+				applog.From(ctx).Info().Str("event", "gen.layer_converge").Str("task", taskID).
+					Str("kind", string(p.Slots.Kind)).Int("src_w", srcW).Int("src_h", srcH).
+					Msg("layer converged to source size")
 			}
 		}
 	}

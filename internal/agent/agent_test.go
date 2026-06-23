@@ -124,11 +124,11 @@ func TestToolsBuildWhitelist(t *testing.T) {
 		t.Fatal(err)
 	}
 	// edit_image, crop_to_sizes, list_platform_sizes, clarify_intent, adapt_to_platform,
-	// generate_variants (gated on Generation, which is present here).
+	// generate_variants, extract_layer (the last two gated on Generation, present here).
 	// generate_icon is currently disabled; video/crawl/copywriting/overlay are gated
 	// behind configured providers (all absent here).
-	if len(tools) != 6 {
-		t.Fatalf("expected 6 whitelist tools, got %d", len(tools))
+	if len(tools) != 7 {
+		t.Fatalf("expected 7 whitelist tools, got %d", len(tools))
 	}
 	names := map[string]bool{}
 	for _, tl := range tools {
@@ -146,6 +146,9 @@ func TestToolsBuildWhitelist(t *testing.T) {
 	}
 	if !names["generate_variants"] {
 		t.Error("generate_variants tool not registered")
+	}
+	if !names["extract_layer"] {
+		t.Error("extract_layer tool not registered")
 	}
 }
 

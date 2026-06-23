@@ -12,6 +12,7 @@ export function Timeline({
   onPreview,
   onCrop,
   onVideo,
+  onLayerSplit,
 }: {
   nodes: TimelineNode[];
   labels: Map<string, string>;
@@ -19,6 +20,7 @@ export function Timeline({
   onPreview: (a: Asset) => void;
   onCrop: (a: Asset) => void;
   onVideo: (a: Asset) => void;
+  onLayerSplit: (a: Asset) => void;
 }) {
   return (
     <div className="relative">
@@ -35,6 +37,7 @@ export function Timeline({
               onPreview={onPreview}
               onCrop={onCrop}
               onVideo={onVideo}
+              onLayerSplit={onLayerSplit}
             />
           ))}
         </AnimatePresence>

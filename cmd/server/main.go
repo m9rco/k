@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"gameasset/internal/agent"
+	"gameasset/internal/composite"
 	"gameasset/internal/config"
 	"gameasset/internal/copywriting"
 	"gameasset/internal/cos"
@@ -30,6 +31,7 @@ import (
 	"gameasset/internal/download"
 	"gameasset/internal/generation"
 	"gameasset/internal/id"
+	"gameasset/internal/layering"
 	applog "gameasset/internal/log"
 	"gameasset/internal/session"
 	"gameasset/internal/store"
@@ -101,6 +103,12 @@ func run() error {
 	cropSvc := crop.NewService(cfg.Channels, cfg.AssetDir, st, func() string { return id.New("crop") })
 	cropSvc.RegisterRoutes(mux)
 
+	// Composite persist endpoint: the free-compositing canvas (拼接画布) flattens
+	// layers in the browser and posts the PNG here to land it in the workspace.
+	// Deterministic storage only — no AI, like crop.
+	compositeSvc := composite.NewService(cfg.AssetDir, st, func() string { return id.New("composite") })
+	compositeSvc.RegisterRoutes(mux)
+
 	// Image generation (primary + backup failover, async via SSE). Each backend's
 	// concrete adapter is selected by its configured Provider key (openai/gemini).
 	gen := generation.NewFailoverGenerator(
@@ -124,6 +132,20 @@ func run() error {
 		genSvc.SetAdaptImageProvider(&pc)
 	} else if pc, ok := cfg.ResolveImageModel(config.SceneImage, "gemini-3-pro-image"); ok {
 		genSvc.SetAdaptImageProvider(&pc)
+	}
+
+	// extract_layer (抠图) needs a transparency-capable adapter (Gemini) to cut a
+	// subject onto a real alpha background; gpt-image-2 cannot. Wire a Gemini image
+	// model as the forced cutout provider. When none is configured the intent is
+	// refused at run time (no opaque fallback that fakes a background).
+	if pc, ok := cfg.ResolveImageModel(config.SceneImage, "gemini-3-pro-image"); ok {
+		genSvc.SetCutoutImageProvider(&pc)
+		log.Printf("cutout(extract_layer): provider=%s model=%s enabled", pc.Provider, pc.Model)
+	} else if pc, ok := cfg.ResolveImageModel(config.SceneImage, "gemini-2.5-flash-image"); ok {
+		genSvc.SetCutoutImageProvider(&pc)
+		log.Printf("cutout(extract_layer): provider=%s model=%s enabled", pc.Provider, pc.Model)
+	} else {
+		log.Printf("cutout(extract_layer): no transparency-capable (Gemini) image model configured, 抠图 disabled")
 	}
 
 	// Outpaint convergence provider for extreme-ratio platform adaptation (e.g. a
@@ -167,6 +189,27 @@ func run() error {
 		log.Printf("subject-locator: %s enabled for extreme-ratio crop anchoring", cfg.Quality.Model)
 	} else {
 		log.Printf("subject-locator: not configured, extreme-ratio crops stay center-anchored")
+	}
+
+	// Layer split (图层精修): right-click a workspace image → detect its foreground
+	// subjects, cut each onto a transparent layer (extract_layer, Gemini) and inpaint
+	// a clean base background (fill_background), then return the layers for the
+	// fixed-size compositing canvas. The subject splitter reuses the marketing-vision
+	// model (cfg.Vision) — a Gemini inline model that already reads these images;
+	// falls back to the quality-gate vision model when Vision lacks credentials.
+	layerDetBase, layerDetKey, layerDetModel := cfg.Vision.BaseURL, cfg.Vision.APIKey, cfg.Vision.Model
+	if vb, vk := cfg.VisionCredential(); strings.TrimSpace(layerDetKey) == "" {
+		layerDetBase, layerDetKey = vb, vk
+	}
+	if strings.TrimSpace(layerDetKey) == "" {
+		layerDetBase, layerDetKey, layerDetModel = cfg.Quality.BaseURL, cfg.Quality.APIKey, cfg.Quality.Model
+	}
+	if layerDet := vision.NewSubjectDetector(layerDetBase, layerDetKey, layerDetModel); layerDet != nil {
+		layeringSvc := layering.NewService(layerDet, genSvc, st)
+		layeringSvc.RegisterRoutes(mux)
+		log.Printf("layer-split: %s enabled (subject detection → cutout layers + inpaint background)", layerDetModel)
+	} else {
+		log.Printf("layer-split: not configured (no vision model), 图层精修 disabled")
 	}
 
 	// Image-to-video service (happyhorse). The provider fetches the source image

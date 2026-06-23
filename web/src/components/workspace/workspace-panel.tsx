@@ -9,6 +9,7 @@ import { Timeline } from "./timeline";
 import { WorkspaceGrid } from "./workspace-grid";
 import { Lightbox } from "./lightbox";
 import { SizePicker } from "./size-picker";
+import { CompositingCanvas } from "./compositing-canvas";
 import { buildTimeline, assetLabels } from "@/lib/timeline";
 import { cn } from "@/lib/utils";
 import * as api from "@/lib/api";
@@ -21,6 +22,7 @@ export function WorkspacePanel() {
   const { state } = app;
   const [preview, setPreview] = React.useState<Asset | null>(null);
   const [cropFor, setCropFor] = React.useState<string[] | null>(null);
+  const [splitFor, setSplitFor] = React.useState<Asset | null>(null);
   // View mode: stamp (集邮册/宣发清单, default), grid (show-all), or timeline
   // (production line). Persisted in sessionStorage so a reload keeps the user's
   // choice; absent any stored value we land on the stamp album.
@@ -146,6 +148,7 @@ export function WorkspacePanel() {
             onPreview={setPreview}
             onCrop={(x) => setCropFor([x.id])}
             onVideo={(x) => { setPreview(x); }}
+            onLayerSplit={setSplitFor}
           />
         ) : (
           <WorkspaceGrid
@@ -154,12 +157,14 @@ export function WorkspacePanel() {
             onPreview={setPreview}
             onCrop={(x) => setCropFor([x.id])}
             onVideo={(x) => { setPreview(x); }}
+            onLayerSplit={setSplitFor}
           />
         )}
       </div>
 
-      <Lightbox asset={preview} onOpenChange={(o) => !o && setPreview(null)} onCrop={(a) => { setPreview(null); setCropFor([a.id]); }} />
+      <Lightbox asset={preview} onOpenChange={(o) => !o && setPreview(null)} onCrop={(a) => { setPreview(null); setCropFor([a.id]); }} onLayerSplit={(a) => { setPreview(null); setSplitFor(a); }} />
       <SizePicker assetIds={cropFor} onOpenChange={(o) => !o && setCropFor(null)} />
+      <CompositingCanvas splitFor={splitFor} onOpenChange={(o) => !o && setSplitFor(null)} />
     </div>
   );
 }

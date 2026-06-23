@@ -125,6 +125,48 @@ export function crop(sid: string, sourceAssetId: string, sizeIds: string[], loss
   });
 }
 
+// LayerSplitResult is the outcome of a 图层精修 split: the locked canvas size
+// (= source image size) plus the ordered layers (background first, then subjects).
+export interface SplitLayer {
+  assetId: string;
+  role: "background" | "subject";
+  desc?: string;
+}
+export interface LayerSplitResult {
+  sourceAssetId: string;
+  width: number;
+  height: number;
+  layers: SplitLayer[];
+}
+
+// layerSplit detects the source image's foreground subjects, cuts each onto a
+// transparent layer (Gemini) and inpaints a clean base background, returning the
+// layers for the fixed-size compositing canvas. Synchronous (drives generation).
+export function layerSplit(sid: string, sourceAssetId: string): Promise<LayerSplitResult> {
+  return api(`/api/session/${sid}/layer-split`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ sourceAssetId }),
+  });
+}
+
+// persistComposite uploads a browser-flattened compositing-canvas PNG and lands
+// it in the workspace as a "composite" asset. sourceAssetIds are the layers that
+// were flattened (for timeline derivation labelling). The raw PNG bytes ARE the
+// request body (streamed, not base64-bloated).
+export function persistComposite(
+  sid: string,
+  blob: Blob,
+  sourceAssetIds: string[],
+): Promise<{ assetId: string; width: number; height: number; mime: string; bytes: number }> {
+  const qs = sourceAssetIds.length ? `?sourceAssetIds=${encodeURIComponent(sourceAssetIds.join(","))}` : "";
+  return api(`/api/session/${sid}/composite${qs}`, {
+    method: "POST",
+    headers: { "Content-Type": blob.type || "image/png" },
+    body: blob,
+  });
+}
+
 export function optimizePrompt(sid: string, text: string) {
   return api<{ optimized: string }>(`/api/session/${sid}/prompt/optimize`, {
     method: "POST",

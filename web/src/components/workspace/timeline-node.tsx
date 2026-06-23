@@ -1,5 +1,5 @@
 import { motion } from "framer-motion";
-import { Upload, Wand2, Crop, Film, Globe, Search, RotateCcw, Trash2, X } from "lucide-react";
+import { Upload, Wand2, Crop, Film, Globe, Search, Layers, RotateCcw, Trash2, X } from "lucide-react";
 import type { Asset } from "@/lib/types";
 import type { TimelineNode } from "@/lib/timeline";
 import { relativeTime } from "@/lib/timeline";
@@ -17,6 +17,7 @@ const KIND_META: Record<TimelineNode["kind"], { label: string; Icon: typeof Wand
   video: { label: "生成视频", Icon: Film },
   crawl: { label: "爬取素材", Icon: Globe },
   search: { label: "搜图", Icon: Search },
+  composite: { label: "拼接", Icon: Layers },
 };
 
 // title prefers the agent's understanding (task.note) when present, else the
@@ -37,6 +38,7 @@ export function TimelineNodeRow({
   onPreview,
   onCrop,
   onVideo,
+  onLayerSplit,
 }: {
   node: TimelineNode;
   labels: Map<string, string>;
@@ -44,6 +46,7 @@ export function TimelineNodeRow({
   onPreview: (a: Asset) => void;
   onCrop: (a: Asset) => void;
   onVideo: (a: Asset) => void;
+  onLayerSplit: (a: Asset) => void;
 }) {
   const { Icon } = KIND_META[node.kind];
   const title = nodeTitle(node);
@@ -75,7 +78,7 @@ export function TimelineNodeRow({
         {rel && <span className="ml-auto shrink-0 text-fg-mute">{rel}</span>}
       </div>
       {/* Body */}
-      <NodeBody node={node} labels={labels} onPreview={onPreview} onCrop={onCrop} onVideo={onVideo} />
+      <NodeBody node={node} labels={labels} onPreview={onPreview} onCrop={onCrop} onVideo={onVideo} onLayerSplit={onLayerSplit} />
     </motion.li>
   );
 }
@@ -86,12 +89,14 @@ function NodeBody({
   onPreview,
   onCrop,
   onVideo,
+  onLayerSplit,
 }: {
   node: TimelineNode;
   labels: Map<string, string>;
   onPreview: (a: Asset) => void;
   onCrop: (a: Asset) => void;
   onVideo: (a: Asset) => void;
+  onLayerSplit: (a: Asset) => void;
 }) {
   if (node.state === "done") {
     // Crop nodes keep all products in a single scrollable row so a batch of
@@ -110,6 +115,7 @@ function NodeBody({
                 onPreview={onPreview}
                 onCrop={onCrop}
                 onVideo={onVideo}
+                onLayerSplit={onLayerSplit}
               />
             </div>
           ))}
@@ -126,6 +132,7 @@ function NodeBody({
             onPreview={onPreview}
             onCrop={onCrop}
             onVideo={onVideo}
+            onLayerSplit={onLayerSplit}
           />
         ))}
       </div>
@@ -135,7 +142,7 @@ function NodeBody({
   // shimmer placeholder per still-pending slot (占位数 = 请求张数).
   if (node.kind === "search" && node.state === "running") {
     return (
-      <SearchBatchBody node={node} labels={labels} onPreview={onPreview} onCrop={onCrop} onVideo={onVideo} />
+      <SearchBatchBody node={node} labels={labels} onPreview={onPreview} onCrop={onCrop} onVideo={onVideo} onLayerSplit={onLayerSplit} />
     );
   }
   // Active or failed task node.
@@ -148,12 +155,14 @@ function SearchBatchBody({
   onPreview,
   onCrop,
   onVideo,
+  onLayerSplit,
 }: {
   node: TimelineNode;
   labels: Map<string, string>;
   onPreview: (a: Asset) => void;
   onCrop: (a: Asset) => void;
   onVideo: (a: Asset) => void;
+  onLayerSplit: (a: Asset) => void;
 }) {
   const app = useApp();
   const arrived = node.assets.length;
@@ -172,6 +181,7 @@ function SearchBatchBody({
             onPreview={onPreview}
             onCrop={onCrop}
             onVideo={onVideo}
+            onLayerSplit={onLayerSplit}
           />
         ))}
         {Array.from({ length: pending }).map((_, i) => (

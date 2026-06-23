@@ -74,3 +74,42 @@ func TestNewSubjectDetectorNilWhenUnconfigured(t *testing.T) {
 		t.Error("configured detector should be non-nil and Configured()")
 	}
 }
+
+func TestParseSubjects(t *testing.T) {
+	t.Run("clean list with fence and prose", func(t *testing.T) {
+		content := "这是结果：\n```json\n{\"subjects\":[{\"desc\":\"左侧红甲战士\",\"box\":{\"x\":0.1,\"y\":0.2,\"w\":0.3,\"h\":0.5}},{\"desc\":\"右上角LOGO\",\"box\":{\"x\":0.8,\"y\":0.05,\"w\":0.15,\"h\":0.1}}]}\n```"
+		subs, err := parseSubjects(content)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(subs) != 2 {
+			t.Fatalf("want 2 subjects, got %d", len(subs))
+		}
+		if subs[0].Desc != "左侧红甲战士" || subs[0].Box.W != 0.3 {
+			t.Errorf("unexpected first subject %+v", subs[0])
+		}
+	})
+	t.Run("empty list", func(t *testing.T) {
+		subs, err := parseSubjects(`{"subjects":[]}`)
+		if err != nil || len(subs) != 0 {
+			t.Fatalf("want empty, got %v err=%v", subs, err)
+		}
+	})
+	t.Run("drops empty desc and clamps box", func(t *testing.T) {
+		subs, err := parseSubjects(`{"subjects":[{"desc":"","box":{"x":0,"y":0,"w":1,"h":1}},{"desc":"主体","box":{"x":-0.5,"y":2,"w":0.4,"h":0.4}}]}`)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(subs) != 1 {
+			t.Fatalf("want 1 (empty desc dropped), got %d", len(subs))
+		}
+		if subs[0].Box.X != 0 || subs[0].Box.Y != 1 {
+			t.Errorf("box not clamped: %+v", subs[0].Box)
+		}
+	})
+	t.Run("no json", func(t *testing.T) {
+		if _, err := parseSubjects("no json here"); err == nil {
+			t.Error("expected error")
+		}
+	})
+}

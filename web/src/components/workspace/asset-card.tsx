@@ -52,12 +52,14 @@ export function AssetCard({
   onPreview,
   onCrop,
   onVideo,
+  onLayerSplit,
 }: {
   asset: Asset;
   label?: string;
   onPreview: (a: Asset) => void;
   onCrop: (a: Asset) => void;
   onVideo: (a: Asset) => void;
+  onLayerSplit: (a: Asset) => void;
 }) {
   const app = useApp();
   const selected = app.state.selected.has(asset.id);
@@ -191,6 +193,7 @@ export function AssetCard({
         {!isVideo && <ContextMenuItem onSelect={() => onPreview(asset)}>二次调整</ContextMenuItem>}
         {!isVideo && <ContextMenuItem onSelect={() => onVideo(asset)}>生成视频</ContextMenuItem>}
         {!isVideo && <ContextMenuSeparator />}
+        {!isVideo && <ContextMenuItem onSelect={() => onLayerSplit(asset)}>图层精修</ContextMenuItem>}
         {!isVideo && <ContextMenuItem onSelect={() => setOverlayOpen(true)}>文字叠加</ContextMenuItem>}
         {!isVideo && <ContextMenuItem onSelect={() => setVariantsOpen(true)}>批量变体</ContextMenuItem>}
         {asset.retryable && (

@@ -1,5 +1,5 @@
 import * as React from "react";
-import { Download, Crop, Sparkles, X } from "lucide-react";
+import { Download, Crop, Sparkles, Layers, X } from "lucide-react";
 import type { Asset } from "@/lib/types";
 import { useApp } from "@/store/context";
 import { MAX_SELECTED } from "@/store/controller";
@@ -15,10 +15,12 @@ export function Lightbox({
   asset,
   onOpenChange,
   onCrop,
+  onLayerSplit,
 }: {
   asset: Asset | null;
   onOpenChange: (open: boolean) => void;
   onCrop: (a: Asset) => void;
+  onLayerSplit: (a: Asset) => void;
 }) {
   const app = useApp();
   const [adjust, setAdjust] = React.useState("");
@@ -81,6 +83,9 @@ export function Lightbox({
     }
   };
 
+  // extractLayer is superseded by 图层精修 (layer-split), driven from the parent
+  // via onLayerSplit so the canvas runs the analyze→split flow for this image.
+
   const genVideo = () => {
     const m = motion.trim();
     if (!m) {
@@ -131,6 +136,11 @@ export function Lightbox({
               >
                 {selecting ? <X className="size-3.5" /> : <Sparkles className="size-3.5" />}
                 {selecting ? "退出选区" : "圈定图层"}
+              </Button>
+            )}
+            {!isVideo && (
+              <Button variant="outline" size="sm" onClick={() => onLayerSplit(asset)}>
+                <Layers className="size-3.5" /> 图层精修
               </Button>
             )}
             <Button variant="outline" size="sm" onClick={download}>

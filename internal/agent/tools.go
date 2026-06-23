@@ -428,6 +428,63 @@ func (d ToolDeps) newIconTool() (tool.InvokableTool, error) {
 	)
 }
 
+// --- extract_layer (抠图) ----------------------------------------------------
+
+type extractLayerArgs struct {
+	// SourceAssetID is the image to cut a subject out of. Required.
+	SourceAssetID string `json:"source_asset_id" jsonschema:"description=ID of the workspace image to cut a subject out of (从这张图抠出图层)。"`
+	// RegionDesc names the subject to extract (from a lightbox selection). Optional;
+	// empty extracts the main foreground subject.
+	RegionDesc string `json:"region_desc,omitempty" jsonschema:"description=Optional. Description of the subject to cut out (e.g. '画面左侧的红甲战士'). Leave empty to extract the main foreground subject."`
+	// AwaitResult blocks until done and returns asset_id for chaining.
+	AwaitResult bool `json:"await_result,omitempty" jsonschema:"description=Set true to wait for completion and get the produced transparent layer asset_id."`
+}
+
+func (d ToolDeps) newExtractLayerTool() (tool.InvokableTool, error) {
+	return utils.InferTool(
+		"extract_layer",
+		"抠图/抠出图层/扣图：把图片里的某个主体单独抠出来，置于透明背景，得到可自由拼接的透明图层。"+
+			"触发词：抠图/抠出/扣出/抠图层/把XX抠出来/透明底/去背景留主体。"+
+			"This calls a transparency-capable image model (Gemini) to cut the subject onto a real transparent "+
+			"background at the source image size; the layer lands in the workspace. Returns a task id; progress "+
+			"streams over SSE. Refused when no transparency-capable provider is configured.",
+		func(ctx context.Context, a extractLayerArgs) (editResult, error) {
+			if a.SourceAssetID == "" {
+				return editResult{}, fmt.Errorf("extract_layer requires source_asset_id")
+			}
+			if !d.dedup.firstSeen("extract_layer|" + argSig(a)) {
+				applog.From(ctx).Warn().Str("event", "tool.duplicate_suppressed").Str("tool", "extract_layer").Str("source", a.SourceAssetID).Msg("duplicate same-turn call suppressed")
+				return editResult{Status: statusDuplicate}, nil
+			}
+			taskID, err := d.Generation.Start(ctx, generation.GenerateParams{
+				SessionID:        d.SessionID,
+				SourceAssetID:    a.SourceAssetID,
+				Lossless:         d.Lossless,
+				ProviderOverride: d.ImageOverride,
+				Slots: generation.Slots{
+					Kind:       generation.EditExtractLayer,
+					RegionDesc: a.RegionDesc,
+				},
+			})
+			if err != nil {
+				return editResult{}, err
+			}
+			if a.AwaitResult && d.Store != nil {
+				rec, err := d.awaitTask(ctx, taskID)
+				if err != nil {
+					return editResult{}, fmt.Errorf("await extract_layer: %w", err)
+				}
+				if rec.Status == "failed" {
+					return editResult{}, fmt.Errorf("extract_layer failed: %s", rec.Error)
+				}
+				return editResult{TaskID: taskID, Status: "done", AssetID: rec.AssetID}, nil
+			}
+			return editResult{TaskID: taskID, Status: "queued"}, nil
+		},
+		utils.WithMarshalOutput(asyncMarshal("好的，正在把主体抠成透明图层，完成后会出现在左侧工作区，可拖到拼接画布使用。")),
+	)
+}
+
 // --- generate_image_from_text ----------------------------------------------
 
 type textToImageArgs struct {
@@ -1205,6 +1262,12 @@ func (d ToolDeps) Tools() ([]tool.BaseTool, error) {
 			return nil, fmt.Errorf("variants tool: %w", err)
 		}
 		tools = append(tools, variantsTool)
+		// extract_layer (抠图) also reuses the generation pipeline.
+		extractTool, err := d.newExtractLayerTool()
+		if err != nil {
+			return nil, fmt.Errorf("extract layer tool: %w", err)
+		}
+		tools = append(tools, extractTool)
 	}
 	// crawl_game_assets removed from whitelist (replaced by search_images).
 	return tools, nil
@@ -1222,6 +1285,7 @@ func AsyncTaskTools() map[string]struct{} {
 		"image_to_video":           {},
 		"search_images":            {},
 		"generate_variants":        {},
+		"extract_layer":            {},
 		// clarify_intent ends the turn; result must not feed back to model.
 		"clarify_intent": {},
 	}

@@ -12,7 +12,7 @@ export interface TimelineNode {
   // active end (now) so they stay visible at the top.
   at: number;
   state: "running" | "failed" | "done";
-  kind: "generate" | "video" | "crop" | "crawl" | "upload" | "search";
+  kind: "generate" | "video" | "crop" | "crawl" | "upload" | "search" | "composite";
   // Produced assets (empty while running/failed; crop/crawl may hold several).
   assets: Asset[];
   // The originating task, present while running/failed (progress, retry).
@@ -37,6 +37,7 @@ function kindFromAsset(k: Asset["kind"]): TimelineNode["kind"] {
     case "cropped": return "crop";
     case "crawled": return "crawl";
     case "searched": return "search";
+    case "composite": return "composite";
     default: return "generate";
   }
 }

@@ -1,7 +1,7 @@
 // Shared types mirroring the Go backend's JSON shapes. Kept minimal — only the
 // fields the UI consumes.
 
-export type AssetKind = "upload" | "generated" | "cropped" | "crawled" | "searched" | "video";
+export type AssetKind = "upload" | "generated" | "cropped" | "crawled" | "searched" | "video" | "composite";
 
 export interface Asset {
   id: string;
