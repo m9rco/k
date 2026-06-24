@@ -1,10 +1,11 @@
 import * as React from "react";
-import { Download, Eye, RefreshCw, AlertTriangle, Sparkles, X } from "lucide-react";
+import { Download, Eye, RefreshCw, AlertTriangle, Sparkles, X, Plus } from "lucide-react";
 import type { Asset, Channel, SizePreset, Task } from "@/lib/types";
 import { useApp } from "@/store/context";
 import { Button } from "@/components/ui/button";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { ReportBlock } from "./report-block";
+import { WorkspaceRefPicker } from "./workspace-ref-picker";
 import * as api from "@/lib/api";
 import { cn } from "@/lib/utils";
 
@@ -49,6 +50,8 @@ export function StampAlbum({ onPreview }: { onPreview: (a: Asset) => void }) {
       .slice(0, MAX_REFS),
   );
   const [pending, setPending] = React.useState<Set<string>>(new Set());
+  // Workspace reference picker (从工作区选择参考图) open state.
+  const [pickerOpen, setPickerOpen] = React.useState(false);
 
   // Read-only marketing analysis for the currently selected reference group.
   // Driven by a debounced effect below; empty/error → block stays hidden.
@@ -62,7 +65,7 @@ export function StampAlbum({ onPreview }: { onPreview: (a: Asset) => void }) {
 
   const assets = React.useMemo(() => [...state.assets.values()], [state.assets]);
 
-  // uploads in creation order (the source pool for the reference row)
+  // uploads in creation order (the source pool auto-synced into refIds)
   const uploads = React.useMemo(
     () => assets
       .filter((a) => a.kind === "upload")
@@ -70,7 +73,17 @@ export function StampAlbum({ onPreview }: { onPreview: (a: Asset) => void }) {
     [assets],
   );
 
-  // Auto-add new uploads to refIds (up to MAX_REFS); remove stale ids
+  // The selected reference images, in refIds order, resolved to live assets.
+  // Drives the reference row — now any workspace asset (not just uploads) can be
+  // a reference, so the row renders the selection rather than the upload pool.
+  const refAssets = React.useMemo(
+    () => refIds.map((id) => state.assets.get(id)).filter((a): a is Asset => !!a),
+    [refIds, state.assets],
+  );
+
+  // Keep refIds in sync with the workspace: auto-add NEW uploads (the original
+  // convenience), preserve any manually-picked id (incl. non-upload assets added
+  // via the workspace picker), and drop only ids whose asset no longer exists.
   React.useEffect(() => {
     setRefIds((prev) => {
       const valid = prev.filter((id) => state.assets.has(id));
@@ -268,78 +281,73 @@ export function StampAlbum({ onPreview }: { onPreview: (a: Asset) => void }) {
 
   return (
     <div className="flex h-full min-h-0 flex-col gap-4">
-      {/* 参考图行：上传图一行排开，点击切换选中，最多16张 */}
+      {/* 参考图行：已选参考图（上传自动同步 + 从工作区手动加入），点角标移除，最多16张 */}
       <div className="rounded-lg border border-line bg-bg-elev px-4 py-3">
         <div className="mb-2 flex items-center gap-2">
           <span className="text-xs font-medium text-fg">参考图</span>
-          {uploads.length > 0 && (
-            <span className="text-[11px] text-fg-mute">
-              已选 {refIds.length}/{Math.min(uploads.length, MAX_REFS)}
-            </span>
-          )}
-          {uploads.length > 0 && refIds.length > 0 && (
+          <span className="text-[11px] text-fg-mute">
+            已选 {refIds.length}/{MAX_REFS}
+          </span>
+          {refIds.length > 0 && (
             optimalCovered
               ? <span className="ml-auto rounded-full bg-accent/15 px-2 py-0.5 text-[10px] font-medium text-accent">覆盖最佳 ✓</span>
               : <span className="ml-auto text-[10px] text-fg-mute">建议竖版 / 横版 / 超宽各一张</span>
           )}
         </div>
-        {uploads.length === 0 ? (
-          <p className="text-xs text-fg-mute">请先上传图片作为参考图，再使用集邮册</p>
-        ) : (
-          <>
-          <div className="flex gap-2 overflow-x-auto pb-1">
-            {uploads.map((a) => {
-              const selected = refIds.includes(a.id);
-              const disabled = !selected && refIds.length >= MAX_REFS;
-              return (
-                <div key={a.id} className="group/ref relative size-16 shrink-0">
-                  <button
-                    type="button"
-                    disabled={disabled}
-                    onClick={() => toggleRef(a.id)}
-                    className={cn(
-                      "relative size-16 overflow-hidden rounded-md border-2 transition-all duration-150",
-                      selected
-                        ? "border-accent shadow-[0_0_0_2px] shadow-accent/30"
-                        : "border-transparent opacity-60 hover:opacity-90",
-                      disabled && "cursor-not-allowed opacity-30",
-                    )}
-                  >
-                    <img src={a.url} alt="" className="h-full w-full object-cover" />
-                    {selected && (
-                      <span className="absolute bottom-0.5 right-0.5 flex h-4 w-4 items-center justify-center rounded-full bg-accent text-[9px] font-bold text-white">
-                        {refIds.indexOf(a.id) + 1}
-                      </span>
-                    )}
-                  </button>
-                  {/* Remove this upload from the workspace entirely (also drops it
-                      from the reference selection). Hover-revealed so the row stays clean. */}
-                  <span
-                    role="button"
-                    tabIndex={0}
-                    title="移除该参考图"
-                    onClick={(e) => { e.stopPropagation(); app.removeAsset(a.id); }}
-                    onKeyDown={(e) => { if (e.key === "Enter") { e.stopPropagation(); app.removeAsset(a.id); } }}
-                    className="absolute -right-1 -top-1 flex size-4 cursor-pointer items-center justify-center rounded-full bg-bg-elev-2 text-fg-mute opacity-0 shadow-sm ring-1 ring-line transition-all duration-150 ease-out hover:bg-danger hover:text-white group-hover/ref:opacity-100"
-                  >
-                    <X className="size-2.5" />
+        <div className="flex gap-2 overflow-x-auto pb-1">
+          {refAssets.map((a) => {
+            const isUpload = a.kind === "upload";
+            return (
+              <div key={a.id} className="group/ref relative size-16 shrink-0">
+                <div className="relative size-16 overflow-hidden rounded-md border-2 border-accent shadow-[0_0_0_2px] shadow-accent/30">
+                  <img src={a.url} alt="" className="h-full w-full object-cover" />
+                  <span className="absolute bottom-0.5 right-0.5 flex h-4 w-4 items-center justify-center rounded-full bg-accent text-[9px] font-bold text-white">
+                    {refIds.indexOf(a.id) + 1}
                   </span>
                 </div>
-              );
-            })}
-          </div>
-          {refIds.length > 0 && <RatioFamilyStamps coverage={coverage} />}
-          {/* Read-only marketing analysis of the selected group. Hidden on
-              unavailable/error (reportUnavailable) and when nothing is selected. */}
-          {refIds.length > 0 && !reportUnavailable && (reportLoading || report) && (
-            <ReportBlock
-              title={refIds.length > 1 ? `宣发分析 · 基于 ${refIds.length} 张参考图` : "宣发分析"}
-              text={report}
-              loading={reportLoading}
-              onSave={async (edited) => {
-                if (!sessionId) return;
-                await api.saveVisionReport(sessionId, refIds, edited);
-                setReport(edited); // optimistic local backfill; server now caches it
+                {/* Remove from references. An UPLOAD is deleted from the workspace
+                    entirely (its origin is the album); a workspace-picked asset is
+                    only de-selected here (its original stays in the workspace). */}
+                <span
+                  role="button"
+                  tabIndex={0}
+                  title={isUpload ? "移除该参考图" : "从参考中移除"}
+                  onClick={(e) => { e.stopPropagation(); if (isUpload) app.removeAsset(a.id); else toggleRef(a.id); }}
+                  onKeyDown={(e) => { if (e.key === "Enter") { e.stopPropagation(); if (isUpload) app.removeAsset(a.id); else toggleRef(a.id); } }}
+                  className="absolute -right-1 -top-1 flex size-4 cursor-pointer items-center justify-center rounded-full bg-bg-elev-2 text-fg-mute opacity-0 shadow-sm ring-1 ring-line transition-all duration-150 ease-out hover:bg-danger hover:text-white group-hover/ref:opacity-100"
+                >
+                  <X className="size-2.5" />
+                </span>
+              </div>
+            );
+          })}
+          {/* 从工作区挑选任意静态图作为参考图 */}
+          <button
+            type="button"
+            disabled={refIds.length >= MAX_REFS}
+            onClick={() => setPickerOpen(true)}
+            title={refIds.length >= MAX_REFS ? `最多 ${MAX_REFS} 张` : "从工作区选择参考图"}
+            className="flex size-16 shrink-0 flex-col items-center justify-center gap-1 rounded-md border-2 border-dashed border-line text-fg-mute transition-all duration-200 ease-out hover:border-accent/50 hover:text-accent disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:border-line disabled:hover:text-fg-mute"
+          >
+            <Plus className="size-4" />
+            <span className="text-[9px] leading-none">从工作区选</span>
+          </button>
+        </div>
+        {refIds.length === 0 && (
+          <p className="mt-1 text-xs text-fg-mute">上传图片或从工作区选择参考图，再使用集邮册</p>
+        )}
+        {refIds.length > 0 && <RatioFamilyStamps coverage={coverage} />}
+        {/* Read-only marketing analysis of the selected group. Hidden on
+            unavailable/error (reportUnavailable) and when nothing is selected. */}
+        {refIds.length > 0 && !reportUnavailable && (reportLoading || report) && (
+          <ReportBlock
+            title={refIds.length > 1 ? `宣发分析 · 基于 ${refIds.length} 张参考图` : "宣发分析"}
+            text={report}
+            loading={reportLoading}
+            onSave={async (edited) => {
+              if (!sessionId) return;
+              await api.saveVisionReport(sessionId, refIds, edited);
+              setReport(edited); // optimistic local backfill; server now caches it
               }}
               onReanalyze={async () => {
                 if (!sessionId) return;
@@ -348,8 +356,6 @@ export function StampAlbum({ onPreview }: { onPreview: (a: Asset) => void }) {
               }}
             />
           )}
-          </>
-        )}
       </div>
 
       {/* group 过滤 tab */}
@@ -406,6 +412,14 @@ export function StampAlbum({ onPreview }: { onPreview: (a: Asset) => void }) {
           );
         })}
       </div>
+
+      <WorkspaceRefPicker
+        open={pickerOpen}
+        onOpenChange={setPickerOpen}
+        selectedIds={refIds}
+        maxRefs={MAX_REFS}
+        onConfirm={(ids) => setRefIds(ids)}
+      />
     </div>
   );
 }
