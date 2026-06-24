@@ -23,6 +23,12 @@ type IntentHint struct {
 	// image is available in the workspace (no numbering prefix / reference / asset
 	// id). Drives the clarify fallback.
 	MissingKeyParam bool
+	// Compound is set when the text describes MULTIPLE dependent operations (a
+	// connector word like 然后/再/并 plus ≥2 distinct whitelist actions, or an
+	// edit/produce action combined with a multi-size/platform adaptation). It
+	// advises the model to use submit_plan to submit one ordered plan rather than
+	// calling a single tool and stopping. Advisory only.
+	Compound bool
 }
 
 // intentRule maps one whitelist intent to its keyword signals. strong phrases are
@@ -128,7 +134,56 @@ func ClassifyIntent(userText string) IntentHint {
 	if anyImageOp && !hasImage {
 		hint.MissingKeyParam = true
 	}
+	hint.Compound = looksCompound(lower, labels)
 	return hint
+}
+
+// compoundConnectors are the words/phrases that signal "do this, THEN do that" —
+// multiple dependent operations in one breath. Their presence alongside ≥2
+// distinct whitelist actions (or a multi-size adaptation) marks a compound
+// request worth routing through submit_plan.
+var compoundConnectors = []string{"然后", "接着", "再", "之后", "并", "同时", "顺便", "最后", "先", "后做", "做成", "做出"}
+
+// multiSizeSignals catch the very common "...做成 N 个尺寸 / 各平台尺寸" tail that
+// pairs an edit/produce step with a downstream adaptation step even without an
+// explicit connector word.
+var multiSizeSignals = []string{"几个尺寸", "个尺寸", "多个尺寸", "各尺寸", "各平台", "各个尺寸", "几种尺寸", "套尺寸"}
+
+// editProduceLabels are the actions that yield/edit an image and could plausibly
+// be FOLLOWED BY a platform-adaptation step. Used to distinguish a true compound
+// request ("换角色 + 做成各尺寸") from a single adaptation that merely names many
+// sizes ("切成各平台尺寸" — one adapt call, not compound).
+var editProduceLabels = map[string]struct{}{
+	"换背景": {}, "换角色": {}, "增加角色": {}, "换文案": {},
+	"文生图": {}, "搜索图片": {}, "文字叠加": {}, "生成icon": {}, "生视频": {},
+}
+
+// looksCompound reports whether the (lowercased, prefix-stripped) text describes
+// multiple dependent operations. Conservative: it requires either two distinct
+// strong-matched whitelist actions, or one edit/produce action plus a connector/
+// multi-size signal that implies a SECOND (adaptation) step. A single action —
+// including a lone "切成各平台尺寸" that names many sizes — never trips it.
+func looksCompound(lower string, labels []string) bool {
+	if len(labels) >= 2 {
+		return true
+	}
+	if len(labels) == 0 {
+		return false
+	}
+	// The single matched action must be one that could precede an adapt step;
+	// a lone 切尺寸 / 下载 with a multi-size phrase is just that one operation.
+	if _, canPrecede := editProduceLabels[labels[0]]; !canPrecede {
+		return false
+	}
+	if matchAny(lower, multiSizeSignals) {
+		return true
+	}
+	// One matched action plus a connector word strongly implies a second step
+	// (e.g. "换个背景然后切尺寸" where only 换背景 strong-matched).
+	if matchAny(lower, compoundConnectors) && matchAny(lower, []string{"尺寸", "适配", "视频", "切图", "裁", "平台", "广告位"}) {
+		return true
+	}
+	return false
 }
 
 // suggestedTool returns the tool name the matched intents point at, when a single

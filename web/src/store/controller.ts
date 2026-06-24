@@ -1,5 +1,5 @@
 import * as React from "react";
-import type { Task, TaskKind, ToolCardData } from "@/lib/types";
+import type { Task, TaskKind, ToolCardData, PlanItem, PlanStepStatus } from "@/lib/types";
 import * as api from "@/lib/api";
 import { describeToolCall } from "@/lib/timeline";
 import { type AppState, type ChatItem, initialState, uid } from "./types";
@@ -819,6 +819,69 @@ export function useAppController() {
     }
   }, [clearLoading, flushTyper, finishPendingTools, refreshContext, setChat, sendNow]);
 
+  // ============ execution plan (submit_plan) ============
+  // plan_* events drive the PlanCard: plan_created inserts the checklist
+  // skeleton; step started/done/failed update per-step status; plan_done sets
+  // the overall state. Step products still arrive via their own task_* events,
+  // so the plan card is a pure upper progress view (no asset handling here).
+  const patchPlan = React.useCallback(
+    (planId: string, fn: (p: PlanItem) => PlanItem) => {
+      setChat((c) => c.map((it) => (it.kind === "plan" && it.planId === planId ? fn(it) : it)));
+    },
+    [setChat],
+  );
+
+  const onPlanEvent = React.useCallback(
+    (type: string, data: Record<string, unknown>) => {
+      const planId = (data.planId as string) || "";
+      if (!planId) return;
+      if (type === "plan_created") {
+        clearLoading();
+        flushTyper();
+        collapseReasoning();
+        const rawSteps = Array.isArray(data.steps) ? (data.steps as Record<string, unknown>[]) : [];
+        const steps = rawSteps.map((s) => ({
+          id: (s.id as string) || "",
+          tool: (s.tool as string) || "",
+          title: (s.title as string) || (s.tool as string) || "",
+          status: "pending" as PlanStepStatus,
+        }));
+        setChat((c) => [...c, { kind: "plan", id: uid("plan"), planId, status: "running", steps }]);
+        return;
+      }
+      const stepId = (data.stepId as string) || "";
+      if (type === "plan_step_started") {
+        patchPlan(planId, (p) => ({
+          ...p,
+          steps: p.steps.map((s) => (s.id === stepId ? { ...s, status: "running" } : s)),
+        }));
+      } else if (type === "plan_step_done") {
+        patchPlan(planId, (p) => ({
+          ...p,
+          steps: p.steps.map((s) => (s.id === stepId ? { ...s, status: "done" } : s)),
+        }));
+      } else if (type === "plan_step_failed") {
+        const reason = (data.reason as string) || "执行失败";
+        patchPlan(planId, (p) => ({
+          ...p,
+          // The failed step turns red; every still-pending step after it becomes
+          // "skipped" (the executor aborts the whole plan on first failure).
+          steps: p.steps.map((s) =>
+            s.id === stepId
+              ? { ...s, status: "failed", reason }
+              : s.status === "pending"
+                ? { ...s, status: "skipped" }
+                : s,
+          ),
+        }));
+      } else if (type === "plan_done") {
+        const status = data.status === "aborted" ? "aborted" : "completed";
+        patchPlan(planId, (p) => ({ ...p, status }));
+      }
+    },
+    [clearLoading, flushTyper, collapseReasoning, setChat, patchPlan],
+  );
+
   const onCapsule = React.useCallback((data: Record<string, unknown>) => {
     clearLoading();
     setState((s) => ({ ...s, thinking: false }));
@@ -901,6 +964,14 @@ export function useAppController() {
         case "tool_result":
           onToolResult(sid, d);
           break;
+        case "plan_created":
+        case "plan_step_started":
+        case "plan_step_done":
+        case "plan_step_failed":
+        case "plan_done":
+          producedRef.current = true;
+          onPlanEvent(msg.type, d);
+          break;
         case "follow_up": {
           const msg = (d.message as string) || "接下来想做什么？";
           const rawOpts = Array.isArray(d.options) ? (d.options as Record<string, unknown>[]) : [];
@@ -946,7 +1017,7 @@ export function useAppController() {
           break;
       }
     };
-  }, [onAssistantDelta, onReasoning, onToolCall, onToolResult, ensureTaskPlaceholder, finishPendingTools, refreshContext, toast, showLoading, escalateWait, onTurnEnd, onCapsule, clearLoading, onTurnReset, renderFollowUp, onAnalysisDelta, onSummaryConfirm]);
+  }, [onAssistantDelta, onReasoning, onToolCall, onToolResult, ensureTaskPlaceholder, finishPendingTools, refreshContext, toast, showLoading, escalateWait, onTurnEnd, onCapsule, clearLoading, onTurnReset, renderFollowUp, onAnalysisDelta, onSummaryConfirm, onPlanEvent]);
 
   // ============ actions ============
   // sendMessage routes a user input: when a turn is in flight it joins the

@@ -114,6 +114,11 @@ type ToolDeps struct {
 	// duplicate tasks and concatenate two identical acknowledgments into one
 	// bubble. Scoped per turn (one ToolDeps is built per Handle), nil-safe.
 	dedup *turnCallGuard
+	// PlanEvents, when set, receives execution-plan lifecycle callbacks from the
+	// submit_plan executor so the orchestrator can surface plan_* events to the
+	// frontend. Nil-tolerant (events dropped). Injected by the orchestrator so
+	// tools.go/plan.go stay free of the transport layer.
+	PlanEvents PlanEmitter
 }
 
 // turnCallGuard records which (tool, args) signatures have already executed in
@@ -234,6 +239,13 @@ func asyncMarshal(standaloneFriendly string) utils.MarshalOutput {
 		var probe struct {
 			AssetID string `json:"asset_id"`
 			Status  string `json:"status"`
+			// Outcomes covers the adapt_to_platform shape, whose product asset id(s)
+			// live in an outcomes array rather than a top-level asset_id. Without
+			// this, an awaited adapt step would fall through to the friendly string
+			// and the plan executor could not chain its product.
+			Outcomes []struct {
+				AssetID string `json:"asset_id"`
+			} `json:"outcomes"`
 		}
 		if json.Unmarshal(b, &probe) == nil {
 			if probe.Status == statusDuplicate || probe.Status == statusClarified {
@@ -241,6 +253,11 @@ func asyncMarshal(standaloneFriendly string) utils.MarshalOutput {
 			}
 			if probe.AssetID != "" {
 				return string(b), nil // await path: give full JSON back to model
+			}
+			for _, o := range probe.Outcomes {
+				if o.AssetID != "" {
+					return string(b), nil // adapt await path: outcomes carry asset_id(s)
+				}
 			}
 		}
 		return standaloneFriendly, nil
@@ -663,6 +680,11 @@ type adaptArgs struct {
 	SourceAssetID     string   `json:"source_asset_id,omitempty" jsonschema:"description=ID of a single workspace image to adapt. For a multi-image reference group use reference_asset_ids instead."`
 	ReferenceAssetIDs []string `json:"reference_asset_ids,omitempty" jsonschema:"description=Ordered reference group (up to 16) to adapt as ONE bundle. First id is the anchor (内容/主体真相源), the rest are auxiliary style/element references. Each target size yields exactly one image referencing the whole group (product count = size count). Use this for the [reference assets: ...] multi-select case."`
 	SizeIDs           []string `json:"size_ids" jsonschema:"description=Unique platform size ids to adapt to (e.g. taptap.banner.1120x280). Use list_platform_sizes first."`
+	// AwaitResult blocks until any AI-repaint sizes finish and backfills their
+	// asset_id into the outcomes, so adapt_to_platform can be a MIDDLE step in a
+	// multi-task chain (submit_plan). Fast-path (crop) sizes already carry their
+	// asset_id immediately. Default false keeps the fire-and-forget behavior.
+	AwaitResult bool `json:"await_result,omitempty" jsonschema:"description=Set true to wait for AI-repaint sizes to finish and get their asset_id (for chaining into the next tool)."`
 }
 
 type adaptOutcomeItem struct {
@@ -958,6 +980,27 @@ func (d ToolDeps) newAdaptTool() (tool.InvokableTool, error) {
 			for _, o := range outcomes {
 				items = append(items, adaptOutcomeItem{SizeID: o.SizeID, Via: o.Via, AssetID: o.AssetID, TaskID: o.TaskID})
 			}
+			// Chaining support: when await_result is set, block until any AI-repaint
+			// sizes (which returned a task_id, not an immediate asset_id) finish, and
+			// backfill their asset_id so a downstream plan step can consume the
+			// product. Fast-path (crop) sizes already carry asset_id, so they need no
+			// wait. A failed/timed-out size is left without an asset_id; the plan
+			// executor treats an all-empty result as a step failure.
+			if a.AwaitResult && d.Store != nil {
+				for i := range items {
+					if items[i].AssetID != "" || items[i].TaskID == "" {
+						continue
+					}
+					rec, err := d.awaitTask(ctx, items[i].TaskID)
+					if err != nil {
+						return adaptResult{}, fmt.Errorf("await adapt_to_platform: %w", err)
+					}
+					if rec.Status == "failed" {
+						return adaptResult{}, fmt.Errorf("adapt_to_platform failed: %s", rec.Error)
+					}
+					items[i].AssetID = rec.AssetID
+				}
+			}
 			return adaptResult{Outcomes: items}, nil
 		},
 		utils.WithMarshalOutput(asyncMarshal("好的，正在为你适配各平台尺寸，产物会陆续出现在左侧工作区。")),
@@ -1222,10 +1265,15 @@ func friendlyMarshal(msg string) utils.MarshalOutput {
 
 // Tools builds the full whitelist of agent tools for this session.
 func (d ToolDeps) Tools() ([]tool.BaseTool, error) {
+	// chainable collects the asset-producing tools (by name) that a submit_plan
+	// step may dispatch to. Each is registered here as it is built so the plan
+	// executor reuses the exact same implementation.
+	chainable := make(map[string]tool.InvokableTool)
 	edit, err := d.newEditTool()
 	if err != nil {
 		return nil, fmt.Errorf("edit tool: %w", err)
 	}
+	chainable["edit_image"] = edit
 	cropTool, err := d.newCropTool()
 	if err != nil {
 		return nil, fmt.Errorf("crop tool: %w", err)
@@ -1247,12 +1295,14 @@ func (d ToolDeps) Tools() ([]tool.BaseTool, error) {
 	if err != nil {
 		return nil, fmt.Errorf("adapt tool: %w", err)
 	}
+	chainable["adapt_to_platform"] = adaptTool
 	tools = append(tools, adaptTool)
 	if d.TextToImage != nil {
 		t2i, err := d.newTextToImageTool()
 		if err != nil {
 			return nil, fmt.Errorf("text-to-image tool: %w", err)
 		}
+		chainable["generate_image_from_text"] = t2i
 		tools = append(tools, t2i)
 	}
 	if d.Video != nil && d.Video.Configured() {
@@ -1260,6 +1310,7 @@ func (d ToolDeps) Tools() ([]tool.BaseTool, error) {
 		if err != nil {
 			return nil, fmt.Errorf("video tool: %w", err)
 		}
+		chainable["image_to_video"] = vid
 		tools = append(tools, vid)
 	}
 	// web_search is always available (no API key needed).
@@ -1272,6 +1323,7 @@ func (d ToolDeps) Tools() ([]tool.BaseTool, error) {
 		if err != nil {
 			return nil, fmt.Errorf("search images tool: %w", err)
 		}
+		chainable["search_images"] = wsImg
 		tools = append(tools, wsearch, wsImg)
 	}
 	// generate_copy is opt-in: only whitelisted when a copywriting service is wired.
@@ -1288,6 +1340,7 @@ func (d ToolDeps) Tools() ([]tool.BaseTool, error) {
 		if err != nil {
 			return nil, fmt.Errorf("overlay tool: %w", err)
 		}
+		chainable["overlay_text"] = overlayTool
 		tools = append(tools, overlayTool)
 	}
 	// generate_variants reuses the generation pipeline; whitelisted whenever
@@ -1297,14 +1350,23 @@ func (d ToolDeps) Tools() ([]tool.BaseTool, error) {
 		if err != nil {
 			return nil, fmt.Errorf("variants tool: %w", err)
 		}
+		chainable["generate_variants"] = variantsTool
 		tools = append(tools, variantsTool)
 		// extract_layer (抠图) also reuses the generation pipeline.
 		extractTool, err := d.newExtractLayerTool()
 		if err != nil {
 			return nil, fmt.Errorf("extract layer tool: %w", err)
 		}
+		chainable["extract_layer"] = extractTool
 		tools = append(tools, extractTool)
 	}
+	// submit_plan orchestrates the chainable tools above into a serial multi-step
+	// plan. Registered last so it captures every chainable tool that was wired.
+	planTool, err := d.newSubmitPlanTool(chainable)
+	if err != nil {
+		return nil, fmt.Errorf("submit plan tool: %w", err)
+	}
+	tools = append(tools, planTool)
 	// crawl_game_assets removed from whitelist (replaced by search_images).
 	return tools, nil
 }

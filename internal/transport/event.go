@@ -100,6 +100,24 @@ const (
 	// EventOutpaintStarted fires just before Gemini outpaints the margin bands,
 	// advancing the frontend pipeline timeline from 生图 to Gemini补全. Additive.
 	EventOutpaintStarted EventType = "outpaint_started"
+
+	// Execution-plan lifecycle events (submit_plan): a compound multi-step request
+	// is decomposed into an ordered plan and driven server-side, serially. These
+	// events let the frontend render a plan card that lights up step by step.
+	// They co-exist with each step's own task_* events (the plan card is an upper
+	// progress view, not a replacement). Additive — older clients ignore unknown
+	// plan_* types and keep working off the existing task lifecycle.
+	//
+	//   - plan_created:      {planId, steps:[{id, tool, title}]} — render skeleton
+	//   - plan_step_started: {planId, stepId}
+	//   - plan_step_done:    {planId, stepId, assetId?, assetIds?}
+	//   - plan_step_failed:  {planId, stepId, reason}
+	//   - plan_done:         {planId, status:"completed"|"aborted"}
+	EventPlanCreated     EventType = "plan_created"
+	EventPlanStepStarted EventType = "plan_step_started"
+	EventPlanStepDone    EventType = "plan_step_done"
+	EventPlanStepFailed  EventType = "plan_step_failed"
+	EventPlanDone        EventType = "plan_done"
 )
 
 // Event is the unified envelope sent over both WS and SSE.

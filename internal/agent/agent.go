@@ -619,7 +619,7 @@ func (o *Orchestrator) Handle(ctx context.Context, sessionID, userText string, l
 		})
 	}
 
-	deps := ToolDeps{Generation: o.gen, TextToImage: o.textToImg, Crop: o.crop, Video: o.video, Crawl: o.crawl, WebSearch: o.webSearch, Copywriting: o.copywriter, Overlay: o.overlay, Store: o.store, SessionID: sessionID, Lossless: lossless, Clarify: clarify, dedup: newTurnCallGuard()}
+	deps := ToolDeps{Generation: o.gen, TextToImage: o.textToImg, Crop: o.crop, Video: o.video, Crawl: o.crawl, WebSearch: o.webSearch, Copywriting: o.copywriter, Overlay: o.overlay, Store: o.store, SessionID: sessionID, Lossless: lossless, Clarify: clarify, dedup: newTurnCallGuard(), PlanEvents: planEmitter{o: o, sessionID: sessionID}}
 	// Per-session generation model overrides (image / text-to-image / video).
 	// Zero value => the tool uses the service default provider.
 	if pc, ok := o.models.ImageModel(sessionID, config.SceneImage); ok {
@@ -1194,6 +1194,34 @@ func (o *Orchestrator) emit(sessionID string, ev transport.Event) {
 	if o.hub != nil {
 		o.hub.Send(sessionID, ev)
 	}
+}
+
+// planEmitter adapts the agent-layer PlanEmitter interface to transport events
+// over the hub, keeping tools.go/plan.go free of the transport layer. A nil hub
+// makes every method a no-op (tolerated by the executor).
+type planEmitter struct {
+	o         *Orchestrator
+	sessionID string
+}
+
+func (p planEmitter) send(t transport.EventType, data map[string]any) {
+	p.o.emit(p.sessionID, transport.Event{Type: t, SessionID: p.sessionID, Data: data})
+}
+
+func (p planEmitter) Created(planID string, steps []PlanStepInfo) {
+	p.send(transport.EventPlanCreated, map[string]any{"planId": planID, "steps": steps})
+}
+func (p planEmitter) StepStarted(planID, stepID string) {
+	p.send(transport.EventPlanStepStarted, map[string]any{"planId": planID, "stepId": stepID})
+}
+func (p planEmitter) StepDone(planID, stepID, assetID string, assetIDs []string) {
+	p.send(transport.EventPlanStepDone, map[string]any{"planId": planID, "stepId": stepID, "assetId": assetID, "assetIds": assetIDs})
+}
+func (p planEmitter) StepFailed(planID, stepID, reason string) {
+	p.send(transport.EventPlanStepFailed, map[string]any{"planId": planID, "stepId": stepID, "reason": reason})
+}
+func (p planEmitter) Done(planID, status string) {
+	p.send(transport.EventPlanDone, map[string]any{"planId": planID, "status": status})
 }
 
 // agentOption wraps a callbacks handler as a react agent option.

@@ -144,6 +144,23 @@ export interface VariantsGroupItem {
   labels: string[];
 }
 
+// PlanStepStatus tracks one step of a submit_plan execution as plan_* events
+// arrive. pending → running → done, or failed; steps after a failure stay
+// "skipped" (the executor aborts the whole plan on first failure).
+export type PlanStepStatus = "pending" | "running" | "done" | "failed" | "skipped";
+
+// PlanItem appears in the chat log for a submit_plan multi-step orchestration.
+// It renders an ordered checklist that lights up step by step as the server
+// drives the plan serially. status is the overall plan state; reason carries the
+// failure message for the failed step (if any).
+export interface PlanItem {
+  kind: "plan";
+  id: string; // chat item id
+  planId: string; // server plan id (matches plan_* events)
+  status: "running" | "completed" | "aborted";
+  steps: { id: string; tool: string; title: string; status: PlanStepStatus; reason?: string }[];
+}
+
 // ModelEntry is one selectable model in the per-session model catalog.
 export interface ModelEntry {
   id: string;

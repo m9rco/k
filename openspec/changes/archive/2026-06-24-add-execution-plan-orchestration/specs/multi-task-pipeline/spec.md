@@ -1,8 +1,4 @@
-# multi-task-pipeline Specification
-
-## Purpose
-TBD - created by archiving change enhance-agent-capabilities. Update Purpose after archive.
-## Requirements
+## MODIFIED Requirements
 ### Requirement: 单指令串联多工具执行
 系统 SHALL 支持 Agent 在一轮对话内完成用户一句话描述的复合任务（多个连续操作）。对于**前后步骤存在产物依赖**的复合请求（如「换角色 → 切尺寸」「找图 → 生视频」），Agent SHALL 通过 `submit_plan` 工具一次性提交一份**结构化执行计划**（有序步骤），由服务端**确定性串行执行**，而非依赖模型自行 await 与手动串联。Agent 仍是计划分解的决策者；执行控制流（串行驱动、产物传递、失败处理）由服务端负责。对于无依赖的单步请求，Agent SHALL 直接调用对应单工具，不强制走计划。
 
@@ -23,14 +19,7 @@ TBD - created by archiving change enhance-agent-capabilities. Update Purpose aft
 - **THEN** Agent 直接调用 edit_image，而非 submit_plan
 - **AND** 行为与既有单步直调一致
 
-### Requirement: 工具支持同步等待模式
-生图 / 生视频工具 SHALL 支持可选的 `await_result` 参数；当置为 true 时工具同步等待任务完成并在结果中返回产物 `asset_id`，使 Agent 可在一轮内将产物传递给下一个工具。
-
-#### Scenario: await_result 返回 asset_id
-- **WHEN** Agent 调用 edit_image 时设置 await_result=true
-- **THEN** 工具等待异步生图任务完成后返回产物 asset_id
-- **AND** Agent 可在同一轮将该 asset_id 传入后续工具
-
+## ADDED Requirements
 ### Requirement: 结构化执行计划工具
 系统 SHALL 提供 `submit_plan` 工具，入参为有序步骤数组，每个步骤 SHALL 含：步骤 id、工具名（限白名单内可编排工具）、该工具的参数对象。步骤参数中 SHALL 支持以占位符 `$<stepId>.asset_id` / `$<stepId>.asset_ids` 引用前序步骤的产物，使后续步骤能消费前序产物。计划步骤数 SHALL 受上限约束（防止超长计划）；超出上限时系统 SHALL 截断并提示。`submit_plan` 的最终结果 SHALL 回喂会话模型（非 ToolReturnDirectly），使模型可在计划结束后向用户作一句自然语言总结。
 
@@ -65,4 +54,3 @@ TBD - created by archiving change enhance-agent-capabilities. Update Purpose aft
 #### Scenario: 执行器复用既有工具实现
 - **WHEN** 计划某步骤工具名为 edit_image
 - **THEN** 执行器调用既有 edit_image 实现完成该步，颜色适配/参照归属等既有行为保持不变
-

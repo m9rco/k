@@ -1,4 +1,4 @@
-import type { Asset, Task, ToolCardData, ModelEntry, AdaptPipelineItem, VariantsGroupItem } from "@/lib/types";
+import type { Asset, Task, ToolCardData, ModelEntry, AdaptPipelineItem, VariantsGroupItem, PlanItem } from "@/lib/types";
 
 // WaitLevel tiers the post-send loading state: "p1" is the lightweight default
 // micro-hint ("正在启动深度思考…"), "p2" is the heavier static fallback shown
@@ -42,6 +42,7 @@ export type ChatItem =
     }
   | AdaptPipelineItem
   | VariantsGroupItem
+  | PlanItem
   | { kind: "capsule"; id: string; question: string; options: CapsuleOption[]; answered: boolean }
   | { kind: "follow_up"; id: string; message: string; options: CapsuleOption[]; dismissed: boolean }
   | { kind: "loading"; id: string; level: WaitLevel };

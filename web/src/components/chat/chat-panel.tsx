@@ -11,6 +11,7 @@ import { FollowUpBubble } from "./follow-up-bubble";
 import { LoadingBubble } from "./loading-bubble";
 import { AdaptPipeline } from "./adapt-pipeline";
 import { VariantsGroup } from "./variants-group";
+import { PlanCard } from "./plan-card";
 import { Composer } from "./composer";
 import { ContextBar } from "./context-bar";
 import { WorkspaceTips } from "./workspace-tips";
@@ -108,6 +109,7 @@ export function ChatPanel({ onboarding = false }: { onboarding?: boolean }) {
             if (it.kind === "loading") return <LoadingBubble key={it.id} level={it.level} />;
             if (it.kind === "adapt_pipeline") return <AdaptPipeline key={it.id} item={it} />;
             if (it.kind === "variants_group") return <VariantsGroup key={it.id} item={it} />;
+            if (it.kind === "plan") return <PlanCard key={it.id} item={it} />;
             if (it.kind === "copy")
               return (
                 <CopyCard
