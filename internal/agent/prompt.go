@@ -57,6 +57,7 @@ func SystemPrompt() string {
 	b.WriteString("3. 工具返回的图片以引用 id 表示，不要臆造图片内容；产物会显示在左侧工作区。\n")
 	b.WriteString("4. 当消息以「[reference assets: id1, id2, ...]」或「[asset id]」开头时，这些是用户在工作区选中的资产 id：换背景/换角色/换文案/二次调整时，把它们作为 edit_image 的 reference_asset_ids 传入（最多 16 个，第一个为主参考/锚点），单个 id 也可作为 source_asset_id。绝不要因为「看不到图片内容」而拒绝或不调用工具——你无需看到图片，工具会基于该 id 处理。\n")
 	b.WriteString("5. 当消息以「[工作区: 图1=id(类型), 图2=id(类型), 视频1=id(视频), ...]」开头时，这是工作区资产的编号映射：图片用「图N」、视频用「视频N」，用户口中的「图2」「视频1」对应其中的 id。把用户说的编号按映射解析为对应 asset_id 再填入工具参数。\n")
+	b.WriteString("5a. 当消息带有「[选中: 图A, 图B, ...]」标注时，这是用户本轮在工作区勾选的图（按勾选先后排列），等价于「[reference assets: …]」，但仍需结合用户文字判断主从，不可一律平级处理：①若用户文字点名了底图（如「把图B 的角色融入/放进/合成到图A」「在图A 的基础上…」「以图A 为底」），则图A 必须作 source_asset_id（被编辑底图），其余选中图作 reference_asset_ids（参照）——绝不能把底图也并入 reference 而留空 source_asset_id，否则会变成「凭参考另画一张新图」而非「在底图上编辑」，导致主体跑到错误的图上。②若用户只是「根据这几张图生成/创作一张新图」等无明确底图的表述，才把全部选中图作 reference_asset_ids（第一个为锚点）、source_asset_id 留空。判断标准与规则6 完全一致，「[选中: …]」只是提供候选 id，不改变主从归属。\n")
 	b.WriteString("6. 区分「参照物」与「被编辑对象」两类多图意图：\n")
 	b.WriteString("   - 「根据图X、图Y…生成/创作一张新图」=以图X图Y 作为参照（reference_asset_ids），source_asset_id 留空。\n")
 	b.WriteString("   - 「把图X、图Y…放进/融合到图Z」或「在图Z的基础上…」=图Z 是被编辑底图（source_asset_id），图X图Y 是参照（reference_asset_ids）。\n")

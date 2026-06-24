@@ -865,8 +865,8 @@ type qualityCheckerAdapter struct{ qc *vision.QualityChecker }
 
 func (a qualityCheckerAdapter) Configured() bool { return a.qc.Configured() }
 
-func (a qualityCheckerAdapter) Check(ctx context.Context, img []byte, mime, themeReport, specLabel string) (generation.QualityVerdict, error) {
-	v, err := a.qc.Check(ctx, img, mime, themeReport, specLabel)
+func (a qualityCheckerAdapter) Check(ctx context.Context, img []byte, mime, themeReport, specLabel string, fusion bool) (generation.QualityVerdict, error) {
+	v, err := a.qc.Check(ctx, img, mime, themeReport, specLabel, fusion)
 	return generation.QualityVerdict{
 		Pass:                v.Pass,
 		Total:               v.Total,
@@ -905,7 +905,7 @@ type videoQCAdapter struct{ qc *vision.QualityChecker }
 func (a videoQCAdapter) Configured() bool { return a.qc.Configured() }
 
 func (a videoQCAdapter) CheckVideoSource(ctx context.Context, srcImg []byte, mime, motion string) (video.VideoQualitySignal, error) {
-	v, err := a.qc.Check(ctx, srcImg, mime, "", "video source: "+motion)
+	v, err := a.qc.Check(ctx, srcImg, mime, "", "video source: "+motion, false)
 	return video.VideoQualitySignal{
 		SubjectScore: v.DimScores.SubjectConsistency,
 		AppealScore:  v.DimScores.AdAppeal,

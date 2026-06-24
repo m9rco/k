@@ -134,25 +134,26 @@ func (p *HTTPProvider) buildEditRequest(ctx context.Context, req Request) (*http
 	// NOTE: input_fidelity is intentionally NOT sent. gpt-image-2 processes every
 	// input image at high fidelity automatically and rejects the parameter; this
 	// auto-fidelity is the harness's main lever against subject drift (design D4).
-	fw, err := mw.CreateFormFile("image", "source.png")
-	if err != nil {
-		return nil, err
-	}
-	if _, err := fw.Write(req.SourceImage); err != nil {
-		return nil, err
-	}
-	// Additional references (multi-image edit). Sent as image[] parts following
-	// the gpt-image multi-image convention; providers that don't support it
-	// ignore the extra parts and operate on the primary image alone.
-	for i, ref := range req.ReferenceImages {
-		if len(ref) == 0 {
+	// All input images go under the SAME repeated multipart field `image[]`, in
+	// order: the base/source image FIRST, then any additional references. This is
+	// the gpt-image multi-image edit convention (the SDK's `image=[...]` array
+	// encodes to repeated `image[]` parts) — and the FIRST image is the one a mask
+	// would apply to, matching our "source is the base, references are fused in"
+	// semantics. Sending the base as a scalar `image` and references as `image[]`
+	// makes OpenAI-compatible gateways drop the `image[]` parts, so the model only
+	// ever sees the base and hallucinates the reference character (the fusion bug).
+	imgParts := make([][]byte, 0, 1+len(req.ReferenceImages))
+	imgParts = append(imgParts, req.SourceImage)
+	imgParts = append(imgParts, req.ReferenceImages...)
+	for i, img := range imgParts {
+		if len(img) == 0 {
 			continue
 		}
-		rw, err := mw.CreateFormFile("image[]", fmt.Sprintf("ref%d.png", i+1))
+		fw, err := mw.CreateFormFile("image[]", fmt.Sprintf("image%d.png", i+1))
 		if err != nil {
 			return nil, err
 		}
-		if _, err := rw.Write(ref); err != nil {
+		if _, err := fw.Write(img); err != nil {
 			return nil, err
 		}
 	}

@@ -1,12 +1,77 @@
 package generation
 
 import (
+	"context"
 	"encoding/json"
+	"io"
+	"mime"
+	"mime/multipart"
 	"os"
 	"strconv"
 	"strings"
 	"testing"
+
+	"gameasset/internal/config"
 )
+
+// TestBuildEditRequestMultiImage verifies that a multi-image fusion edit sends
+// EVERY input image (base first, then references) under the SAME repeated
+// `image[]` multipart field. The previous code sent the base as a scalar `image`
+// and references as `image[]`, which OpenAI-compatible gateways drop — so the
+// model only saw the base and hallucinated the reference character.
+func TestBuildEditRequestMultiImage(t *testing.T) {
+	p := NewHTTPProvider(config.ImageProviderConfig{BaseURL: "https://example.test/v1", APIKey: "k", Model: "gpt-image-2"})
+	base := []byte("BASE-IMAGE-BYTES")
+	ref := []byte("REF-IMAGE-BYTES")
+
+	httpReq, err := p.buildEditRequest(context.Background(), Request{
+		Prompt:          "fuse",
+		SourceImage:     base,
+		ReferenceImages: [][]byte{ref},
+		Width:           1024, Height: 1024,
+	})
+	if err != nil {
+		t.Fatalf("buildEditRequest: %v", err)
+	}
+
+	_, params, err := mime.ParseMediaType(httpReq.Header.Get("Content-Type"))
+	if err != nil {
+		t.Fatalf("parse content-type: %v", err)
+	}
+	mr := multipart.NewReader(httpReq.Body, params["boundary"])
+
+	var imageParts [][]byte
+	var scalarImageSeen bool
+	for {
+		part, err := mr.NextPart()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatalf("next part: %v", err)
+		}
+		data, _ := io.ReadAll(part)
+		switch part.FormName() {
+		case "image[]":
+			imageParts = append(imageParts, data)
+		case "image":
+			scalarImageSeen = true
+		}
+	}
+
+	if scalarImageSeen {
+		t.Errorf("base image must NOT be sent as scalar `image` (gateways drop the array refs)")
+	}
+	if len(imageParts) != 2 {
+		t.Fatalf("expected 2 image[] parts (base + ref), got %d", len(imageParts))
+	}
+	if string(imageParts[0]) != string(base) {
+		t.Errorf("first image[] must be the base/source image; got %q", imageParts[0])
+	}
+	if string(imageParts[1]) != string(ref) {
+		t.Errorf("second image[] must be the reference image; got %q", imageParts[1])
+	}
+}
 
 // TestSizeParam verifies the LEGACY fixed-enum mapping (used by DashScope-style
 // adapters) snaps to the nearest aspect ratio. gpt-image-2 does not use this — see

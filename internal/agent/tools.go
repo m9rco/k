@@ -70,6 +70,14 @@ type ToolDeps struct {
 	// orchestrator to route AI platform adaptation to gpt-image-2 (falling back
 	// to gemini-3-pro-image when gpt-image-2 is unavailable).
 	AdaptModelOverride *config.ImageProviderConfig
+	// FusionModelOverride, when non-nil, is used by edit_image's character-fusion
+	// intents (change_character / add_character) instead of ImageOverride.
+	// Request-scoped: only those two intents use it; change_background/change_text
+	// and other image tools keep using ImageOverride. Nil falls back to
+	// ImageOverride (or service default). Injected by the orchestrator to route
+	// character fusion to gpt-image-2 (best subject/composition preservation),
+	// falling back to gemini-3-pro-image when gpt-image-2 is unavailable.
+	FusionModelOverride *config.ImageProviderConfig
 	// Clarify, when set, is invoked by the clarify_intent tool to surface a
 	// structured clarifying question (capsule) to the user. Injected by the
 	// orchestrator so tools.go stays free of the transport layer (design D1).
@@ -350,7 +358,11 @@ func (d ToolDeps) newEditTool() (tool.InvokableTool, error) {
 				SourceAssetID:     a.SourceAssetID,
 				ReferenceAssetIDs: a.ReferenceAssetIDs,
 				Lossless:          d.Lossless,
-				ProviderOverride:  d.ImageOverride,
+				// Character-fusion intents route to the fusion override
+				// (gpt-image-2 → gemini-3-pro-image → session selection) for best
+				// subject/composition preservation; other edit intents keep the
+				// session selection.
+				ProviderOverride: editProvider(d, kind),
 				Slots: generation.Slots{
 					Kind:             kind,
 					CharacterDesc:    a.CharacterDesc,
@@ -675,6 +687,30 @@ func adaptProvider(d ToolDeps) *config.ImageProviderConfig {
 		return d.AdaptModelOverride
 	}
 	return d.ImageOverride
+}
+
+// fusionProvider returns the image provider config for edit_image's
+// character-fusion intents (change_character / add_character):
+// FusionModelOverride when set, else ImageOverride (session selection). Nil
+// means the generation service uses its default provider. Non-fusion intents
+// must NOT use this — they pass d.ImageOverride directly.
+func fusionProvider(d ToolDeps) *config.ImageProviderConfig {
+	if d.FusionModelOverride != nil {
+		return d.FusionModelOverride
+	}
+	return d.ImageOverride
+}
+
+// editProvider picks the image provider for an edit_image intent: the fusion
+// override for character-fusion intents (change_character / add_character),
+// the session selection (ImageOverride) for everything else.
+func editProvider(d ToolDeps, kind generation.EditKind) *config.ImageProviderConfig {
+	switch kind {
+	case generation.EditCharacter, generation.EditCharacterAdd:
+		return fusionProvider(d)
+	default:
+		return d.ImageOverride
+	}
 }
 
 // refImg is one reference image's bytes + metadata, loaded for the vision

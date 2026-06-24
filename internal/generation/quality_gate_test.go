@@ -7,8 +7,12 @@ import (
 	"image/color"
 	"image/png"
 	"os"
+	"path/filepath"
 	"sync/atomic"
 	"testing"
+	"time"
+
+	"gameasset/internal/store"
 )
 
 // colorPNG returns a solid-color PNG so a test can identify which pass's product
@@ -55,13 +59,15 @@ func (c *countingProvider) Generate(_ context.Context, req Request) (Output, err
 
 // stubChecker is a programmable quality judge.
 type stubChecker struct {
-	verdicts []QualityVerdict // returned in order; last repeats
-	err      error
-	calls    int32
+	verdicts   []QualityVerdict // returned in order; last repeats
+	err        error
+	calls      int32
+	lastFusion bool // records the fusion flag of the most recent Check call
 }
 
 func (s *stubChecker) Configured() bool { return true }
-func (s *stubChecker) Check(_ context.Context, _ []byte, _, _, _ string) (QualityVerdict, error) {
+func (s *stubChecker) Check(_ context.Context, _ []byte, _, _, _ string, fusion bool) (QualityVerdict, error) {
+	s.lastFusion = fusion
 	i := int(atomic.AddInt32(&s.calls, 1)) - 1
 	if s.err != nil {
 		return QualityVerdict{Pass: true, Compliant: true}, s.err
@@ -479,4 +485,74 @@ func TestQualityGatePlainGenerateChangeBackground(t *testing.T) {
 	if prov.last == nil || !containsStr(prov.last.Prompt, "主体更突出") {
 		t.Errorf("regen prompt missing hints, got %q", promptOf(prov.last))
 	}
+}
+
+// TestQualityGateFusionRouting verifies the gate runs in fusion mode (fusion=true)
+// only for character-fusion intents with a base + reference, and in non-fusion
+// mode for change_background. It also confirms the FusionBase prompt contract is
+// applied for the fusion case.
+func TestQualityGateFusionRouting(t *testing.T) {
+	seedRef := func(t *testing.T, svc *Service, st *store.Store, dir string) {
+		t.Helper()
+		refPath := filepath.Join(dir, "ref2.png")
+		if err := os.WriteFile(refPath, solidPNGAdapt(t, 800, 800), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		_ = st.InsertAsset(store.AssetRecord{
+			ID: "ref2", SessionID: "s", Kind: "upload", Path: refPath, Mime: "image/png",
+			Width: 800, Height: 800, CreatedAt: time.Now().UTC(),
+		})
+	}
+
+	t.Run("add_character with base+ref runs fusion gate", func(t *testing.T) {
+		svc, st, dir, _ := newAdaptService(t)
+		seedRef(t, svc, st, dir)
+		prov := &countingProvider{name: "p", out: Output{Data: makePNG(400, 300), Mime: "image/png"}}
+		svc.gen = NewFailoverGenerator(prov, nil)
+		checker := &stubChecker{verdicts: []QualityVerdict{{Pass: true, Compliant: true, Total: 90}}}
+		svc.SetQualityChecker(checker)
+
+		taskID, err := svc.Start(context.Background(), GenerateParams{
+			SessionID:         "s",
+			SourceAssetID:     "src",
+			ReferenceAssetIDs: []string{"ref2"},
+			Slots:             Slots{Kind: EditCharacterAdd, CharacterDesc: "红甲战士"},
+		})
+		if err != nil {
+			t.Fatalf("Start: %v", err)
+		}
+		if rec := waitTask(t, st, "s", taskID); rec.Status != "done" {
+			t.Fatalf("task not done: %q", rec.Error)
+		}
+		if !checker.lastFusion {
+			t.Errorf("expected fusion=true for add_character with base+ref")
+		}
+		// The fusion truth-source contract must be in the generation prompt.
+		if prov.last == nil || !containsStr(prov.last.Prompt, "single source of truth") {
+			t.Errorf("fusion contract missing from prompt: %q", promptOf(prov.last))
+		}
+	})
+
+	t.Run("change_background runs non-fusion gate", func(t *testing.T) {
+		svc, st, _, _ := newAdaptService(t)
+		prov := &countingProvider{name: "p", out: Output{Data: makePNG(400, 300), Mime: "image/png"}}
+		svc.gen = NewFailoverGenerator(prov, nil)
+		checker := &stubChecker{verdicts: []QualityVerdict{{Pass: true, Compliant: true, Total: 90}}}
+		svc.SetQualityChecker(checker)
+
+		taskID, err := svc.Start(context.Background(), GenerateParams{
+			SessionID:     "s",
+			SourceAssetID: "src",
+			Slots:         Slots{Kind: EditBackground, BackgroundDesc: "新背景"},
+		})
+		if err != nil {
+			t.Fatalf("Start: %v", err)
+		}
+		if rec := waitTask(t, st, "s", taskID); rec.Status != "done" {
+			t.Fatalf("task not done: %q", rec.Error)
+		}
+		if checker.lastFusion {
+			t.Errorf("expected fusion=false for change_background")
+		}
+	})
 }

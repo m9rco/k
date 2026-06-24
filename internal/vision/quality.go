@@ -39,6 +39,26 @@ const qualityPrompt = `你是游戏宣发素材质检员。下面给你一张【
 {"compliance":{"pass":true,"violations":[]},"scores":{"subject_consistency":0,"character_appeal":0,"overall_quality":0,"canvas_fill":0,"key_elements_fidelity":0,"ad_appeal":0},"total":0,"fault_source":"repaint","hints":"若需改进，一句话说明重绘时应强化什么；无需改进则留空"}
 其中 total 为五个分数的综合（0-100）。hints 必须是可直接追加到图生图提示词的中文要点。`
 
+// fusionDimsPrompt is appended to qualityPrompt for character-fusion products
+// (change_character / add_character with a base image + reference characters).
+// It adds four fusion-specific judgments on top of the shared dimensions: the
+// base image is the truth source for style/copy/intent (base_fidelity), the
+// fused character must blend in (fusion_harmony), no extra subjects may be
+// hallucinated (no_extra_subjects), and the character's identity must stay
+// faithful to its reference (identity_fidelity). Server-owned, never mixed with
+// user text. The fusion JSON adds these keys to the scores object.
+const fusionDimsPrompt = `
+
+本图是「角色融合」产物：把参照图中的角色融入到一张底图（图1）中。除上述维度外，还须按下面四项专门评估（覆盖判定优先级最高）：
+F1. base_fidelity（底图保真，0-100）：底图（图1）的整体画风、宣发意图、画面文案/标题、构图、背景与配色是否被完整保留。参照图的画风/文案/背景 **不得** 覆盖底图；底图原有应保留的文字不得被改写、糊化或丢失。被参照图风格/文案覆盖、或底图文案走样时严重扣分（≤30 分）。
+F2. fusion_harmony（自然融入度，0-100）：融入的角色与底图在光照方向、色温/色调、边缘过渡、透视与比例上是否协调，是否被「按底图画风重绘」而非生硬贴图。突兀/贴图感强则低分。
+F3. no_extra_subjects（是否凭空多生，true=未多生 / false=出现多余主体）：产物中是否出现参照图与底图之外、凭空多生的角色或主体。一旦出现多余角色/主体即为 false。
+F4. identity_fidelity（角色身份保真，0-100）：被融入角色的身份特征（外观、服饰、标志性特征）是否忠于其参照图；底图原有应保留的主体是否未被替换或丢失。身份明显走样或底图主体丢失时严重扣分（≤30 分）。
+
+融合产物只输出如下 JSON（在原 scores 基础上追加 fusion 段）：
+{"compliance":{"pass":true,"violations":[]},"scores":{"subject_consistency":0,"character_appeal":0,"overall_quality":0,"canvas_fill":0,"key_elements_fidelity":0,"ad_appeal":0},"fusion":{"base_fidelity":0,"fusion_harmony":0,"no_extra_subjects":true,"identity_fidelity":0},"total":0,"fault_source":"repaint","hints":"若需改进，一句话说明重绘时应强化什么；无需改进则留空"}
+hints 须针对融合问题给出可直接追加到图生图提示词的中文要点（如「完整保留底图文案与画风，仅把角色按底图画风重绘融入」）。`
+
 // QualityVerdict is the parsed, server-evaluated result of a quality check.
 type QualityVerdict struct {
 	// Pass is the final decision after applying the compliance red line and the
@@ -64,6 +84,11 @@ type QualityVerdict struct {
 		CanvasFill          int
 		KeyElementsFidelity int
 		AdAppeal            int
+		// Fusion-only dimensions (set when Check is called with fusion=true).
+		BaseFidelity     int
+		FusionHarmony    int
+		IdentityFidelity int
+		NoExtraSubjects  bool
 	}
 }
 
@@ -142,6 +167,13 @@ type rawVerdict struct {
 		KeyElementsFidelity int `json:"key_elements_fidelity"`
 		AdAppeal            int `json:"ad_appeal"`
 	} `json:"scores"`
+	// Fusion is present only on character-fusion products (fusion=true).
+	Fusion struct {
+		BaseFidelity     int  `json:"base_fidelity"`
+		FusionHarmony    int  `json:"fusion_harmony"`
+		NoExtraSubjects  bool `json:"no_extra_subjects"`
+		IdentityFidelity int  `json:"identity_fidelity"`
+	} `json:"fusion"`
 	Total       int    `json:"total"`
 	FaultSource string `json:"fault_source"`
 	Hints       string `json:"hints"`
@@ -150,11 +182,12 @@ type rawVerdict struct {
 // Check scores one product image against the marketing theme report and target
 // spec. img is the raw product bytes; mime its content type; themeReport the
 // analyzed subject/intent truth (may be empty); specLabel a short target
-// description (e.g. "TapTap 推广图 1920×1080"). It returns the server-evaluated
-// verdict. On any error (network, timeout, unparseable output) it returns a
-// passing verdict with the error, so the caller degrades to "pass" and never
-// blocks the adapt pipeline.
-func (q *QualityChecker) Check(ctx context.Context, img []byte, mime, themeReport, specLabel string) (QualityVerdict, error) {
+// description (e.g. "TapTap 推广图 1920×1080"). fusion=true adds the four
+// character-fusion judgments (base/harmony/no-extra/identity) and applies their
+// red lines. It returns the server-evaluated verdict. On any error (network,
+// timeout, unparseable output) it returns a passing verdict with the error, so
+// the caller degrades to "pass" and never blocks the pipeline.
+func (q *QualityChecker) Check(ctx context.Context, img []byte, mime, themeReport, specLabel string, fusion bool) (QualityVerdict, error) {
 	pass := QualityVerdict{Pass: true, Compliant: true}
 	if q == nil {
 		return pass, nil
@@ -165,6 +198,9 @@ func (q *QualityChecker) Check(ctx context.Context, img []byte, mime, themeRepor
 
 	var ctxText strings.Builder
 	ctxText.WriteString(qualityPrompt)
+	if fusion {
+		ctxText.WriteString(fusionDimsPrompt)
+	}
 	if specLabel != "" {
 		ctxText.WriteString("\n\n【目标规格】" + specLabel)
 	}
@@ -185,7 +221,7 @@ func (q *QualityChecker) Check(ctx context.Context, img []byte, mime, themeRepor
 		return pass, err
 	}
 
-	verdict, err := q.evaluate(content)
+	verdict, err := q.evaluate(content, fusion)
 	if err != nil {
 		// Log the model's raw reply so a degrade-to-pass (e.g. non-JSON output) is
 		// diagnosable from the log file rather than silently swallowed.
@@ -204,6 +240,11 @@ func (q *QualityChecker) Check(ctx context.Context, img []byte, mime, themeRepor
 		Int("canvas_fill", verdict.DimScores.CanvasFill).
 		Int("key_elements_fidelity", verdict.DimScores.KeyElementsFidelity).
 		Int("ad_appeal", verdict.DimScores.AdAppeal).
+		Int("base_fidelity", verdict.DimScores.BaseFidelity).
+		Int("fusion_harmony", verdict.DimScores.FusionHarmony).
+		Int("identity_fidelity", verdict.DimScores.IdentityFidelity).
+		Bool("no_extra_subjects", verdict.DimScores.NoExtraSubjects).
+		Bool("fusion", fusion).
 		Msg("quality gate evaluated")
 	return verdict, nil
 }
@@ -345,7 +386,7 @@ func (q *QualityChecker) askGemini(ctx context.Context, prompt string, img []byt
 // evaluate parses the model's JSON content and applies the compliance red line
 // and score threshold to produce the final verdict. The model's own wording is
 // never trusted as the verdict — only its structured scores.
-func (q *QualityChecker) evaluate(content string) (QualityVerdict, error) {
+func (q *QualityChecker) evaluate(content string, fusion bool) (QualityVerdict, error) {
 	js := extractJSON(content)
 	if js == "" {
 		return QualityVerdict{Pass: true, Compliant: true}, fmt.Errorf("quality: no JSON in output")
@@ -366,12 +407,47 @@ func (q *QualityChecker) evaluate(content string) (QualityVerdict, error) {
 	v.DimScores.CanvasFill = rv.Scores.CanvasFill
 	v.DimScores.KeyElementsFidelity = rv.Scores.KeyElementsFidelity
 	v.DimScores.AdAppeal = rv.Scores.AdAppeal
+	if fusion {
+		v.DimScores.BaseFidelity = rv.Fusion.BaseFidelity
+		v.DimScores.FusionHarmony = rv.Fusion.FusionHarmony
+		v.DimScores.IdentityFidelity = rv.Fusion.IdentityFidelity
+		v.DimScores.NoExtraSubjects = rv.Fusion.NoExtraSubjects
+	}
 	// Compliance is a hard red line: a violation fails regardless of score.
 	if !rv.Compliance.Pass {
 		v.Pass = false
 		v.Reasons = append(v.Reasons, "合规红线")
 		v.Reasons = append(v.Reasons, rv.Compliance.Violations...)
 		return v, nil
+	}
+	// Fusion red lines (only for character-fusion products): the base image must
+	// stay the truth source, no extra subjects may be hallucinated, and the fused
+	// character's identity must be faithful. Each is a hard red line that fails
+	// regardless of the weighted total. fusion_harmony is a soft threshold handled
+	// after the shared red lines (it triggers a regenerate via Pass=false too).
+	if fusion {
+		const fusionDimMin = 60 // base/identity hard-redline floor
+		const fusionHarmonyMin = 60
+		if rv.Fusion.BaseFidelity > 0 && rv.Fusion.BaseFidelity < fusionDimMin {
+			v.Pass = false
+			v.Reasons = append(v.Reasons, "底图风格/文案被参照图覆盖或走样")
+			return v, nil
+		}
+		if !rv.Fusion.NoExtraSubjects {
+			v.Pass = false
+			v.Reasons = append(v.Reasons, "凭空多生了参照图/底图之外的角色")
+			return v, nil
+		}
+		if rv.Fusion.IdentityFidelity > 0 && rv.Fusion.IdentityFidelity < fusionDimMin {
+			v.Pass = false
+			v.Reasons = append(v.Reasons, "融入角色身份走样或底图主体丢失")
+			return v, nil
+		}
+		if rv.Fusion.FusionHarmony > 0 && rv.Fusion.FusionHarmony < fusionHarmonyMin {
+			v.Pass = false
+			v.Reasons = append(v.Reasons, "角色与底图融合突兀（光照/色温/边缘/比例不协调）")
+			return v, nil
+		}
 	}
 	// Key-elements fidelity is a hard red line: missing subject/LOGO or rewritten
 	// text fails regardless of the weighted total score (0 disables the check).

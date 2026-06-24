@@ -164,7 +164,7 @@ func (s *Service) SetOutpainter(p Provider) { s.outpainter = p }
 // kept as a local interface so the generation package does not import vision.
 type QualityChecker interface {
 	Configured() bool
-	Check(ctx context.Context, img []byte, mime, themeReport, specLabel string) (QualityVerdict, error)
+	Check(ctx context.Context, img []byte, mime, themeReport, specLabel string, fusion bool) (QualityVerdict, error)
 }
 
 // PixelChecker performs fast algorithmic pre-checks (blur + border fill) before
@@ -288,6 +288,12 @@ func isQualityGatedKind(kind EditKind) bool {
 		return true
 	}
 	return false
+}
+
+// fusionGatedKind reports whether the intent is a character fusion, so the
+// quality gate runs its fusion-specific judgments (base/harmony/no-extra/identity).
+func fusionGatedKind(kind EditKind) bool {
+	return kind == EditCharacter || kind == EditCharacterAdd
 }
 
 // qualitySpecLabel builds the specLabel for the quality checker.
@@ -450,20 +456,47 @@ type GenerateParams struct {
 }
 
 // primaryAndExtras resolves the effective reference list: the primary asset id
-// (drives palette/size/parent) plus any additional reference ids, capped at
+// (drives palette/size/parent and is sent as the provider's SourceImage) plus
+// any additional reference ids (sent as ReferenceImages), capped at
 // MaxReferenceImages. Returns ("", nil) when there is no reference at all.
+//
+// When SourceAssetID is set (the "把图X放进图Z / 在图Z基础上修改" case) it IS the
+// primary — the base image being edited on top of — and every ReferenceAssetID
+// is an extra. A non-empty ReferenceAssetIDs must NOT override the source: doing
+// so dropped the base image entirely, so an "add character from 图X onto 图Z"
+// edit only ever saw 图X and the model invented a character on it instead of
+// compositing onto 图Z. Only when there is no source do the references stand on
+// their own (the "根据图X图Y生成新图" case), with the first as the anchor.
 func (p GenerateParams) primaryAndExtras() (string, []string) {
-	refs := p.ReferenceAssetIDs
-	if len(refs) == 0 && p.SourceAssetID != "" {
-		refs = []string{p.SourceAssetID}
+	var primary string
+	var extras []string
+	if p.SourceAssetID != "" {
+		primary = p.SourceAssetID
+		extras = p.ReferenceAssetIDs
+	} else if len(p.ReferenceAssetIDs) > 0 {
+		primary = p.ReferenceAssetIDs[0]
+		extras = p.ReferenceAssetIDs[1:]
 	}
-	if len(refs) > MaxReferenceImages {
-		refs = refs[:MaxReferenceImages]
-	}
-	if len(refs) == 0 {
+	if primary == "" {
 		return "", nil
 	}
-	return refs[0], refs[1:]
+	// Drop any extra that duplicates the primary (or an earlier extra) so the
+	// same image is never sent twice — e.g. the model echoing source_asset_id
+	// back inside reference_asset_ids.
+	seen := map[string]bool{primary: true}
+	deduped := make([]string, 0, len(extras))
+	for _, id := range extras {
+		if id == "" || seen[id] {
+			continue
+		}
+		seen[id] = true
+		deduped = append(deduped, id)
+	}
+	// Cap the total image count (primary + extras) at MaxReferenceImages.
+	if len(deduped) > MaxReferenceImages-1 {
+		deduped = deduped[:MaxReferenceImages-1]
+	}
+	return primary, deduped
 }
 
 // Start creates a task, kicks off async generation, and returns the task id
@@ -710,6 +743,14 @@ func (s *Service) run(ctx context.Context, taskID string, p GenerateParams) {
 		refCount++
 	}
 	p.Slots.RefCount = refCount
+	// FusionBase: a character-fusion edit (change_character / add_character) that
+	// edits ON TOP OF a base image (SourceAssetID) AND pulls in separate reference
+	// character(s) — the "把图2、图3的角色融到图1" case. The prompt then pins the base
+	// as the truth source for style/copy/intent and treats references as the
+	// character's identity only. Source-less generation or a pure description-based
+	// swap (no extra refs) leaves it false.
+	p.Slots.FusionBase = (p.Slots.Kind == EditCharacter || p.Slots.Kind == EditCharacterAdd) &&
+		p.SourceAssetID != "" && len(extraImages) > 0
 	effectiveCfg := s.defaultImageProvider
 	if p.ProviderOverride != nil {
 		effectiveCfg = *p.ProviderOverride
@@ -1029,7 +1070,7 @@ func (s *Service) run(ctx context.Context, taskID string, p GenerateParams) {
 		})
 		specLabel := qualitySpecLabel(p, adaptW, adaptH)
 		reviewCtx, reviewCancel := context.WithTimeout(ctx, 35*time.Second)
-		verdict, qerr := s.quality.Check(reviewCtx, out.Data, out.Mime, p.Slots.ThemeReport, specLabel)
+		verdict, qerr := s.quality.Check(reviewCtx, out.Data, out.Mime, p.Slots.ThemeReport, specLabel, fusionGatedKind(p.Slots.Kind))
 		reviewCancel()
 		if qerr != nil {
 			applog.From(ctx).Warn().Str("event", "gen.review_skipped").Str("task", taskID).Err(qerr).Msg("quality gate degraded to pass")
@@ -1079,7 +1120,7 @@ func (s *Service) run(ctx context.Context, taskID string, p GenerateParams) {
 	if isQualityGatedKind(p.Slots.Kind) && p.Attempt == 1 && s.quality != nil && s.quality.Configured() && p.FirstAttemptData != nil {
 		specLabel := qualitySpecLabel(p, adaptW, adaptH)
 		recheckCtx, recheckCancel := context.WithTimeout(ctx, 35*time.Second)
-		regenVerdict, _ := s.quality.Check(recheckCtx, out.Data, out.Mime, p.Slots.ThemeReport, specLabel)
+		regenVerdict, _ := s.quality.Check(recheckCtx, out.Data, out.Mime, p.Slots.ThemeReport, specLabel, fusionGatedKind(p.Slots.Kind))
 		recheckCancel()
 		first := bestOfVerdict{pass: p.FirstAttemptPass, keyElem: p.FirstAttemptKeyElem, total: p.FirstAttemptTotal}
 		regen := bestOfVerdict{pass: regenVerdict.Pass, keyElem: regenVerdict.KeyElementsFidelity, total: regenVerdict.Total}
@@ -1135,7 +1176,7 @@ func (s *Service) run(ctx context.Context, taskID string, p GenerateParams) {
 	if isQualityGatedKind(p.Slots.Kind) && p.Attempt == 2 && s.quality != nil && s.quality.Configured() && p.FirstAttemptData != nil {
 		specLabel := qualitySpecLabel(p, adaptW, adaptH)
 		recheckCtx, recheckCancel := context.WithTimeout(ctx, 35*time.Second)
-		regenVerdict, _ := s.quality.Check(recheckCtx, out.Data, out.Mime, p.Slots.ThemeReport, specLabel)
+		regenVerdict, _ := s.quality.Check(recheckCtx, out.Data, out.Mime, p.Slots.ThemeReport, specLabel, fusionGatedKind(p.Slots.Kind))
 		recheckCancel()
 		// Pick the best among first, second, and current regen.
 		first := bestOfVerdict{pass: p.FirstAttemptPass, keyElem: p.FirstAttemptKeyElem, total: p.FirstAttemptTotal}

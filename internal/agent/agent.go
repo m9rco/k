@@ -644,6 +644,15 @@ func (o *Orchestrator) Handle(ctx context.Context, sessionID, userText string, l
 	} else if pc, ok := o.cfg.ResolveImageModel(config.SceneImage, "gemini-3-pro-image"); ok {
 		deps.AdaptModelOverride = &pc
 	}
+	// Request-scoped routing: edit_image's character-fusion intents
+	// (change_character / add_character) default to gpt-image-2 as well, for the
+	// same subject/composition-preservation reason — fusing a reference
+	// character into a base image must keep the base's style/copy/intent and the
+	// character's identity faithful. Same fallback chain and graceful-degrade
+	// semantics as adapt; nil leaves fusionProvider falling through to
+	// ImageOverride. Other edit intents (change_background/change_text) are
+	// unaffected — editProvider only consults this for the two fusion kinds.
+	deps.FusionModelOverride = deps.AdaptModelOverride
 	// Vision pre-stage for platform adaptation (publish → analyze → theme inject).
 	deps.RefPublisher = o.refPublisher
 	deps.VisionAnalyzer = o.visionAnalyzer

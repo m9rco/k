@@ -111,6 +111,15 @@ type Slots struct {
 	// clause so the model treats the first image as the sole source of truth and
 	// the rest as style/element hints only (design D2/D3). 0/1 omits it.
 	RefCount int
+	// FusionBase is set true for character-fusion edits (change_character /
+	// add_character) that have BOTH a base image being edited on top of AND
+	// separate reference image(s) supplying the character(s) — i.e. the
+	// "把图2、图3的角色融到图1" case. It makes the prompt declare the base (图1) the
+	// single source of truth for style/copy/marketing-intent/composition/palette
+	// and the references the source only for the character's identity, so the
+	// fusion keeps the base intact and does not import the references' style/copy.
+	// False for source-less generation or a pure description-based character swap.
+	FusionBase bool
 	// ProviderSupportsTransparency reports whether the resolved image adapter can
 	// produce a real transparent background. gpt-image-2 cannot, so a 透明底 size
 	// note is rewritten to a clean-cutout phrasing instead of being injected
@@ -197,6 +206,14 @@ const (
 	// textToImageContext is the lighter domain framing for source-less generation
 	// (no anchor to preserve, so no PRESERVE/anchor clause).
 	textToImageContext = "CONTEXT: Produce a promotional marketing illustration for a video game. Keep it coherent and production-ready; do not add unrequested text, watermarks or logos."
+
+	// fusionBaseClause is appended to the MODIFY body of character-fusion edits
+	// that have a base image plus separate reference characters (Slots.FusionBase).
+	// It pins the base image as the single source of truth for everything except
+	// the imported character's identity, so the model rebuilds the character in
+	// the base's style rather than collaging the reference image (with its own
+	// style/copy/background) on top of the base.
+	fusionBaseClause = " The BASE image (the one being edited) is the single source of truth for the overall art style, marketing intent, on-image copy/title, composition, background and color palette — keep ALL of these from the base image exactly as they are. The reference image(s) are the source ONLY for the character(s) being fused in: take the character's identity (appearance, outfit, signature features) from the reference, but RE-RENDER that character in the base image's art style, lighting, color tone and scale so it belongs in the scene — do NOT paste it in, and do NOT import the reference's style, background, copy or palette. Do NOT add any character or subject that is not in the base or the reference image(s)."
 )
 
 // transparencyRewrite replaces a 透明底/透明背景 size note when the resolved
@@ -259,6 +276,9 @@ func BuildPrompt(slots Slots, palette []PaletteColor) (string, error) {
 		b.WriteString("Replace the main character in the image with: ")
 		b.WriteString(desc)
 		b.WriteString(". Preserve the existing scene and composition.")
+		if slots.FusionBase {
+			b.WriteString(fusionBaseClause)
+		}
 	case EditCharacterAdd:
 		desc := Sanitize(slots.CharacterDesc)
 		if desc == "" {
@@ -267,6 +287,9 @@ func BuildPrompt(slots Slots, palette []PaletteColor) (string, error) {
 		b.WriteString("Add a new character to the image while keeping the existing character(s) and subject unchanged: ")
 		b.WriteString(desc)
 		b.WriteString(". Place the new character naturally beside the existing one(s), preserving the original scene, composition and the existing subject; do NOT replace or remove anyone already in the image.")
+		if slots.FusionBase {
+			b.WriteString(fusionBaseClause)
+		}
 	case EditBackground:
 		desc := Sanitize(slots.BackgroundDesc)
 		if desc == "" {
@@ -280,9 +303,13 @@ func BuildPrompt(slots Slots, palette []PaletteColor) (string, error) {
 		if txt == "" {
 			return "", fmt.Errorf("text content required")
 		}
-		b.WriteString("Replace the on-image text/copy with: \"")
+		b.WriteString("Replace ONLY the marketing copy/slogan text on the image with: \"")
 		b.WriteString(txt)
-		b.WriteString("\". Match the existing typographic style and placement.")
+		b.WriteString("\". Match the existing typographic style and placement. ")
+		// A game/brand LOGO is often a stylized wordmark — without this fence the
+		// model treats it as on-image text and replaces it too. Pin the logo and
+		// every non-copy element so only the promotional copy changes.
+		b.WriteString("KEEP the game/brand LOGO (including any logo that is itself stylized text/wordmark), the main subject/characters, the background and every other visual element exactly as they are — do NOT remove, redraw, relocate or alter the logo or anything that is not the marketing copy being replaced.")
 	case EditIcon:
 		// Icon generation derives a standalone app/game icon from the source. The
 		// optional user hint is a sanitized descriptive fragment only.
