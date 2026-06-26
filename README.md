@@ -6,6 +6,8 @@
 
 ## 架构
 
+> 📐 深度架构与技术细节见 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)：系统全景、端到端数据流、各子系统深潜、关键工程卡点与决策复盘、垂类护城河（含 mermaid 架构图/流程图）。
+
 ```
 cmd/server          单二进制入口（HTTP + 优雅退出 + embed 前端）
 internal/config     集中配置（env + 平台尺寸 JSON）
